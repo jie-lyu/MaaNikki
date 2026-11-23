@@ -57,6 +57,16 @@ class HostImportTests(unittest.TestCase):
         backends = [name for name in self.result["host_modules"] if name not in ("host",)]
         self.assertEqual(backends, [])
 
+    @unittest.skipUnless(os.name == "nt", "the Win32 backend only imports on Windows")
+    def test_win32_overlay_backend_imports(self):
+        # Registration never loads the overlays; import them here so a broken move fails before a HUD opens.
+        sys.path.insert(0, str(ROOT / "agent"))
+        from host import overlay_backend
+        overlays = overlay_backend()
+        self.assertIsNotNone(overlays)
+        for name in ("GameHudOverlay", "OverlayWindow", "RouteMinimapOverlay"):
+            self.assertTrue(callable(getattr(overlays, name)), name)
+
     def test_registered_handlers_match_snapshot(self):
         expected = json.loads(FIXTURE.read_text(encoding="utf-8"))
         self.assertEqual(self.result["actions"], expected["actions"])

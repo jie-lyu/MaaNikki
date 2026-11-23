@@ -165,6 +165,8 @@ python scripts/run_offline_tests.py --python python/python.exe
 
 工作流还会把准备好的运行环境中由下载生成的文件（`python/`、`maafw/` 等）写入附件中的 `windows-runtime-generated.txt`。该清单已提交为 `scripts/fixtures/windows-runtime-generated.txt`，这些文件按清单逐一比对，缺少清单文件也会使检查失败；锁定的下载变化后，以工作流附件中的新清单核对后更新。运行环境比对失败时，工作流仍会继续运行离线测试并上传附件，最后再判定失败。`MaaNikki.exe` 与依赖许可证只在发布构建中生成，不在此工作流的比对范围内。
 
+拉取请求同时触发「Test macOS agent imports」工作流：在 macOS 上安装锁定的 Python 依赖，确认 agent 导入并注册全部动作与识别时不会加载 Windows 后端（`agent/host/win32`），并运行 `scripts/test_host.py` 与 `scripts/test_app_paths.py`。
+
 ## 源码公开范围
 
 源码包含 `agent/`、`client/`、`resource/`、`tasks/`、`options/`、`interface.json`，以及依赖清单、构建脚本、工作流和许可说明。`python scripts/release.py check` 会输出 `.build/source-files.txt` 供核对。

@@ -378,10 +378,13 @@
   "test_host_imports.py": {
    "tests": [
     "HostImportTests.test_registered_handlers_match_snapshot",
-    "HostImportTests.test_registration_loads_no_platform_backend"
+    "HostImportTests.test_registration_loads_no_platform_backend",
+    "HostImportTests.test_win32_overlay_backend_imports"
    ],
    "known_failures": [],
-   "skips": []
+   "skips": [
+    "HostImportTests.test_win32_overlay_backend_imports"
+   ]
   },
   "test_meteor.py": {
    "tests": [
