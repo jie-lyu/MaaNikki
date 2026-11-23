@@ -370,10 +370,10 @@ index 0000000..465aaf7
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
 new file mode 100644
-index 0000000..58e1ab0
+index 0000000..5a6a485
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
-@@ -0,0 +1,668 @@
+@@ -0,0 +1,673 @@
 +#include "HybridInput.h"
 +
 +#include "InputUtils.h"
@@ -962,13 +962,18 @@ index 0000000..58e1ab0
 +        platform_->sleep_ms(std::max(1, std::min(kHoverSliceMs, static_cast<int>(std::ceil(remaining)))));
 +        lock.lock();
 +    }
++    if (scroll_cancelled_) {
++        // Cancelled while settling: put the cursor back now instead of after another hit test.
++        scroll_pending_ = scroll_cancelled_ = false;
++        return finish("cancelled by a stop during the hover");
++    }
 +    CheckTiming second;
 +    lock.unlock();
 +    auto settled = checked_point(target->first, target->second, "scroll", &second);
 +    lock.lock();
 +    scroll_pending_ = false;
 +    if (std::exchange(scroll_cancelled_, false)) {
-+        return finish("cancelled by a stop during the hover");
++        return finish("cancelled by a stop during the second check");
 +    }
 +    if (!settled) {
 +        return finish("second check refused");
@@ -1730,10 +1735,10 @@ index 0000000..c17723a
 +MAA_CTRL_UNIT_NS_END
 diff --git a/test/maanikki/HybridInputTest.mm b/test/maanikki/HybridInputTest.mm
 new file mode 100644
-index 0000000..c642786
+index 0000000..59b1b4d
 --- /dev/null
 +++ b/test/maanikki/HybridInputTest.mm
-@@ -0,0 +1,657 @@
+@@ -0,0 +1,660 @@
 +// Deterministic tests for HybridInput over a fake InputPlatform: orderings a real desktop cannot
 +// reproduce on demand (a stop racing a press), and every refusal path. Nothing reaches the system.
 +// Built only with -DMAANIKKI_UNIT_TESTS=ON; never part of the shipped unit.
@@ -2314,8 +2319,11 @@ index 0000000..c642786
 +            std::thread([&] { t.input->inactive(); }).join();
 +        }
 +    };
++    int hit_tests = 0;
++    t.platform->on_hit_test = [&] { ++hit_tests; };
 +    CHECK(!t.input->touch_move(0, 100, 200, 0));
 +    CHECK(!t.input->scroll(0, 120));
++    CHECK(hit_tests == 1); // no second hit test once cancelled
 +    CHECK((t.platform->take() == Events { "move@50,100", "warp@7,7" }));
 +}
 +
