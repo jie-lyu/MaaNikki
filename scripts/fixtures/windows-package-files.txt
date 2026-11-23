@@ -111,6 +111,7 @@ agent/host/win32/input.py
 agent/host/win32/layered_surface.py
 agent/host/win32/map_overlay.py
 agent/host/win32/overlays.py
+agent/host/win32/process.py
 agent/host/win32/route_overlay.py
 agent/host/win32/target.py
 agent/host/win32/window_layout.py

@@ -101,6 +101,23 @@ class SelectionTests(unittest.TestCase):
         module.set_clipboard_text.assert_called_once_with("CODE")
         module.credentials.assert_called_once_with("login.bin")
 
+    def test_process_helpers_are_windows_only_and_delegate_unchanged(self):
+        import runtime_threads
+        with patch.object(runtime_threads, "platform_backend", return_value=None), \
+                patch("host.win32.process.start_parent_exit_watchdog") as watchdog, \
+                patch("host.win32.process.cap_loaded_maafw_opencv") as cap:
+            self.assertFalse(runtime_threads.start_parent_exit_watchdog(print))
+            self.assertFalse(runtime_threads.cap_loaded_maafw_opencv(2))
+            watchdog.assert_not_called()
+            cap.assert_not_called()
+        with patch.object(runtime_threads, "platform_backend", return_value="win32"), \
+                patch("host.win32.process.start_parent_exit_watchdog", return_value=True) as watchdog, \
+                patch("host.win32.process.cap_loaded_maafw_opencv", return_value=True) as cap:
+            self.assertTrue(runtime_threads.start_parent_exit_watchdog(print))
+            self.assertTrue(runtime_threads.cap_loaded_maafw_opencv(3))
+        watchdog.assert_called_once_with(print)
+        cap.assert_called_once_with(3)
+
     def test_win32_capabilities(self):
         capabilities = host.capabilities("win32")
         self.assertEqual(capabilities.backend, "win32")

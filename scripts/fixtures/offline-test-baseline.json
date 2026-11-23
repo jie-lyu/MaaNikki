@@ -386,6 +386,7 @@
     "SelectionTests.test_backend_follows_platform_and_controller_type",
     "SelectionTests.test_non_windows_host_rejects_with_the_previous_message",
     "SelectionTests.test_optional_adapters_follow_capabilities",
+    "SelectionTests.test_process_helpers_are_windows_only_and_delegate_unchanged",
     "SelectionTests.test_task_code_reaches_clipboard_and_credentials_through_the_host",
     "SelectionTests.test_unreadable_info_and_invalid_window",
     "SelectionTests.test_win32_capabilities",

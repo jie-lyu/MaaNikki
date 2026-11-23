@@ -21,11 +21,15 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "scripts/fixtures/agent-registrations.json"
 
 PROBE = r"""
-import importlib.abc, json, runpy, sys
+import importlib.abc, json, os, runpy, sys
+
+# Process start-up helpers (OpenCV pool cap, parent-exit watchdog) legitimately run while
+# main.py is imported on Windows; nothing else from a backend may load during registration.
+STARTUP = {"host.win32", "host.win32.process"} if os.name == "nt" else set()
 
 class BlockBackends(importlib.abc.MetaPathFinder):
     def find_spec(self, name, path=None, target=None):
-        if name == "host.win32" or name.startswith("host.win32."):
+        if (name == "host.win32" or name.startswith("host.win32.")) and name not in STARTUP:
             raise ImportError(f"platform backend imported during registration: {name}")
         return None
 
@@ -55,7 +59,9 @@ class HostImportTests(unittest.TestCase):
         cls.result = registrations()
 
     def test_registration_loads_no_platform_backend(self):
-        backends = [name for name in self.result["host_modules"] if name not in ("host",)]
+        # On Windows only the process start-up helpers may load; elsewhere nothing from a backend.
+        allowed = {"host", "host.win32", "host.win32.process"} if os.name == "nt" else {"host"}
+        backends = [name for name in self.result["host_modules"] if name not in allowed]
         self.assertEqual(backends, [])
 
     @unittest.skipUnless(os.name == "nt", "the Win32 backend only imports on Windows")
