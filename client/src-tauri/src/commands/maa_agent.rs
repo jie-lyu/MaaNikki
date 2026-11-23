@@ -981,6 +981,18 @@ pub async fn start_tasks_impl(
         for (idx, task) in tasks.iter().enumerate() {
             debug!("[start_tasks] Preparing task {}: entry={}", idx, task.entry);
 
+            if let Some(reason) = super::utils::platform_refuses_task(&task.entry) {
+                warn!("[start_tasks] Refusing task on this platform: {}", task.entry);
+                emit_agent_output(&app, &instance_id, "stderr", &reason);
+                if let Some(sel_id) = &task.selected_task_id {
+                    instance
+                        .task_run_state
+                        .statuses
+                        .insert(sel_id.clone(), "failed".to_string());
+                }
+                continue;
+            }
+
             info!(
                 "[start_tasks] Calling post_task: entry={}, override_len={}",
                 task.entry,

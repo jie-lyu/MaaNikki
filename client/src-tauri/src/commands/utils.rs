@@ -280,6 +280,50 @@ pub fn apply_agent_root_env(cmd: &mut std::process::Command) {
 #[cfg(target_os = "macos")]
 const MACOS_DATA_DIR_NAME: &str = "MaaNikki";
 
+/// macOS 测试预览版允许运行的任务入口清单（与 agent 共用一份）。
+#[cfg(target_os = "macos")]
+const MACOS_PREVIEW_TASKS: &str = "agent/host/macos/preview_tasks.json";
+
+/// 判断清单 JSON（`{"entries": [...]}`）是否包含该任务入口；清单无法解析时报错。
+pub fn preview_task_allowed(manifest_json: &str, entry: &str) -> Result<bool, String> {
+    let manifest: serde_json::Value =
+        serde_json::from_str(manifest_json).map_err(|e| format!("任务清单无法解析: {}", e))?;
+    let entries = manifest
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .ok_or("任务清单缺少 entries")?;
+    Ok(entries.iter().any(|item| item.as_str() == Some(entry)))
+}
+
+/// 当前系统不能运行该任务入口时返回原因（直接显示给用户）；能运行时返回 None。
+///
+/// Windows 上始终放行，行为不变。macOS 只放行 agent/host/macos/preview_tasks.json 中的入口，
+/// 清单缺失或无法解析时一律拒绝。在下发任务之前检查，覆盖已保存的预设、定时运行、功能入口和
+/// MXU 内置任务（例如 MXU_LAUNCH），这些都不一定经过 agent。
+pub fn platform_refuses_task(entry: &str) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let allowed = get_exe_directory()
+            .and_then(|root| {
+                std::fs::read_to_string(root.join(MACOS_PREVIEW_TASKS)).map_err(|e| e.to_string())
+            })
+            .and_then(|json| preview_task_allowed(&json, entry));
+        match allowed {
+            Ok(true) => None,
+            Ok(false) => Some(format!(
+                "{} 暂不支持 Mac 测试预览版（只开放已验证的任务），已跳过。",
+                entry
+            )),
+            Err(e) => Some(format!("无法读取 Mac 任务清单（{}），已跳过 {}。", e, entry)),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = entry;
+        None
+    }
+}
+
 /// 获取应用数据目录
 /// - macOS: ~/Library/Application Support/MaaNikki/
 /// - Windows/Linux: exe 所在目录（保持便携式部署）
@@ -455,4 +499,24 @@ pub fn build_launch_command(
     }
 
     cmd
+}
+
+#[cfg(test)]
+mod preview_task_tests {
+    use super::preview_task_allowed;
+
+    #[test]
+    fn the_shared_manifest_parses_and_allows_only_listed_entries() {
+        let manifest = include_str!("../../../../agent/host/macos/preview_tasks.json");
+        assert_eq!(preview_task_allowed(manifest, "MaaNikki_Mailbox"), Ok(true));
+        for entry in ["MXU_LAUNCH", "MaaNikki_StartGame", "MaaNikki_Fishing", ""] {
+            assert_eq!(preview_task_allowed(manifest, entry), Ok(false), "{}", entry);
+        }
+    }
+
+    #[test]
+    fn a_broken_manifest_is_an_error() {
+        assert!(preview_task_allowed("{}", "MaaNikki_Mailbox").is_err());
+        assert!(preview_task_allowed("not json", "MaaNikki_Mailbox").is_err());
+    }
 }

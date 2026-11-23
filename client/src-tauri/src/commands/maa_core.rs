@@ -1391,6 +1391,9 @@ pub fn run_task_impl(
     pipeline_override: &str,
     selected_task_id: Option<&str>,
 ) -> Result<i64, String> {
+    if let Some(reason) = super::utils::platform_refuses_task(entry) {
+        return Err(reason);
+    }
     let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
     let instance = instances.get_mut(instance_id).ok_or("Instance not found")?;
     instance.start_generation = instance.start_generation.wrapping_add(1);
