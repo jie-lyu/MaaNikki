@@ -5,6 +5,7 @@ import ctypes
 from ctypes import wintypes
 from pathlib import Path
 import os
+import sys
 import threading
 
 
@@ -65,6 +66,17 @@ def cap_loaded_maafw_opencv(max_threads: int = 2) -> bool:
         return True
     except Exception:
         return False
+
+
+def configure_utf8_streams() -> None:
+    """Write stdout/stderr as UTF-8, replacing what cannot be encoded instead of raising."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
 
 
 def configure_worker_threads(max_threads: int = 2) -> int:

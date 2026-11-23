@@ -35,7 +35,8 @@ import registration
 loaded = sorted(name for name in sys.modules if name == "host" or name.startswith("host."))
 print(json.dumps({"actions": sorted(registration._ACTION_TYPES),
                   "recognitions": sorted(registration._RECOGNITION_TYPES),
-                  "host_modules": loaded}))
+                  "host_modules": loaded,
+                  "streams": [sys.stdout.encoding.lower(), sys.stdout.errors, sys.stderr.errors]}))
 """
 
 
@@ -66,6 +67,9 @@ class HostImportTests(unittest.TestCase):
         self.assertIsNotNone(overlays)
         for name in ("GameHudOverlay", "OverlayWindow", "RouteMinimapOverlay"):
             self.assertTrue(callable(getattr(overlays, name)), name)
+
+    def test_agent_output_is_utf8_with_replacement(self):
+        self.assertEqual(self.result["streams"], ["utf-8", "replace", "replace"])
 
     def test_registered_handlers_match_snapshot(self):
         expected = json.loads(FIXTURE.read_text(encoding="utf-8"))

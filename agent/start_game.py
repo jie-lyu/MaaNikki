@@ -20,19 +20,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app_paths import DATA_ROOT, RESOURCE_ROOT
 
 REPORT = DATA_ROOT / "logs/startup" / (datetime.now().strftime("%Y%m%d-%H%M%S-%f")+"-launch.json")
-from runtime_threads import configure_worker_threads
+from runtime_threads import configure_utf8_streams, configure_worker_threads
 
 configure_worker_threads(2)
 from file_io import write_json
 from client_config import mxu_config
 
-for _stream in (sys.stdout, sys.stderr):
-    _reconfigure = getattr(_stream, "reconfigure", None)
-    if callable(_reconfigure):
-        try:
-            _reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+configure_utf8_streams()
 
 PROGRAMS = ("InfinityNikki.exe", "X6Game.exe", "X6Game-Win64-Shipping.exe")
 

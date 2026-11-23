@@ -38,7 +38,7 @@ class Capabilities:
     foreground_input: bool = False
     background_input: bool = False
     overlay: bool = False
-    tall_window: bool = False
+    tall_window: bool = False  # 16:9 healing and the temporary tall scan window
     launch_game: bool = False
     close_game: bool = False
 
@@ -67,6 +67,9 @@ class Target(Protocol):
     def input(self) -> "InputBackend":
         """Input primitives bound to this window."""
         ...
+    def geometry(self) -> "Geometry":
+        """Capture geometry of this window."""
+        ...
 
 
 class InputBackend(Protocol):
@@ -90,7 +93,9 @@ class InputBackend(Protocol):
 class Geometry(Protocol):
     """Where the target's client area is, in screen pixels.
 
-    Pending: the Win32 implementation is still tall_window.py.
+    The Win32 implementation is host/win32/geometry.py over window_layout.py,
+    which also owns 16:9 healing and the temporary tall window behind the
+    neutral tall_window.py entry points.
     """
 
     def client_size(self) -> tuple[int, int] | None: ...

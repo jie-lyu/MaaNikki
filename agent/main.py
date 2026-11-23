@@ -11,11 +11,14 @@ os.environ["MAAFW_BINARY_PATH"] = str(RESOURCE_ROOT / "maafw")
 
 from runtime_threads import (
     cap_loaded_maafw_opencv,
+    configure_utf8_streams,
     configure_worker_threads,
     start_parent_exit_watchdog,
 )
 
 configure_worker_threads(2)
+# The agent used to get this from importing start_game through tall_window; keep it explicit.
+configure_utf8_streams()
 
 from maa.agent.agent_server import AgentServer
 from maa.tasker import Tasker

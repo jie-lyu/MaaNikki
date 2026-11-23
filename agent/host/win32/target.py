@@ -66,6 +66,11 @@ class Win32Target:
         from host.win32.input import Win32Input
         return Win32Input(self)
 
+    def geometry(self):
+        """Capture geometry of this window."""
+        from host.win32.geometry import Win32Geometry
+        return Win32Geometry(self)
+
     def exists(self) -> bool:
         return bool(self.user32.IsWindow(self.hwnd))
 
