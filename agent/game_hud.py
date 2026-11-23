@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import atexit
 import json
-import os
 import threading
 from typing import TYPE_CHECKING
 
@@ -183,7 +182,9 @@ def acquire_game_hud(
     mode_setting: str | None = None,
 ) -> "GameHudOverlay | None":
     """Return or create the per-tasker capture-excluded GameHudOverlay."""
-    if _CAPTURE_INCOMPATIBLE or os.name != "nt" or not game_hwnd:
+    from host import overlay_backend
+    overlays = overlay_backend()
+    if _CAPTURE_INCOMPATIBLE or overlays is None or not game_hwnd:
         return None
     exclude = should_exclude_from_capture(controller) if exclude_from_capture is None else bool(exclude_from_capture)
     mode = _read_hud_mode(context) if mode_setting is None else mode_setting
@@ -195,9 +196,8 @@ def acquire_game_hud(
                 return existing
             _HUD_BY_TASKER.pop(tasker_key, None)
             existing.close()
-        # The window lives in the host backend; os.name == "nt" above means the Win32 overlays exist.
-        from host import overlay_backend
-        hud = overlay_backend().GameHudOverlay(int(game_hwnd), exclude_from_capture=exclude, mode_setting=mode, tasker_key=tasker_key)
+        # The window lives in the host backend's overlay adapter.
+        hud = overlays.GameHudOverlay(int(game_hwnd), exclude_from_capture=exclude, mode_setting=mode, tasker_key=tasker_key)
         if not hud.alive():
             return None
         _HUD_BY_TASKER[tasker_key] = hud

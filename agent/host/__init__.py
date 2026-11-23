@@ -138,6 +138,17 @@ def connect_target(controller) -> Target:
     return Win32Target(info)
 
 
+def controller_supports_foreground_input(controller) -> bool:
+    """Whether the interface.json controller definition lets the agent send foreground input itself.
+
+    The rule belongs to the backend for this desktop; without one, never.
+    """
+    if platform_backend() == "win32":
+        from host.win32.controller_config import supports_foreground_inputs
+        return supports_foreground_inputs(controller)
+    return False
+
+
 def background_input_class():
     """Window-targeted input class for this desktop; raises NavigationError where there is none."""
     if platform_backend() != "win32":
@@ -145,6 +156,15 @@ def background_input_class():
         raise NavigationError("前台导航仅支持 Windows 游戏窗口。")
     from host.win32.background_input import BackgroundInput
     return BackgroundInput
+
+
+def launch_window_probes():
+    """Window liveness and responsiveness probes for the start-game pretask, or None where this
+    desktop cannot launch the game."""
+    if not capabilities(platform_backend()).launch_game:
+        return None
+    from host.win32 import launch
+    return launch
 
 
 def game_close_api():
