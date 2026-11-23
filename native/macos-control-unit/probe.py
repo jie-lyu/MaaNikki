@@ -223,8 +223,19 @@ def cmd_capture(args) -> int:
 
 # macOS virtual key codes (Carbon kVK_ANSI_M, kVK_ANSI_W).
 KEY_M, KEY_W = 46, 13
-# Back button of the big map, in 1280x720 game coordinates (planning-stage measurement).
+# Back button of the big map, in 1280x720 game coordinates (planning-stage measurement), and a
+# 40x40 crop of it from a fullscreen-window capture. It scored 1.0 on the open map and 0.45-0.57 in
+# the open world on the device.
 MAP_BACK = (46, 31)
+MAP_BACK_LANDMARK = Path(__file__).resolve().parent / "fixtures" / "map-back-button.png"
+MAP_OPEN_SCORE, MAP_CLOSED_SCORE = 0.85, 0.75
+
+
+def _map_back_score(image) -> float:
+    import cv2
+
+    template = cv2.imread(str(MAP_BACK_LANDMARK))
+    return round(float(cv2.matchTemplate(image[0:100, 0:140], template, cv2.TM_CCOEFF_NORMED).max()), 3)
 
 
 def _changed(before, after) -> float:
@@ -420,22 +431,26 @@ def cmd_input_check(args) -> int:
         sys.exit(1)
 
     start = frame("start")
+    if _map_back_score(start) >= MAP_CLOSED_SCORE:
+        fail("the map back button is already visible; start in the open world")
     # Held ~80 ms: the game reads input once per frame and missed a 12 ms press on the device.
     sent = controller.post_key_down(KEY_M).wait().succeeded
     time.sleep(0.08)
     sent = controller.post_key_up(KEY_M).wait().succeeded and sent
     time.sleep(1.5)
     map_open = frame("after-key-m")
-    steps.append({"step": "key M", "sent": sent, "changed_pct": _changed(start, map_open)})
-    if not sent or steps[-1]["changed_pct"] < 50:
-        fail("M was refused or the big map did not open; not clicking")
+    steps.append({"step": "key M", "sent": sent, "changed_pct": _changed(start, map_open),
+                  "map_back_score": _map_back_score(map_open)})
+    # Only the map's own back button authorizes the click, not just a large change.
+    if not sent or steps[-1]["map_back_score"] < MAP_OPEN_SCORE:
+        fail("M was refused or the big map's back button is not where the click would go; not clicking")
 
     sent = controller.post_click(*MAP_BACK).wait().succeeded
     time.sleep(1.5)
     map_closed = frame("after-click-back")
     steps.append({"step": "click map back", "sent": sent, "changed_pct": _changed(map_open, map_closed),
-                  "vs_start_pct": _changed(start, map_closed)})
-    if not sent or steps[-1]["changed_pct"] < 50:
+                  "vs_start_pct": _changed(start, map_closed), "map_back_score": _map_back_score(map_closed)})
+    if not sent or steps[-1]["map_back_score"] >= MAP_CLOSED_SCORE:
         fail("the click was refused or the map is still open")
 
     if args.release:
