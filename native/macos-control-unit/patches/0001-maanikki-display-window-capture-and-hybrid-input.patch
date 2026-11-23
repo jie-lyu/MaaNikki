@@ -211,10 +211,10 @@ index 344f217..2744be9 100644
 +endif()
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.h b/source/MaaMacOSControlUnit/Input/HybridInput.h
 new file mode 100644
-index 0000000..e47fd92
+index 0000000..465aaf7
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.h
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,153 @@
 +#pragma once
 +
 +#include <map>
@@ -315,6 +315,7 @@ index 0000000..e47fd92
 +        CGPoint point = CGPointZero;
 +        CGMouseButton button = kCGMouseButtonLeft;
 +        bool scene = false; // pressed where the cursor was, never moved
++        double pressed_at_ms = 0;
 +    };
 +
 +    // Where a click check spends its time (milliseconds), for the accepted-press log line.
@@ -331,6 +332,10 @@ index 0000000..e47fd92
 +    std::string restore_cursor(CGPoint point);
 +
 +    bool scene_press(std::unique_lock<std::mutex>& lock, int contact, CGEventType type, CGMouseButton button);
++    // A release from the task's own thread waits until the press has lasted kMinHoldMs: the game reads
++    // input once per frame and missed a 12 ms key press on the device. Releases from the stopping
++    // thread never wait.
++    void hold_at_least(std::unique_lock<std::mutex>& lock, double pressed_at_ms);
 +    bool touch_up_locked(int contact);
 +    bool key_up_locked(int key);
 +
@@ -347,6 +352,7 @@ index 0000000..e47fd92
 +    std::thread::id worker_;
 +    std::map<int, HeldContact> held_contacts_;
 +    std::map<int, pid_t> held_keys_; // key -> process the press went to
++    std::map<int, double> key_pressed_at_ms_; // key -> platform time of its latest accepted press
 +    std::set<int> cancelled_contacts_;
 +    std::set<int> cancelled_keys_;
 +    CGPoint saved_cursor_ = { NAN, NAN };
@@ -364,10 +370,10 @@ index 0000000..e47fd92
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
 new file mode 100644
-index 0000000..7bf3515
+index 0000000..58e1ab0
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
-@@ -0,0 +1,642 @@
+@@ -0,0 +1,668 @@
 +#include "HybridInput.h"
 +
 +#include "InputUtils.h"
@@ -405,6 +411,9 @@ index 0000000..7bf3515
 +    int lines = amount / 120;
 +    return lines != 0 ? lines : (amount > 0 ? 1 : -1);
 +}
++
++// Shortest key or scene-button press: longer than a game frame even when the frame rate drops.
++constexpr int kMinHoldMs = 80;
 +
 +// Time for the window server to route a posted wheel to the window under the cursor before the
 +// cursor is moved back.
@@ -720,7 +729,7 @@ index 0000000..7bf3515
 +    if (!checked || !platform_->post_mouse(type, *checked, button)) {
 +        return false;
 +    }
-+    held_contacts_[contact] = { *checked, button, true };
++    held_contacts_[contact] = { *checked, button, true, platform_->now_ms() };
 +    LogInfo << "scene press accepted" << VAR(contact) << VAR(checked->x) << VAR(checked->y) << "total_ms=" << ms_since(started);
 +    return true;
 +}
@@ -758,9 +767,27 @@ index 0000000..7bf3515
 +    return true;
 +}
 +
++void HybridInput::hold_at_least(std::unique_lock<std::mutex>& lock, double pressed_at_ms)
++{
++    if (std::this_thread::get_id() != worker_) {
++        return;
++    }
++    const double remaining = pressed_at_ms + kMinHoldMs - platform_->now_ms();
++    if (remaining > 0) {
++        lock.unlock();
++        platform_->sleep_ms(static_cast<int>(std::ceil(remaining)));
++        lock.lock();
++    }
++}
++
 +bool HybridInput::touch_up(int contact)
 +{
-+    std::lock_guard lock(mutex_);
++    std::unique_lock lock(mutex_);
++    // Scene buttons are pulsed by the agent (50 ms by default): give the game a frame to see them.
++    // A click's press already lasted the hover settle and the core's own 50 ms.
++    if (auto held = held_contacts_.find(contact); held != held_contacts_.end() && held->second.scene) {
++        hold_at_least(lock, held->second.pressed_at_ms);
++    }
 +    return touch_up_locked(contact);
 +}
 +
@@ -852,14 +879,19 @@ index 0000000..7bf3515
 +        return false;
 +    }
 +    held_keys_.emplace(key, *pid);
++    key_pressed_at_ms_[key] = platform_->now_ms();
 +    return true;
 +}
 +
 +bool HybridInput::key_up(int key)
 +{
-+    std::lock_guard lock(mutex_);
++    std::unique_lock lock(mutex_);
 +    if (!valid_key(key)) {
 +        return false;
++    }
++    // The core releases a ClickKey 50 ms after its press.
++    if (auto pressed = key_pressed_at_ms_.find(key); pressed != key_pressed_at_ms_.end() && held_keys_.contains(key)) {
++        hold_at_least(lock, pressed->second);
 +    }
 +    return key_up_locked(key);
 +}
@@ -1698,10 +1730,10 @@ index 0000000..c17723a
 +MAA_CTRL_UNIT_NS_END
 diff --git a/test/maanikki/HybridInputTest.mm b/test/maanikki/HybridInputTest.mm
 new file mode 100644
-index 0000000..405311a
+index 0000000..c642786
 --- /dev/null
 +++ b/test/maanikki/HybridInputTest.mm
-@@ -0,0 +1,631 @@
+@@ -0,0 +1,657 @@
 +// Deterministic tests for HybridInput over a fake InputPlatform: orderings a real desktop cannot
 +// reproduce on demand (a stop racing a press), and every refusal path. Nothing reaches the system.
 +// Built only with -DMAANIKKI_UNIT_TESTS=ON; never part of the shipped unit.
@@ -2298,6 +2330,31 @@ index 0000000..405311a
 +    CHECK(t.input->touch_down(1, 0, 0, HybridInput::kScenePressPressure)); // consumed; the next press works
 +}
 +
++void short_presses_last_a_game_frame_but_stops_never_wait()
++{
++    Fixture t;
++    CHECK(t.input->key_down(13));
++    const int before = t.platform->slept;
++    CHECK(t.input->key_up(13)); // the core's ClickKey releases 50 ms later; here immediately
++    CHECK(t.platform->slept - before >= 80);
++    CHECK(t.input->key_down(13));
++    t.platform->slept += 200; // held long enough already
++    const int held = t.platform->slept;
++    CHECK(t.input->key_up(13));
++    CHECK(t.platform->slept == held);
++    t.platform->cursor_at = CGPointMake(960, 540);
++    CHECK(t.input->touch_down(1, 0, 0, HybridInput::kScenePressPressure));
++    const int scene = t.platform->slept;
++    CHECK(t.input->touch_up(1));
++    CHECK(t.platform->slept - scene >= 80);
++    CHECK(t.input->key_down(13));
++    const int stop = t.platform->slept;
++    std::thread([&] { t.input->key_up(13); }).join(); // a stop releases at once
++    CHECK(t.platform->slept == stop);
++    CHECK((t.platform->take() == Events { "key_down 13 pid=100", "key_up 13 pid=100", "key_down 13 pid=100", "key_up 13 pid=100",
++                                          "rdown@960,540", "rup@960,540", "key_down 13 pid=100", "key_up 13 pid=100" }));
++}
++
 +} // namespace
 +
 +int main()
@@ -2330,6 +2387,7 @@ index 0000000..405311a
 +    scene_press_never_drags_and_scroll_waits_for_keys();
 +    stop_during_the_scroll_hover_cancels_the_wheel();
 +    stop_during_the_scene_press_checks_cancels_it();
++    short_presses_last_a_game_frame_but_stops_never_wait();
 +    std::printf(failures ? "HybridInputTest: %d failure(s)\n" : "HybridInputTest: all passed\n", failures);
 +    return failures ? 1 : 0;
 +}
