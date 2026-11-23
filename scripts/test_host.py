@@ -395,14 +395,15 @@ class MacOSPreviewPathTests(unittest.TestCase):
             inputs.release()
             controller.post_key_up.assert_called_once_with(13)
             target.input.return_value.force_key_up.assert_not_called()
-            # A release the controller could not deliver blocks that key until reconnect.
+            # A release the controller could not deliver goes straight to the game; the next press
+            # still goes through the controller (the unit posts it again even if it counts W as down).
             target.foreground.return_value = True
             inputs._down(Binding("key", 87))
             controller.post_key_up.return_value.wait.return_value.succeeded = False
             inputs.release()
             target.input.return_value.force_key_up.assert_called_once_with(87)
-            with self.assertRaisesRegex(NavigationError, "重新连接"):
-                inputs._down(Binding("key", 87))
+            inputs._down(Binding("key", 87))
+            self.assertEqual(controller.post_key_down.call_count, 3)
 
     def test_windows_still_releases_directly_after_focus_loss(self):
         from game_keys import Binding
@@ -437,6 +438,15 @@ class MacOSPreviewPathTests(unittest.TestCase):
                 patch("tall_window.ensure_16_9_window", side_effect=AssertionError("resized")):
             with self.assertRaises(GameFrameSizeError):
                 rt.capture()
+
+    def test_stop_settle_gives_up_on_an_unresponsive_controller(self):
+        import threading
+        hang = threading.Event()
+        controller = Mock()
+        controller.post_inactive.return_value.wait.side_effect = lambda: hang.wait(5)
+        with backend("macos"), patch.object(host, "SETTLE_TIMEOUT_SECONDS", 0.2):
+            self.assertFalse(host.settle_controller_after_stop(lambda: controller))
+        hang.set()
 
     def test_stop_settles_the_control_unit_only_on_macos(self):
         controller = Mock()

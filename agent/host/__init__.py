@@ -189,6 +189,9 @@ def controller_supports_foreground_input(controller) -> bool:
     return False
 
 
+SETTLE_TIMEOUT_SECONDS = 3.0
+
+
 def settle_controller_after_stop(get_controller) -> bool:
     """After a stopped task, make the controller release whatever its control unit still holds.
 
@@ -200,10 +203,20 @@ def settle_controller_after_stop(get_controller) -> bool:
     """
     if platform_backend() != "macos":
         return True
-    try:
-        return bool(get_controller().post_inactive().wait().succeeded)
-    except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
-        return False
+    import threading
+    outcome = []
+
+    def settle():
+        try:
+            outcome.append(bool(get_controller().post_inactive().wait().succeeded))
+        except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
+            outcome.append(False)
+
+    # A controller that stopped responding must not hang the end of the task.
+    worker = threading.Thread(target=settle, name="settle-controller", daemon=True)
+    worker.start()
+    worker.join(SETTLE_TIMEOUT_SECONDS)
+    return bool(outcome and outcome[0])
 
 
 def background_input_class():

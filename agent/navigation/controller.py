@@ -21,8 +21,6 @@ class ForegroundInput:
         self.ready = ready
         self.held = set()
         self.buttons = set()
-        # Keys released directly because the controller could not release them; see release_key.
-        self.stale = set()
         self.bindings = bindings or GameKeys()
         # The backend verifies the connected window and owns focus queries.
         self.target = connect_target(controller)
@@ -162,10 +160,8 @@ class ForegroundInput:
                 except (OSError, RuntimeError, ValueError):
                     released = False
                 if not released:
+                    # The macOS unit may still count the key as down; it posts the next press again.
                     self.force_key_up(key)
-                    if self._release_ignores_focus():
-                        # The control unit still counts the key as down and would swallow its next press.
-                        self.stale.add(key)
             else:
                 self.force_key_up(key)
         finally:
@@ -233,8 +229,6 @@ class ForegroundInput:
                 return
             self.mouse_down(binding.code)
             return
-        if binding.code in self.stale:
-            raise NavigationError("按键状态与控制模块不一致，请重新连接游戏后再运行。")
         code = native_key(binding.code)  # an unmapped key raises before it counts as held
         self.held.add(binding.code)
         if not self.controller.post_key_down(code).wait().succeeded:
