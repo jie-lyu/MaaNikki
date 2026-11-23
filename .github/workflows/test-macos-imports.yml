@@ -15,7 +15,9 @@ concurrency:
 
 jobs:
   imports:
-    runs-on: macos-15
+    # macos-15 jobs were repeatedly never acquired by a hosted runner on this fork; macos-14 is the
+    # Apple-silicon image with the most capacity.
+    runs-on: macos-14
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -31,3 +33,21 @@ jobs:
           python -B scripts/test_host_imports.py
           python -B scripts/test_host.py
           python -B scripts/test_app_paths.py
+
+  control-unit:
+    # The patched Mac control unit: build it from the pinned sources in a fresh work directory and run
+    # its deterministic fake-platform tests (build.py stops on a failing test). Never touches a game.
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Build the patched control unit and run its tests
+        run: python -I native/macos-control-unit/build.py --work "$RUNNER_TEMP/macos-control-unit"
+      - name: Keep the build manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-control-unit-build
+          path: ${{ runner.temp }}/macos-control-unit/out/patched/build.json
