@@ -388,6 +388,7 @@
     "ForegroundInputDelegationTests.test_session_brings_the_game_back_through_the_target",
     "ForegroundInputDelegationTests.test_window_handle_and_focus_come_from_the_target",
     "GeometryLatchTests.test_macos_geometry_change_stops_the_queue_like_a_bad_frame",
+    "GeometryLatchTests.test_unreadable_latch_pauses_instead_of_passing",
     "GeometryLatchTests.test_windows_never_looks_up_the_controller",
     "LaunchTests.test_ensure_unminimized_restores_without_activating_first",
     "LaunchTests.test_launcher_background_click_maps_capture_to_client_and_posts_messages",

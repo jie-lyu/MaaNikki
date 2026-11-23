@@ -189,20 +189,27 @@ def controller_supports_foreground_input(controller) -> bool:
     return False
 
 
-def connection_geometry_changed(get_controller) -> bool:
-    """Whether the connected window's geometry changed since connect, so clicks are refused until
-    reconnect (the patched macOS unit's latch, read live from Controller.info).
+def connection_geometry_problem(get_controller) -> str | None:
+    """Why input must pause because of the connection's geometry, or None when it is fine.
 
-    Always False on Win32, where the controller is not even looked up (``get_controller`` is
-    called only on macOS).
+    macOS: the patched unit's geometry_changed latch, read live from Controller.info. True means
+    the window moved, changed display or scaling since connect and clicks are refused until
+    reconnect; a value that cannot be read is treated the same way, never as unchanged.
+    Always None on Win32, where the controller is not even looked up (``get_controller`` is called
+    only on macOS).
     """
     if platform_backend() != "macos":
-        return False
+        return None
     try:
         info = get_controller().info
     except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
-        return False
-    return isinstance(info, dict) and info.get("geometry_changed") is True
+        info = None
+    latch = info.get("geometry_changed") if isinstance(info, dict) else None
+    if latch is False:
+        return None
+    if latch is True:
+        return "游戏窗口的位置、所在显示器或缩放在运行中发生了变化，已暂停输入；请重新连接游戏后再运行"
+    return "无法读取 Mac 控制模块的窗口几何状态，已暂停输入；请重新连接游戏后再运行"
 
 
 def task_entry_supported(entry) -> bool:

@@ -181,7 +181,8 @@ class OverlayThemeTests(unittest.TestCase):
             self.assertIsNotNone(overlay_style.resolve_overlay_theme())
 
 
-GOOD_MAC_INFO = {"type": "macos", "window_id": 4242, "screencap_method": 2, "input_method": 3, "maanikki_patch": 1}
+GOOD_MAC_INFO = {"type": "macos", "window_id": 4242, "screencap_method": 2, "input_method": 3, "maanikki_patch": 2,
+                 "geometry_changed": False}
 
 
 class FakeQuartz:
@@ -271,7 +272,9 @@ class MacOSBackendTests(unittest.TestCase):
         self.assertEqual(check_controller_info(GOOD_MAC_INFO), 4242)
         cases = {
             "官方 Mac 控制模块": {**GOOD_MAC_INFO, "maanikki_patch": None},
+            "版本过旧": {**GOOD_MAC_INFO, "maanikki_patch": 1},
             "截图或输入方式": {**GOOD_MAC_INFO, "input_method": 2},
+            "没有报告窗口几何状态": {**GOOD_MAC_INFO, "geometry_changed": None},
             "没有有效的 Mac 游戏窗口": {**GOOD_MAC_INFO, "window_id": 0},
         }
         for message, info in cases.items():
@@ -507,10 +510,24 @@ class GeometryLatchTests(unittest.TestCase):
             unchanged.validate_frame(np.zeros((720, 1280, 3), dtype=np.uint8))
         self.assertTrue(unchanged.frame_validated)
 
+    def test_unreadable_latch_pauses_instead_of_passing(self):
+        import numpy as np
+        from task_control import TaskStopped
+        for info in ({"type": "macos"}, {"type": "macos", "geometry_changed": "no"}, None):
+            with self.subTest(info=info):
+                session = self.session(info)
+                with backend("macos"), patch("task_control.write_message"):
+                    with self.assertRaisesRegex(TaskStopped, "无法读取"):
+                        session.validate_frame(np.zeros((720, 1280, 3), dtype=np.uint8))
+        broken = Mock()
+        type(broken).info = property(lambda self: (_ for _ in ()).throw(RuntimeError("gone")))
+        with backend("macos"):
+            self.assertIn("无法读取", host.connection_geometry_problem(lambda: broken))
+
     def test_windows_never_looks_up_the_controller(self):
         get = Mock()
         with backend("win32"):
-            self.assertFalse(host.connection_geometry_changed(get))
+            self.assertIsNone(host.connection_geometry_problem(get))
         get.assert_not_called()
 
 

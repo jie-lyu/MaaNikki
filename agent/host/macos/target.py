@@ -18,7 +18,7 @@ GAME_BUNDLE_ID = "com.papegames.infinitynikki"
 GAME_TITLE = re.compile(r"\s*(Infinity\s*Nikki|无限暖暖|無限暖暖)\s*")
 SCREENCAP_DISPLAY_WINDOW = 1 << 1
 INPUT_HYBRID = (1 << 0) | (1 << 1)  # GlobalEvent | PostToPid
-MIN_PATCH_LEVEL = 1
+MIN_PATCH_LEVEL = 2  # 2: Controller.info carries the geometry_changed latch
 
 
 def check_controller_info(info) -> int:
@@ -27,10 +27,14 @@ def check_controller_info(info) -> int:
     if not isinstance(info, dict) or info.get("type") != "macos" or type(window_id) is not int or not 0 < window_id < 2**32:
         raise NavigationError("当前连接没有有效的 Mac 游戏窗口，导航已停止。")
     patch = info.get("maanikki_patch")
-    if type(patch) is not int or patch < MIN_PATCH_LEVEL:
+    if type(patch) is not int:
         raise NavigationError("当前使用的是官方 Mac 控制模块，截图与点击不适用于本游戏；请使用 MaaNikki 自带的控制模块。")
+    if patch < MIN_PATCH_LEVEL:
+        raise NavigationError("MaaNikki 自带的 Mac 控制模块版本过旧，请更新后重新连接游戏。")
     if info.get("screencap_method") != SCREENCAP_DISPLAY_WINDOW or info.get("input_method") != INPUT_HYBRID:
         raise NavigationError("Mac 控制器的截图或输入方式不受支持，请在 MaaNikki 中重新连接游戏。")
+    if not isinstance(info.get("geometry_changed"), bool):
+        raise NavigationError("Mac 控制模块没有报告窗口几何状态，请更新 MaaNikki 自带的控制模块后重新连接。")
     return window_id
 
 
