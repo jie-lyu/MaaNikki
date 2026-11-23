@@ -3,7 +3,7 @@ import { toast } from 'sonner';
 import { useAppStore } from '@/stores/appStore';
 import { EXPLORATION_INSTANCE_ID as instanceId, explorationFeatures } from '@/types/exploration';
 import { normalizeAgentConfigs, type SelectedTask } from '@/types/interface';
-import { buildDesktopWindowControllerConfig, getDesktopWindowFilters } from '@/utils/controller';
+import { buildGameControllerConfig, findGameWindows, selectGameController } from '@/utils/gameTarget';
 import { computeResourcePaths } from '@/utils/resourcePath';
 import { generateTaskPipelineOverride } from '@/utils/pipelineOverride';
 import { buildPiEnvVars } from '@/utils/piEnv';
@@ -110,14 +110,13 @@ async function reconcile() {
   check();
   if (!Object.values(state.explorationSettings).some(Boolean)) throw new Error('请先在辅助功能设置中开启一项功能。');
   const pi = state.projectInterface;
-  const controller = pi?.controller.find((item) => item.type === 'Win32');
+  const controller = selectGameController(pi);
   const resource = pi?.resource[0];
   if (!pi || !controller || !resource) throw new Error('辅助功能需要 Windows 游戏窗口和已加载的项目资源。');
   if (!state.maaInitialized) await maaService.init();
   check();
   // This runs every second while waiting, so nothing visible or costly happens before a window exists.
-  const { classRegex, titleRegex } = getDesktopWindowFilters(controller);
-  const windows = await maaService.findWin32Windows(classRegex, titleRegex, true);
+  const windows = await findGameWindows(maaService, controller, true);
   const window = windows[0];
   if (!window) {
     await stop(true);
@@ -133,7 +132,7 @@ async function reconcile() {
     created = true;
   }
   check();
-  const config = buildDesktopWindowControllerConfig(controller, window.handle);
+  const config = buildGameControllerConfig(controller, window);
   if (!config) throw new Error('辅助功能的窗口控制器配置无效。');
   const ctrlId = await maaService.connectController(instanceId, config);
   state.registerCtrlIdName(instanceId, ctrlId, window.window_name || window.class_name, 'window');

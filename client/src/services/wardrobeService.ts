@@ -3,7 +3,7 @@ import { toast } from 'sonner';
 import { useAppStore } from '@/stores/appStore';
 import { useAccountStateStore } from '@/stores/accountStateStore';
 import { normalizeAgentConfigs, type SelectedTask } from '@/types/interface';
-import { buildDesktopWindowControllerConfig, getDesktopWindowFilters } from '@/utils/controller';
+import { buildGameControllerConfig, findGameWindows, selectGameController } from '@/utils/gameTarget';
 import { computeResourcePaths } from '@/utils/resourcePath';
 import { generateTaskPipelineOverride } from '@/utils/pipelineOverride';
 import { buildPiEnvVars } from '@/utils/piEnv';
@@ -112,7 +112,7 @@ async function run(signal: AbortSignal, mode: WardrobeReadMode) {
       throw new Error(`请等待当前任务结束后执行${spec.label}。`);
     }
     const pi = state.projectInterface;
-    const controller = pi?.controller.find((item) => item.type === 'Win32');
+    const controller = selectGameController(pi);
     const resource = pi?.resource[0];
     if (!pi || !controller || !resource) throw new Error('请先加载项目资源。');
     if (await maaService.isWorkstationLocked()) throw new Error(`请解锁桌面后执行${spec.label}。`);
@@ -132,11 +132,10 @@ async function run(signal: AbortSignal, mode: WardrobeReadMode) {
     await maaService.createInstance(id);
     created = true;
     check();
-    const { classRegex, titleRegex } = getDesktopWindowFilters(controller);
-    const windows = await maaService.findWin32Windows(classRegex, titleRegex);
+    const windows = await findGameWindows(maaService, controller);
     check();
     if (!windows[0]) throw new Error('请先打开游戏。');
-    const config = buildDesktopWindowControllerConfig(controller, windows[0].handle);
+    const config = buildGameControllerConfig(controller, windows[0]);
     if (!config) throw new Error('游戏窗口控制器配置无效。');
     const ctrlId = await maaService.connectController(id, config);
     state.registerCtrlIdName(id, ctrlId, windows[0].window_name || windows[0].class_name, 'window');
