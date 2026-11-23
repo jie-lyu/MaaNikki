@@ -110,8 +110,7 @@
 
 ### 配置
 
-- `interface.json` 增加 `nikki_macos` 控制器（`type: "MacOS"`，`display_short_side: 720`）。现有的后端系统过滤会让 Windows 用户看不到它。
-- `agent.child_exec` 在打包时按平台写入，Windows 包里的 `interface.json` 保持原样。启动游戏前置任务和路线生成子进程同样处理。
+- `nikki_macos` 控制器（`type: "MacOS"`，`display_short_side: 720`，使用自编译控制模块新增的 `DisplayWindow` 截图与 `Hybrid` 输入）和 Mac 的 `agent.child_exec` 不写进仓库的 `interface.json`，而是写在 `build/macos/interface-overlay.json`，只在组装 Mac 产物时叠加（源码开发时由 `scripts/macos_dev_home.py` 组装）。Windows 包原样复制 `interface.json`，因此它与 Windows 用户看到的接口都保持不变；客户端的后端系统过滤另外保证 Windows 上不会出现 Mac 控制器。启动游戏前置任务只对 `nikki_windows` 生效，路线生成子进程在非 Windows 上已使用 `python/bin/python3`。
 - 任务可用性由执行器根据能力清单检查，不只是在界面上隐藏。已保存的预设、定时运行和功能入口在下发前都要校验，不支持时返回明确原因。
 
 ## 分阶段交付

@@ -15,9 +15,9 @@ concurrency:
 
 jobs:
   imports:
-    # macos-15 jobs were repeatedly never acquired by a hosted runner on this fork; macos-14 is the
-    # Apple-silicon image with the most capacity.
-    runs-on: macos-14
+    # macos-14 images were retired in November 2026. macos-15 (Apple silicon) is GA and has run this
+    # job on the fork; jobs can wait long for a runner, so the workflow is a signal, not a required check.
+    runs-on: macos-15
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +37,8 @@ jobs:
   control-unit:
     # The patched Mac control unit: build it from the pinned sources in a fresh work directory and run
     # its deterministic fake-platform tests (build.py stops on a failing test). Never touches a game.
-    runs-on: macos-14
+    # Apple silicon: the arm64 unit's tests run natively.
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
