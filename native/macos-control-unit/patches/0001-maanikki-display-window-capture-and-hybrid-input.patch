@@ -211,10 +211,10 @@ index 344f217..2744be9 100644
 +endif()
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.h b/source/MaaMacOSControlUnit/Input/HybridInput.h
 new file mode 100644
-index 0000000..1e6aca8
+index 0000000..a1d6b44
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.h
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,143 @@
 +#pragma once
 +
 +#include <map>
@@ -222,6 +222,7 @@ index 0000000..1e6aca8
 +#include <mutex>
 +#include <optional>
 +#include <set>
++#include <utility>
 +#include <string>
 +#include <thread>
 +
@@ -242,7 +243,11 @@ index 0000000..1e6aca8
 +//   desktop point that the last captured frame maps the pixel to, and never activate the window;
 +//   a press first moves the cursor there and lets the hover settle (the game acts on the hovered
 +//   control), then checks everything again;
-+// - relative mouse movement is a mouse-moved event with delta fields posted to the process.
++// - relative mouse movement is a mouse-moved event with delta fields posted to the process;
++// - a scroll hovers the point the core gave in its bare touch_move just before (checked, moved,
++//   settled and checked again like a press), sends the wheel through the global HID stream in lines
++//   (120 Windows wheel units = 1 line), then puts the cursor back. A bare touch_move moves nothing;
++// - a scene button (touch_down with kScenePressPressure) presses where the cursor already is.
 +//
 +// Foreground only: every press, text and relative move requires the target's process to be the
 +// front application. A click additionally requires a settled frame from DisplayWindowScreencap
@@ -271,6 +276,11 @@ index 0000000..1e6aca8
 +class HybridInput : public InputBase
 +{
 +public:
++    // touch_down with this pressure presses a scene mouse button where the cursor already is, without
++    // the hover move: in the game scene a cursor move turns the camera. The agent sends it for ability
++    // buttons; the release is an ordinary touch_up of the same contact.
++    static constexpr int kScenePressPressure = 0x4D4E5343;
++
 +    HybridInput(uint32_t window_id, std::shared_ptr<CaptureGeometry> geometry,
 +                std::shared_ptr<InputPlatform> platform = system_input_platform());
 +    virtual ~HybridInput() override;
@@ -304,6 +314,7 @@ index 0000000..1e6aca8
 +    {
 +        CGPoint point = CGPointZero;
 +        CGMouseButton button = kCGMouseButtonLeft;
++        bool scene = false; // pressed where the cursor was, never moved
 +    };
 +
 +    // Where a click check spends its time (milliseconds), for the accepted-press log line.
@@ -319,6 +330,7 @@ index 0000000..1e6aca8
 +    // Puts the user's cursor back and reports the outcome ("restored", "warp failed", ...).
 +    std::string restore_cursor(CGPoint point);
 +
++    bool scene_press_locked(int contact, CGEventType type, CGMouseButton button);
 +    bool touch_up_locked(int contact);
 +    bool key_up_locked(int key);
 +
@@ -340,15 +352,18 @@ index 0000000..1e6aca8
 +    CGPoint saved_cursor_ = { NAN, NAN };
 +    // The contact whose press is hovering (the lock is released while the hover settles).
 +    std::optional<int> pending_contact_;
++    // Frame point of the core's bare touch_move, which it sends right before scroll(): the point the
++    // next scroll hovers. Consumed by that scroll.
++    std::optional<std::pair<int, int>> scroll_target_;
 +};
 +
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
 new file mode 100644
-index 0000000..e44a533
+index 0000000..891d9d8
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
-@@ -0,0 +1,492 @@
+@@ -0,0 +1,610 @@
 +#include "HybridInput.h"
 +
 +#include "InputUtils.h"
@@ -376,6 +391,20 @@ index 0000000..e44a533
 +{
 +    return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 +}
++
++// Windows wheel units (120 per notch) to lines; any non-zero amount moves at least one line.
++int wheel_lines(int amount)
++{
++    if (amount == 0) {
++        return 0;
++    }
++    int lines = amount / 120;
++    return lines != 0 ? lines : (amount > 0 ? 1 : -1);
++}
++
++// Time for the window server to route a posted wheel to the window under the cursor before the
++// cursor is moved back.
++constexpr int kWheelDeliveryMs = 50;
 +
 +bool valid_key(int key)
 +{
@@ -526,7 +555,6 @@ index 0000000..e44a533
 +
 +bool HybridInput::touch_down(int contact, int x, int y, int pressure)
 +{
-+    std::ignore = pressure;
 +    const auto started = Clock::now();
 +    std::unique_lock lock(mutex_);
 +    worker_ = std::this_thread::get_id();
@@ -543,6 +571,9 @@ index 0000000..e44a533
 +    if (held_contacts_.contains(contact)) {
 +        LogError << "contact already pressed" << VAR(contact);
 +        return false;
++    }
++    if (pressure == kScenePressPressure) {
++        return scene_press_locked(contact, info.event_type, info.mouse_button);
 +    }
 +    auto phase = Clock::now();
 +    CheckTiming first;
@@ -631,15 +662,61 @@ index 0000000..e44a533
 +    return true;
 +}
 +
++bool HybridInput::scene_press_locked(int contact, CGEventType type, CGMouseButton button)
++{
++    const auto started = Clock::now();
++    auto frame = geometry_->latest();
++    if (frame && frame->geometry_changed) {
++        LogError << "window or display geometry changed since connect; reconnect before pressing" << VAR(contact);
++        return false;
++    }
++    auto pid = foreground_target("scene_press");
++    if (!pid) {
++        return false;
++    }
++    // Where the cursor already is: in the scene the game hides it and turns the camera on any move.
++    auto cursor = platform_->cursor();
++    if (!cursor) {
++        LogError << "cursor position unknown, not sending" << VAR(contact);
++        return false;
++    }
++    auto window = platform_->window(window_id_);
++    if (!window || window->pid != *pid || !CGRectContainsPoint(window->bounds, *cursor)) {
++        LogError << "cursor is not over the game window, not sending" << VAR(contact) << VAR(cursor->x) << VAR(cursor->y);
++        return false;
++    }
++    int error = 0;
++    pid_t owner = platform_->process_at(*cursor, &error);
++    if (owner != *pid) {
++        LogError << "another process receives clicks at the cursor, not sending" << VAR(contact) << VAR(owner) << VAR(error);
++        return false;
++    }
++    if (platform_->front_window_of_process_at(*pid, *cursor) != window_id_) {
++        LogError << "another window of the game covers the cursor, not sending" << VAR(contact);
++        return false;
++    }
++    if (platform_->front_pid() != *pid) {
++        LogError << "target left the front during the checks, not sending" << VAR(contact);
++        return false;
++    }
++    if (!platform_->post_mouse(type, *cursor, button)) {
++        return false;
++    }
++    held_contacts_[contact] = { *cursor, button, true };
++    LogInfo << "scene press accepted" << VAR(contact) << VAR(cursor->x) << VAR(cursor->y) << "total_ms=" << ms_since(started);
++    return true;
++}
++
 +bool HybridInput::touch_move(int contact, int x, int y, int pressure)
 +{
 +    std::ignore = pressure;
 +    std::lock_guard lock(mutex_);
 +
-+    // Only drags of an accepted press; hovering without a press is not part of this profile.
++    // Drags only follow an accepted press. A bare touch_move moves nothing: the core sends one to "move
++    // to the scroll position" right before scroll(), which hovers that point itself.
 +    auto held = held_contacts_.find(contact);
 +    if (held == held_contacts_.end()) {
-+        LogError << "touch_move without an accepted press, not sending" << VAR(contact);
++        scroll_target_ = std::make_pair(x, y);
 +        return false;
 +    }
 +    MouseEventInfo info;
@@ -684,12 +761,13 @@ index 0000000..e44a533
 +        return false;
 +    }
 +    const double release_ms = ms_since(started);
++    const bool scene = held->second.scene;
 +    held_contacts_.erase(held);
 +    std::string cursor = "not moved back (another contact is held)";
 +    double restore_ms = 0;
 +    if (held_contacts_.empty()) {
 +        if (std::isnan(saved_cursor_.x)) {
-+            cursor = "no saved position";
++            cursor = scene ? "never moved (scene press)" : "no saved position";
 +        }
 +        else {
 +            const auto restore_started = Clock::now();
@@ -781,10 +859,65 @@ index 0000000..e44a533
 +
 +bool HybridInput::scroll(int dx, int dy)
 +{
-+    // No validated point to scroll at in this profile yet; refuse rather than send a wheel event to
-+    // whatever lies under a stale position.
-+    LogError << "scroll is not supported by the hybrid input" << VAR(dx) << VAR(dy);
-+    return false;
++    const auto started = Clock::now();
++    std::unique_lock lock(mutex_);
++    worker_ = std::this_thread::get_id();
++    auto target = std::exchange(scroll_target_, std::nullopt);
++    if (!target) {
++        LogError << "scroll without a position (the core moves to it first), not sending" << VAR(dx) << VAR(dy);
++        return false;
++    }
++    const int lines_y = wheel_lines(dy);
++    const int lines_x = wheel_lines(dx);
++    if (lines_y == 0 && lines_x == 0) {
++        return true;
++    }
++    if (!held_contacts_.empty()) {
++        LogError << "scroll while a mouse button is held, not sending" << VAR(dx) << VAR(dy);
++        return false;
++    }
++    CheckTiming first;
++    auto point = checked_point(target->first, target->second, "scroll", &first);
++    if (!point) {
++        return false;
++    }
++    auto original = platform_->cursor();
++    if (!original) {
++        LogError << "cursor position unknown, cannot restore it afterwards; not sending" << VAR(dx) << VAR(dy);
++        return false;
++    }
++    auto finish = [&](const char* why) {
++        std::string restored = held_contacts_.empty() ? restore_cursor(*original) : "not moved back (a contact is held)";
++        LogWarn << "scroll abandoned after the hover" << VAR(why) << VAR(restored);
++        return false;
++    };
++    // The game scrolls the list under its hover position: move there and let the hover settle, as a
++    // press does. Unlocked while settling and checking so that a stop's releases go out at once (the
++    // core gives a scroll no cancellation of its own; nothing is held during one).
++    if (!platform_->post_mouse(kCGEventMouseMoved, *point, kCGMouseButtonLeft)) {
++        return finish("hover move not posted");
++    }
++    const double deadline = platform_->now_ms() + kHoverSettleMs;
++    lock.unlock();
++    for (double remaining = kHoverSettleMs; remaining > 0; remaining = deadline - platform_->now_ms()) {
++        platform_->sleep_ms(std::max(1, std::min(kHoverSliceMs, static_cast<int>(std::ceil(remaining)))));
++    }
++    CheckTiming second;
++    auto settled = checked_point(target->first, target->second, "scroll", &second);
++    lock.lock();
++    if (!settled) {
++        return finish("second check refused");
++    }
++    if (!platform_->post_scroll(*settled, lines_y, lines_x)) {
++        return finish("wheel not posted");
++    }
++    lock.unlock();
++    platform_->sleep_ms(kWheelDeliveryMs);
++    lock.lock();
++    std::string restored = held_contacts_.empty() ? restore_cursor(*original) : "not moved back (a contact is held)";
++    LogInfo << "scroll posted" << VAR(lines_y) << VAR(lines_x) << VAR(settled->x) << VAR(settled->y) << VAR(first.hit_test_ms)
++            << VAR(second.hit_test_ms) << VAR(restored) << "total_ms=" << ms_since(started);
++    return true;
 +}
 +
 +bool HybridInput::relative_move(int dx, int dy)
@@ -843,10 +976,10 @@ index 0000000..e44a533
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/InputPlatform.h b/source/MaaMacOSControlUnit/Input/InputPlatform.h
 new file mode 100644
-index 0000000..ab76883
+index 0000000..2f3f97e
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/InputPlatform.h
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,47 @@
 +#pragma once
 +
 +#include <memory>
@@ -878,6 +1011,8 @@ index 0000000..ab76883
 +    virtual DisplayMode display_mode(CGDirectDisplayID display_id) = 0;
 +
 +    virtual bool post_mouse(CGEventType type, CGPoint location, CGMouseButton button) = 0;
++    // A wheel event in lines (positive: up / left), through the global HID stream at this point.
++    virtual bool post_scroll(CGPoint location, int lines_y, int lines_x) = 0;
 +    virtual bool post_key(pid_t pid, CGKeyCode key, bool down) = 0;
 +    virtual bool post_text(pid_t pid, const std::vector<UniChar>& chars) = 0;
 +    virtual bool post_relative_move(pid_t pid, int dx, int dy) = 0;
@@ -894,10 +1029,10 @@ index 0000000..ab76883
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/InputPlatform.mm b/source/MaaMacOSControlUnit/Input/InputPlatform.mm
 new file mode 100644
-index 0000000..e5c3500
+index 0000000..3e27a9e
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/InputPlatform.mm
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,203 @@
 +#include "InputPlatform.h"
 +
 +#include "MaaUtils/Logger.h"
@@ -1010,6 +1145,19 @@ index 0000000..e5c3500
 +            LogError << "failed to create mouse event";
 +            return false;
 +        }
++        CGEventPost(kCGHIDEventTap, event);
++        CFRelease(event);
++        return true;
++    }
++
++    bool post_scroll(CGPoint location, int lines_y, int lines_x) override
++    {
++        CGEventRef event = CGEventCreateScrollWheelEvent(nullptr, kCGScrollEventUnitLine, 2, lines_y, lines_x);
++        if (!event) {
++            LogError << "failed to create scroll event";
++            return false;
++        }
++        CGEventSetLocation(event, location);
 +        CGEventPost(kCGHIDEventTap, event);
 +        CFRelease(event);
 +        return true;
@@ -1174,7 +1322,7 @@ index 1d30e69..823eb4c 100644
  }
  
 diff --git a/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.h b/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.h
-index 4d8be65..e4ce52b 100644
+index 4d8be65..6f3896e 100644
 --- a/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.h
 +++ b/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.h
 @@ -2,6 +2,7 @@
@@ -1185,7 +1333,7 @@ index 4d8be65..e4ce52b 100644
  #include "Base/UnitBase.h"
  #include "MaaControlUnit/ControlUnitAPI.h"
  #include "MaaFramework/MaaDef.h"
-@@ -55,6 +56,18 @@ private:
+@@ -55,6 +56,19 @@ private:
      bool connected_ = false;
      std::shared_ptr<InputBase> input_ = nullptr;
      std::shared_ptr<ScreencapBase> screencap_ = nullptr;
@@ -1201,7 +1349,8 @@ index 4d8be65..e4ce52b 100644
 +inline constexpr MaaMacOSInputMethod MaaMacOSInputMethod_Hybrid = MaaMacOSInputMethod_GlobalEvent | MaaMacOSInputMethod_PostToPid;
 +
 +// Reported in get_info() so the agent can tell this build from the official unit.
-+inline constexpr int kMaaNikkiPatchLevel = 2; // 2: get_info() reports geometry_changed
++// 2: get_info() reports geometry_changed; 3: scroll and scene mouse buttons (HybridInput)
++inline constexpr int kMaaNikkiPatchLevel = 3;
 +
  MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Screencap/DisplayWindowScreencap.h b/source/MaaMacOSControlUnit/Screencap/DisplayWindowScreencap.h
@@ -1513,10 +1662,10 @@ index 0000000..c17723a
 +MAA_CTRL_UNIT_NS_END
 diff --git a/test/maanikki/HybridInputTest.mm b/test/maanikki/HybridInputTest.mm
 new file mode 100644
-index 0000000..a609163
+index 0000000..d4e4ba6
 --- /dev/null
 +++ b/test/maanikki/HybridInputTest.mm
-@@ -0,0 +1,495 @@
+@@ -0,0 +1,585 @@
 +// Deterministic tests for HybridInput over a fake InputPlatform: orderings a real desktop cannot
 +// reproduce on demand (a stop racing a press), and every refusal path. Nothing reaches the system.
 +// Built only with -DMAANIKKI_UNIT_TESTS=ON; never part of the shipped unit.
@@ -1614,8 +1763,23 @@ index 0000000..a609163
 +            down_entered.set_value();
 +            release_down.wait();
 +        }
-+        const char* kind = is_down ? "down@" : type == kCGEventLeftMouseUp ? "up@" : type == kCGEventMouseMoved ? "move@" : "drag@";
++        const char* kind = is_down                          ? "down@"
++                           : type == kCGEventLeftMouseUp    ? "up@"
++                           : type == kCGEventRightMouseDown ? "rdown@"
++                           : type == kCGEventRightMouseUp   ? "rup@"
++                           : type == kCGEventMouseMoved     ? "move@"
++                                                            : "drag@";
++        if (type == kCGEventRightMouseUp && reject_ups) {
++            return false;
++        }
 +        record(kind + std::to_string(int(location.x)) + "," + std::to_string(int(location.y)));
++        return true;
++    }
++
++    bool post_scroll(CGPoint location, int lines_y, int lines_x) override
++    {
++        record("wheel@" + std::to_string(int(location.x)) + "," + std::to_string(int(location.y)) + " y=" + std::to_string(lines_y)
++               + " x=" + std::to_string(lines_x));
 +        return true;
 +    }
 +
@@ -1640,7 +1804,8 @@ index 0000000..a609163
 +        return true;
 +    }
 +
-+    std::optional<CGPoint> cursor() override { return cursor_known ? std::optional(CGPointMake(7, 7)) : std::nullopt; }
++    CGPoint cursor_at = CGPointMake(7, 7);
++    std::optional<CGPoint> cursor() override { return cursor_known ? std::optional(cursor_at) : std::nullopt; }
 +
 +    bool warp_cursor(CGPoint point) override
 +    {
@@ -1984,6 +2149,76 @@ index 0000000..a609163
 +    CHECK(t.platform->take().empty());
 +}
 +
++void scroll_hovers_the_core_position_wheels_and_restores()
++{
++    Fixture t;
++    CHECK(!t.input->touch_move(0, 100, 200, 0)); // the core's "move to the scroll position": nothing moves
++    CHECK(t.platform->take().empty());
++    CHECK(t.input->scroll(0, -480));
++    CHECK(t.platform->slept >= 300);
++    CHECK((t.platform->take() == Events { "move@50,100", "wheel@50,100 y=-4 x=0", "warp@7,7" }));
++    CHECK(!t.input->scroll(0, 120)); // the position was consumed: no wheel at a stale point
++    CHECK(!t.input->touch_move(0, 100, 200, 0));
++    CHECK(t.input->scroll(0, 60)); // less than a notch still moves one line
++    CHECK((t.platform->take() == Events { "move@50,100", "wheel@50,100 y=1 x=0", "warp@7,7" }));
++}
++
++void scroll_is_refused_like_a_press()
++{
++    Fixture t;
++    CHECK(!t.input->scroll(0, 120)); // no position at all
++    t.platform->front = 999;
++    CHECK(!t.input->touch_move(0, 100, 200, 0));
++    CHECK(!t.input->scroll(0, 120)); // not in front: nothing moves
++    t.platform->front = kGame;
++    CHECK(t.platform->take().empty());
++    t.platform->on_sleep = [&] { t.platform->front = 999; }; // the user switches apps while settling
++    CHECK(!t.input->touch_move(0, 100, 200, 0));
++    CHECK(!t.input->scroll(0, 120));
++    CHECK((t.platform->take() == Events { "move@50,100", "warp@7,7" }));
++    t.platform->on_sleep = nullptr;
++    t.platform->front = kGame;
++    t.platform->cursor_at = CGPointMake(960, 540);
++    CHECK(t.input->touch_down(1, 0, 0, HybridInput::kScenePressPressure));
++    t.platform->take();
++    CHECK(!t.input->touch_move(0, 100, 200, 0));
++    CHECK(!t.input->scroll(0, 120)); // never while a button is held
++    CHECK(t.platform->take().empty());
++}
++
++void scene_press_presses_where_the_cursor_is()
++{
++    Fixture t;
++    t.platform->cursor_at = CGPointMake(960, 540);
++    CHECK(t.input->touch_down(1, 0, 0, HybridInput::kScenePressPressure));
++    CHECK(t.input->touch_up(1));
++    CHECK((t.platform->take() == Events { "rdown@960,540", "rup@960,540" })); // no move, no warp
++    t.platform->front = 999;
++    CHECK(!t.input->touch_down(1, 0, 0, HybridInput::kScenePressPressure));
++    t.platform->front = kGame;
++    t.platform->cursor_at = CGPointMake(2500, 540); // over another display, not the game
++    CHECK(!t.input->touch_down(1, 0, 0, HybridInput::kScenePressPressure));
++    t.platform->cursor_at = CGPointMake(960, 540);
++    t.platform->hit_pid = 555; // something else receives clicks there
++    CHECK(!t.input->touch_down(1, 0, 0, HybridInput::kScenePressPressure));
++    CHECK(t.platform->take().empty());
++}
++
++void scene_press_is_cancelled_and_released_like_a_click()
++{
++    Fixture t;
++    t.platform->cursor_at = CGPointMake(960, 540);
++    std::thread([&] { t.input->touch_up(1); }).join(); // the core's stop released it first
++    CHECK(!t.input->touch_down(1, 0, 0, HybridInput::kScenePressPressure));
++    CHECK(t.platform->take().empty());
++    CHECK(t.input->touch_down(1, 0, 0, HybridInput::kScenePressPressure));
++    t.platform->reject_ups = true;
++    CHECK(!t.input->inactive()); // stays held and is reported
++    t.platform->reject_ups = false;
++    CHECK(t.input->inactive());
++    CHECK((t.platform->take() == Events { "rdown@960,540", "rup@960,540" }));
++}
++
 +} // namespace
 +
 +int main()
@@ -2009,6 +2244,10 @@ index 0000000..a609163
 +    failed_press_after_the_hover_puts_the_cursor_back();
 +    unknown_cursor_position_refuses_before_moving();
 +    stop_during_the_second_check_cancels_the_press();
++    scroll_hovers_the_core_position_wheels_and_restores();
++    scroll_is_refused_like_a_press();
++    scene_press_presses_where_the_cursor_is();
++    scene_press_is_cancelled_and_released_like_a_click();
 +    std::printf(failures ? "HybridInputTest: %d failure(s)\n" : "HybridInputTest: all passed\n", failures);
 +    return failures ? 1 : 0;
 +}
