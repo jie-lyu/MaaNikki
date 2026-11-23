@@ -1972,9 +1972,26 @@ pub fn stop_task_impl(state: &MaaState, instance_id: &str) -> Result<(), String>
     let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
     let instance = instances.get_mut(instance_id).ok_or("Instance not found")?;
     instance.start_generation = instance.start_generation.wrapping_add(1);
+    let is_mac = matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. }));
+    if is_mac {
+        // 仍在启动的那一轮被取消：它在重连返回时和提交任务前都会发现，不会再提交任务。
+        super::mac_connection::cancel_start(&mut instance.macos_run);
+    }
     let Some(tasker) = instance.tasker.as_ref() else {
         instance.stop_in_progress = true;
         instance.stop_started_at = Some(Instant::now());
+        if is_mac {
+            // Mac：Tasker 已交给退役（重连中）时也结束这一轮的状态，下一轮才能取得实例。
+            let state = &mut instance.task_run_state;
+            for status in state.statuses.values_mut() {
+                if status == "pending" || status == "running" {
+                    *status = "failed".to_string();
+                }
+            }
+            if state.overall_status.as_deref() == Some("Running") {
+                state.overall_status = Some("Failed".to_string());
+            }
+        }
         super::telemetry::on_run_cancelled(instance_id);
         return Ok(());
     };

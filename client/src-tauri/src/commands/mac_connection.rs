@@ -37,29 +37,51 @@ pub(crate) struct FinishedRun<A, B> {
 pub(crate) enum MacRun {
     /// 启动请求已取得这一轮，正在重连、启动 agent、提交任务。
     Starting(u64),
+    /// 启动中被用户停止：这次启动不能再提交任务，由它自己撤销（`abandon_start`）。
+    StartCancelled(u64),
     /// 任务已提交，由这一轮 Tasker 的结束回调收尾。
     Running(u64),
     /// 已取走这一轮的 agent，正在断开（反注册动作）。
     Cleanup(u64),
 }
 
-/// 启动请求在一个临界区里取得这一轮（判断与取得不能分开）。上一轮仍在启动、仍在运行
-/// （`run_active`：任务状态仍是运行中）或仍在收尾时不能取得。用户停止后结束回调没有到达的那一轮
-/// 可以被接替：取得时 `tasker_serial` 加一，它的 Tasker 的回调随即失效，新运行总是新建 Tasker。
+/// 这一轮是否被占用：仍在启动、仍在运行（`run_active`：任务状态仍是运行中）或仍在收尾。用户停止后
+/// 结束回调没有到达的那一轮不算占用，可以被接替。被占用时新的启动要等待，按实例停止 agent 的请求
+/// 也不能动它的 agent（它们由这一轮自己收尾）。
+pub(crate) fn run_busy(run: Option<MacRun>, run_active: bool) -> bool {
+    match run {
+        None => false,
+        Some(MacRun::Running(_)) => run_active,
+        Some(_) => true,
+    }
+}
+
+/// 启动请求在一个临界区里取得这一轮（判断与取得不能分开）。被占用时不能取得。接替一轮时
+/// `tasker_serial` 加一，它的 Tasker 的回调随即失效，新运行总是新建 Tasker。
 pub(crate) fn claim_start(
     run: &mut Option<MacRun>,
     run_active: bool,
     token: u64,
     tasker_serial: &mut u64,
 ) -> bool {
-    match *run {
-        Some(MacRun::Starting(_)) | Some(MacRun::Cleanup(_)) => return false,
-        Some(MacRun::Running(_)) if run_active => return false,
-        _ => {}
+    if run_busy(*run, run_active) {
+        return false;
     }
     *run = Some(MacRun::Starting(token));
     *tasker_serial = tasker_serial.wrapping_add(1);
     true
+}
+
+/// 用户停止：仍在启动的那一轮被取消，之后它在重连返回时和提交任务前（与提交同一个临界区）都会发现。
+pub(crate) fn cancel_start(run: &mut Option<MacRun>) {
+    if let Some(MacRun::Starting(token)) = *run {
+        *run = Some(MacRun::StartCancelled(token));
+    }
+}
+
+/// 这次启动是否仍拥有这一轮且未被取消。
+pub(crate) fn start_owned(run: Option<MacRun>, token: u64) -> bool {
+    run == Some(MacRun::Starting(token))
 }
 
 /// 任务已提交（与提交在同一个临界区里）：这一轮转为运行中，之后由它的结束回调收尾。
@@ -71,7 +93,7 @@ pub(crate) fn start_running(run: &mut Option<MacRun>, token: u64) {
 
 /// 启动失败、取消或没有提交任何任务：只撤销自己取得的那一轮。
 pub(crate) fn abandon_start(run: &mut Option<MacRun>, token: u64) {
-    if *run == Some(MacRun::Starting(token)) {
+    if matches!(*run, Some(MacRun::Starting(t)) | Some(MacRun::StartCancelled(t)) if t == token) {
         *run = None;
     }
 }
@@ -365,5 +387,31 @@ mod tests {
         assert!(!callback_is_current(1, false, 1));
         assert!(!callback_is_current(2, true, 1));
         assert!(callback_is_current(2, true, 2));
+    }
+
+    #[test]
+    fn a_stop_during_the_start_is_seen_before_any_task_is_posted() {
+        let mut runs = Runs::idle();
+        assert!(runs.claim(1));
+        cancel_start(&mut runs.run); // the user stops while the start reconnects
+        assert!(!start_owned(runs.run, 1)); // checked when the reconnect returns and before posting
+        start_running(&mut runs.run, 1); // a post that slipped through could not make it Running
+        assert_eq!(runs.run, Some(MacRun::StartCancelled(1)));
+        assert!(!runs.claim(2)); // until the cancelled start has cleaned up its own agents
+        abandon_start(&mut runs.run, 1);
+        assert!(runs.claim(2));
+        cancel_start(&mut runs.run);
+        abandon_start(&mut runs.run, 1); // a stale start cannot release the new one's claim
+        assert_eq!(runs.run, Some(MacRun::StartCancelled(2)));
+    }
+
+    #[test]
+    fn agents_of_a_busy_run_belong_to_that_run() {
+        assert!(run_busy(Some(MacRun::Starting(1)), false));
+        assert!(run_busy(Some(MacRun::StartCancelled(1)), false));
+        assert!(run_busy(Some(MacRun::Cleanup(1)), false));
+        assert!(run_busy(Some(MacRun::Running(1)), true));
+        assert!(!run_busy(Some(MacRun::Running(1)), false)); // stopped; its end never came
+        assert!(!run_busy(None, false));
     }
 }
