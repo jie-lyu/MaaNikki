@@ -148,18 +148,22 @@ class ForegroundInput:
         return {"hold_seconds": hold, "settle_seconds": settle,
                 "forward_input_seconds": released_at-started}
 
+    def _release_ignores_focus(self) -> bool:
+        """Whether releasing through the controller is safe without focus (host Target attribute)."""
+        return bool(getattr(getattr(self, "target", None), "release_ignores_focus", False))
+
     def release_key(self, key):
         if key not in self.held:
             return
         try:
-            if self.foreground() or self.target.release_ignores_focus:
+            if self.foreground() or self._release_ignores_focus():
                 try:
                     released = self.controller.post_key_up(native_key(key)).wait().succeeded
                 except (OSError, RuntimeError, ValueError):
                     released = False
                 if not released:
                     self.force_key_up(key)
-                    if self.target.release_ignores_focus:
+                    if self._release_ignores_focus():
                         # The control unit still counts the key as down and would swallow its next press.
                         self.stale.add(key)
             else:
@@ -171,7 +175,7 @@ class ForegroundInput:
         if button not in self.buttons:
             return
         try:
-            if self.foreground() or self.target.release_ignores_focus:
+            if self.foreground() or self._release_ignores_focus():
                 try:
                     released = self.controller.post_touch_up(button).wait().succeeded
                 except (OSError, RuntimeError, ValueError):
