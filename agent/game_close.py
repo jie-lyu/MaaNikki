@@ -2,16 +2,15 @@
 
 The state machine has no MaaFramework or ctypes dependency so it can be
 tested offline; the Win32 binding (host/win32/close.py, from host.game_close_api())
-is the only part that touches the operating system, apart from the guarded
-registry lookup of the official launcher.
+and the launcher discovery sources (host/win32/launcher.py) are the only parts
+that touch the operating system.
 """
 from __future__ import annotations
 
-import configparser
 from dataclasses import dataclass, field
 import math
 import os
-from pathlib import Path, PureWindowsPath
+from pathlib import PureWindowsPath
 import re
 import time
 
@@ -28,12 +27,6 @@ LAUNCHER_HELPER_IMAGE = "xstarter.exe"
 LAUNCHER_GRACE_SECONDS = 5.0
 LAUNCHER_APPEAR_SECONDS = 10.0
 LAUNCHER_APPEAR_POLL = 0.5
-# Same registry/config sources as start_game.resolve_program().
-LAUNCHER_INSTALL_NAMES = (
-    "InfinityNikki Launcher",
-    "InfinityNikkiBili Launcher",
-    "InfinityNikkiGlobal Launcher",
-)
 
 COUNTDOWN_SECONDS = 15.0
 COUNTDOWN_TICK = 1.0
@@ -405,30 +398,18 @@ def _launcher_candidates():
         except OSError:
             pass
 
+    # Unlike the start task, collect every installation; a bad source just ends its own scan.
     try:
-        import winreg
-        for name in LAUNCHER_INSTALL_NAMES:
-            try:
-                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"Software\{name}") as key:
-                    folder = Path(winreg.QueryValueEx(key, "")[0])
-                add(folder / LAUNCHER_IMAGE)
-            except OSError:
-                pass
+        from host.win32.launcher import registry_install_dirs
+        for folder in registry_install_dirs():
+            add(folder / LAUNCHER_IMAGE)
     except Exception:
         pass
     try:
-        local_app_data = Path(os.environ.get("LOCALAPPDATA", ""))
-        for name in LAUNCHER_INSTALL_NAMES:
-            config_path = local_app_data / name / "config.ini"
-            if not config_path.is_file():
-                continue
-            config = configparser.ConfigParser(interpolation=None)
-            config.read(config_path, encoding="utf-8-sig")
-            directory = config.get("Download", "gameDir", fallback="").strip().strip('"')
-            if directory:
-                folder = Path(directory)
-                for base in (folder, folder.parent):
-                    add(base / LAUNCHER_IMAGE)
+        from host.win32.launcher import config_game_dirs
+        for folder in config_game_dirs():
+            for base in (folder, folder.parent):
+                add(base / LAUNCHER_IMAGE)
     except Exception:
         pass
     return found

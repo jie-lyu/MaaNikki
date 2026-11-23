@@ -251,35 +251,20 @@ def resolve_program(value):
                     if candidate.is_file():
                         return candidate
         raise ValueError("请选择官方启动器 launcher.exe；不能直接运行游戏客户端。")
-    import winreg
-    launcher_names = (
-        "InfinityNikki Launcher",
-        "InfinityNikkiBili Launcher",
-        "InfinityNikkiGlobal Launcher",
-    )
-    for launcher_name in launcher_names:
-        reg_key = rf"Software\{launcher_name}"
+    # The first valid installation wins: registry first, then the launcher's config.ini.
+    from host.win32.launcher import config_game_dirs, registry_install_dirs
+    for folder in registry_install_dirs():
         try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_key) as key:
-                folder = Path(winreg.QueryValueEx(key, "")[0])
-                candidate = folder / "launcher.exe"
-                if candidate.is_file():
-                    return candidate.resolve()
+            candidate = folder / "launcher.exe"
+            if candidate.is_file():
+                return candidate.resolve()
         except OSError:
             pass
-    local_app_data = Path(os.environ.get("LOCALAPPDATA", ""))
-    for launcher_dir in launcher_names:
-        config_path = local_app_data / launcher_dir / "config.ini"
-        config = configparser.ConfigParser(interpolation=None)
-        if config_path.is_file():
-            config.read(config_path, encoding="utf-8-sig")
-            directory = config.get("Download", "gameDir", fallback="").strip().strip('"')
-            if directory:
-                folder = Path(directory)
-                for base in (folder, folder.parent):
-                    candidate = base / "launcher.exe"
-                    if candidate.is_file():
-                        return candidate.resolve()
+    for folder in config_game_dirs():
+        for base in (folder, folder.parent):
+            candidate = base / "launcher.exe"
+            if candidate.is_file():
+                return candidate.resolve()
     raise ValueError("未找到官方启动器，请在启动游戏任务中选择 launcher.exe。")
 
 

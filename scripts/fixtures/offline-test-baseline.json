@@ -1,5 +1,5 @@
 {
- "source": "Windows CI run 45159836136 (phase 1 at 1039b44, PR merge commit b6e98fc): every suite present then produced exactly these outcomes on Windows. Added after 1039b44 and so far recorded on macOS only: test_app_paths.py, test_host.py, test_host_imports.py, test_window_layout.py, test_file_io.py, test_game_target.cjs and the selector test in test_windows_contract.cjs; HostImportTests.test_win32_overlay_backend_imports is skipped off Windows. Refresh from the offline-test-results artifact when Windows outcomes change.",
+ "source": "Windows CI run 45159836136 (phase 1 at 1039b44, PR merge commit b6e98fc): every suite present then produced exactly these outcomes on Windows. Added after 1039b44 and so far recorded on macOS only: test_app_paths.py, test_host.py, test_host_imports.py, test_window_layout.py, test_file_io.py, test_launcher_discovery.py, test_game_target.cjs and the selector test in test_windows_contract.cjs; HostImportTests.test_win32_overlay_backend_imports is skipped off Windows. Refresh from the offline-test-results artifact when Windows outcomes change.",
  "suites": {
   "test_agent_pause.py": {
    "tests": [
@@ -415,6 +415,17 @@
    "skips": [
     "HostImportTests.test_win32_overlay_backend_imports"
    ]
+  },
+  "test_launcher_discovery.py": {
+   "tests": [
+    "DiscoveryTests.test_close_requires_the_one_install_containing_the_game",
+    "DiscoveryTests.test_config_game_dir_or_its_parent",
+    "DiscoveryTests.test_malformed_config_fails_the_start_task_but_not_the_close_task",
+    "DiscoveryTests.test_missing_launchers_and_duplicates",
+    "DiscoveryTests.test_registry_first_then_config_in_name_order"
+   ],
+   "known_failures": [],
+   "skips": []
   },
   "test_meteor.py": {
    "tests": [
