@@ -155,8 +155,10 @@ class SubtaskTests(unittest.TestCase):
             ticks = [0.0]
             def sleep(seconds):
                 ticks[0] += seconds
+            # Windows focuses through the Seize Alt key-up; pinned so the key id is the Win32 one on any OS.
             with patch("daily.startup.time.monotonic", side_effect=lambda: ticks[0]), \
-                    patch("daily.startup.time.sleep", side_effect=sleep):
+                    patch("daily.startup.time.sleep", side_effect=sleep), \
+                    patch("host.platform_backend", return_value="win32"):
                 focus_game(runtime, inputs)
             if already_focused:
                 runtime.controller.post_key_up.assert_not_called()

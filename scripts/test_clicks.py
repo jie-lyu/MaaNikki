@@ -249,8 +249,9 @@ class ClickTests(unittest.TestCase):
             state["time"] += .1
             return state["time"]
         rt.controller.post_key_up = Mock(side_effect=activate)
+        # Windows focuses through the Seize Alt key-up; pinned so the key id is the Win32 one on any OS.
         with patch("daily.startup.time.monotonic", side_effect=tick), \
-                patch("daily.startup.time.sleep"):
+                patch("daily.startup.time.sleep"), patch("host.platform_backend", return_value="win32"):
             focus_game(rt, inputs)
         rt.controller.post_key_up.assert_called_once_with(18)
         self.assertEqual(self.actions(rt), [])
