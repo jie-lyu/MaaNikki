@@ -211,10 +211,10 @@ index 344f217..2744be9 100644
 +endif()
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.h b/source/MaaMacOSControlUnit/Input/HybridInput.h
 new file mode 100644
-index 0000000..7cc16d8
+index 0000000..1e6aca8
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.h
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,128 @@
 +#pragma once
 +
 +#include <map>
@@ -258,9 +258,10 @@ index 0000000..7cc16d8
 +// state is guarded by one mutex. A release that arrives from another thread cancels the next press
 +// of that key or contact whenever it arrives, even if an older press was still held (it may belong to
 +// a press the core already registered); inactive(), which the core queues behind any in-flight
-+// action once a task ends, clears cancellations that no press consumed. The hover before a press is
-+// the one wait made without the lock: releases from the stopping thread go out at once, and one for
-+// that contact (or release_all/inactive from another thread) cancels the press. Any exit between the
++// action once a task ends, clears cancellations that no press consumed. The hover before a press and
++// the check after it are made without the lock: releases from the stopping thread go out at once, and
++// one for that contact (or release_all/inactive from another thread) cancels the press, checked under
++// the lock right before the mouse-down. Any exit between the
 +// hover move and an accepted press puts the cursor back; a cursor position that cannot be read
 +// refuses the press before anything moves.
 +//
@@ -344,10 +345,10 @@ index 0000000..7cc16d8
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
 new file mode 100644
-index 0000000..3a0daae
+index 0000000..e44a533
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
-@@ -0,0 +1,484 @@
+@@ -0,0 +1,492 @@
 +#include "HybridInput.h"
 +
 +#include "InputUtils.h"
@@ -594,15 +595,23 @@ index 0000000..3a0daae
 +        lock.lock();
 +    }
 +    const double settle_ms = ms_since(phase);
-+    pending_contact_.reset();
 +    if (cancelled_contacts_.erase(contact)) {
++        pending_contact_.reset();
 +        return abandon("cancelled by a stop during the hover");
 +    }
-+    // Everything may have changed while settling: check again, under the lock, right before pressing.
++    // Everything may have changed while settling: check again right before pressing. The check reads
++    // no state this lock guards and its hit test can block, so it runs unlocked like the settle: a
++    // stop meanwhile is sent at once and cancels the press, seen under the lock just below.
 +    phase = Clock::now();
 +    CheckTiming second;
++    lock.unlock();
 +    auto settled = checked_point(x, y, "touch_down", &second);
++    lock.lock();
 +    const double second_check_ms = ms_since(phase);
++    pending_contact_.reset();
++    if (cancelled_contacts_.erase(contact)) {
++        return abandon("cancelled by a stop during the second check");
++    }
 +    if (!settled) {
 +        return abandon("second check refused");
 +    }
@@ -1504,10 +1513,10 @@ index 0000000..c17723a
 +MAA_CTRL_UNIT_NS_END
 diff --git a/test/maanikki/HybridInputTest.mm b/test/maanikki/HybridInputTest.mm
 new file mode 100644
-index 0000000..ffcbe3d
+index 0000000..a609163
 --- /dev/null
 +++ b/test/maanikki/HybridInputTest.mm
-@@ -0,0 +1,477 @@
+@@ -0,0 +1,495 @@
 +// Deterministic tests for HybridInput over a fake InputPlatform: orderings a real desktop cannot
 +// reproduce on demand (a stop racing a press), and every refusal path. Nothing reaches the system.
 +// Built only with -DMAANIKKI_UNIT_TESTS=ON; never part of the shipped unit.
@@ -1950,6 +1959,23 @@ index 0000000..ffcbe3d
 +    CHECK((t.platform->take() == Events { "move@50,100", "warp@7,7" }));
 +}
 +
++void stop_during_the_second_check_cancels_the_press()
++{
++    Fixture t;
++    CHECK(t.input->key_down(13));
++    int hit_tests = 0;
++    // The second hit test blocks (it asks the game); the stopping thread must get through meanwhile.
++    t.platform->on_hit_test = [&] {
++        if (++hit_tests == 2) {
++            std::thread([&] { t.input->key_up(13); t.input->touch_up(0); }).join();
++        }
++    };
++    CHECK(!t.input->touch_down(0, 100, 200, 0));
++    CHECK((t.platform->take() == Events { "key_down 13 pid=100", "move@50,100", "key_up 13 pid=100", "warp@7,7" }));
++    t.platform->on_hit_test = nullptr;
++    CHECK(t.input->touch_down(0, 100, 200, 0)); // the cancellation was consumed by that press
++}
++
 +void unknown_cursor_position_refuses_before_moving()
 +{
 +    Fixture t;
@@ -1982,6 +2008,7 @@ index 0000000..ffcbe3d
 +    release_all_from_the_stopping_thread_cancels_a_hovering_press();
 +    failed_press_after_the_hover_puts_the_cursor_back();
 +    unknown_cursor_position_refuses_before_moving();
++    stop_during_the_second_check_cancels_the_press();
 +    std::printf(failures ? "HybridInputTest: %d failure(s)\n" : "HybridInputTest: all passed\n", failures);
 +    return failures ? 1 : 0;
 +}
