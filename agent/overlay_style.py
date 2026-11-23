@@ -143,7 +143,7 @@ def _system_prefers_dark() -> bool:
         ) as key:
             value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
             dark = int(value) == 0
-    except OSError:
+    except (ImportError, OSError):  # no registry off Windows: follow the light default
         dark = False
     _SYSTEM_DARK_CACHE = (now, dark)
     return dark

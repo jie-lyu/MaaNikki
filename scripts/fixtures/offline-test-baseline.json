@@ -391,6 +391,7 @@
     "LaunchTests.test_launcher_background_click_maps_capture_to_client_and_posts_messages",
     "LaunchTests.test_start_game_window_helpers_live_in_the_backend",
     "LaunchTests.test_startup_probes_without_a_window_binding",
+    "OverlayThemeTests.test_theme_resolves_without_a_windows_registry",
     "SelectionTests.test_backend_follows_platform_and_controller_type",
     "SelectionTests.test_non_windows_host_rejects_with_the_previous_message",
     "SelectionTests.test_optional_adapters_follow_capabilities",

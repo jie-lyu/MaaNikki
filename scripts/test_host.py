@@ -112,6 +112,15 @@ class CaptureBoundsTests(unittest.TestCase):
         layout.safe_capture_y_range.assert_called_once_with(7, 720, margin_px=8)
 
 
+class OverlayThemeTests(unittest.TestCase):
+    def test_theme_resolves_without_a_windows_registry(self):
+        import overlay_style
+        with patch.dict(sys.modules, {"winreg": None}), patch.object(overlay_style, "_SYSTEM_DARK_CACHE", None), \
+                patch.object(overlay_style, "_THEME_CACHE", None):
+            self.assertFalse(overlay_style._system_prefers_dark())
+            self.assertIsNotNone(overlay_style.resolve_overlay_theme())
+
+
 class SelectionTests(unittest.TestCase):
     def test_backend_follows_platform_and_controller_type(self):
         with patch.object(host.os, "name", "nt"):
