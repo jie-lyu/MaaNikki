@@ -376,6 +376,7 @@
     "ForegroundInputDelegationTests.test_window_handle_and_focus_come_from_the_target",
     "SelectionTests.test_backend_follows_platform_and_controller_type",
     "SelectionTests.test_non_windows_host_rejects_with_the_previous_message",
+    "SelectionTests.test_optional_adapters_follow_capabilities",
     "SelectionTests.test_unreadable_info_and_invalid_window",
     "SelectionTests.test_win32_capabilities",
     "Win32InputTests.test_force_releases_bypass_the_agent_channel",

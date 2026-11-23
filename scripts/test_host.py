@@ -72,6 +72,13 @@ class SelectionTests(unittest.TestCase):
             self.assertEqual(host.capabilities(host.platform_backend()), host.UNSUPPORTED)
             self.assertIsNone(host.overlay_backend())
 
+    def test_optional_adapters_follow_capabilities(self):
+        with patch.object(host.os, "name", "posix"):
+            with self.assertRaisesRegex(RuntimeError, "不支持关闭游戏"):
+                host.game_close_api()
+        with patch.object(host.os, "name", "nt"), patch("host.win32.close.Win32Api") as binding:
+            self.assertIs(host.game_close_api(), binding.return_value)
+
     def test_win32_capabilities(self):
         capabilities = host.capabilities("win32")
         self.assertEqual(capabilities.backend, "win32")

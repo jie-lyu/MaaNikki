@@ -141,6 +141,14 @@ def background_input_class():
     return BackgroundInput
 
 
+def game_close_api():
+    """Binding that closes the game and launcher windows/processes on this desktop."""
+    if not capabilities(platform_backend()).close_game:
+        raise RuntimeError("当前系统不支持关闭游戏。")
+    from host.win32.close import Win32Api
+    return Win32Api()
+
+
 def capabilities(backend: str | None) -> Capabilities:
     if backend == "win32":
         from host.win32 import CAPABILITIES
