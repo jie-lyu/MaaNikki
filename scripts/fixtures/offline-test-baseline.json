@@ -615,6 +615,15 @@
    ],
    "skips": []
   },
+  "test_started_tasks.cjs": {
+   "tests": [
+    "macos names the mailbox correctly when the launch task before it was refused",
+    "macos registers no names rather than guessing by position without the mapping",
+    "windows pairs returned IDs with submitted tasks by position"
+   ],
+   "known_failures": [],
+   "skips": []
+  },
   "test_subtask_test.py": {
    "tests": [
     "SubtaskTests.test_absent_meteor_does_not_fake_a_go_now_card",

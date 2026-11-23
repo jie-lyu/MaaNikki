@@ -1,3 +1,4 @@
+import { pairStartedTasks } from '@/utils/startedTasks';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -1358,16 +1359,11 @@ export function Toolbar({ showAddPanel, onToggleAddPanel, className }: ToolbarPr
         // 「任务 ID → 选中任务」对应关系取名称。Windows 不会跳过任务，仍按顺序对应。
         const macosController =
           projectInterface?.controller.find((c) => c.name === currentControllerName)?.type === 'MacOS';
-        const selectedIdByTaskId = macosController
-          ? (await maaService.getAllStates())?.instances[targetId]?.taskRunState.mappings
+        const mappings = macosController
+          ? (await maaService.getAllStates().catch(() => null))?.instances[targetId]?.taskRunState.mappings
           : undefined;
-        startedTaskIds.forEach((maaTaskId, index) => {
-          const runnable = selectedIdByTaskId
-            ? runnableTasks.find((item) => item.selectedTask.id === selectedIdByTaskId[String(maaTaskId)])
-            : runnableTasks[index];
-          if (!runnable) {
-            return;
-          }
+        pairStartedTasks(startedTaskIds, runnableTasks, { byBackendMapping: macosController, mappings }).forEach(
+          ([maaTaskId, runnable]) => {
           const { selectedTask, taskDef, specialTask } = runnable;
           const taskDisplayName =
             selectedTask.customName ||
@@ -1376,7 +1372,8 @@ export function Toolbar({ showAddPanel, onToggleAddPanel, className }: ToolbarPr
               : resolveI18nText(taskDef.label, translations)) ||
             selectedTask.taskName;
           registerTaskIdName(maaTaskId, taskDisplayName);
-        });
+          },
+        );
 
         log.info(`实例 ${targetInstance.name}: 任务已提交, task_ids:`, startedTaskIds);
 
