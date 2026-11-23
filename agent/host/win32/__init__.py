@@ -10,6 +10,7 @@ CAPABILITIES = Capabilities(
     overlay=True,
     tall_window=True,
     work_area_bounds=True,
+    pointer_hover=True,
     launch_game=True,
     close_game=True,
     clipboard=True,

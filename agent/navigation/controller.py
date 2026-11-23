@@ -21,6 +21,8 @@ class ForegroundInput:
         self.ready = ready
         self.held = set()
         self.buttons = set()
+        # Keys released directly because the controller could not release them; see release_key.
+        self.stale = set()
         self.bindings = bindings or GameKeys()
         # The backend verifies the connected window and owns focus queries.
         self.target = connect_target(controller)
@@ -150,13 +152,16 @@ class ForegroundInput:
         if key not in self.held:
             return
         try:
-            if self.foreground():
+            if self.foreground() or self.target.release_ignores_focus:
                 try:
                     released = self.controller.post_key_up(native_key(key)).wait().succeeded
                 except (OSError, RuntimeError, ValueError):
                     released = False
                 if not released:
                     self.force_key_up(key)
+                    if self.target.release_ignores_focus:
+                        # The control unit still counts the key as down and would swallow its next press.
+                        self.stale.add(key)
             else:
                 self.force_key_up(key)
         finally:
@@ -166,7 +171,7 @@ class ForegroundInput:
         if button not in self.buttons:
             return
         try:
-            if self.foreground():
+            if self.foreground() or self.target.release_ignores_focus:
                 try:
                     released = self.controller.post_touch_up(button).wait().succeeded
                 except (OSError, RuntimeError, ValueError):
@@ -224,8 +229,11 @@ class ForegroundInput:
                 return
             self.mouse_down(binding.code)
             return
+        if binding.code in self.stale:
+            raise NavigationError("按键状态与控制模块不一致，请重新连接游戏后再运行。")
+        code = native_key(binding.code)  # an unmapped key raises before it counts as held
         self.held.add(binding.code)
-        if not self.controller.post_key_down(native_key(binding.code)).wait().succeeded:
+        if not self.controller.post_key_down(code).wait().succeeded:
             raise NavigationError("宏按键输入失败。")
 
     def key_up(self, key):

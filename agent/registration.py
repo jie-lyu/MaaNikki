@@ -6,6 +6,7 @@ from threading import Event
 import traceback
 from performance import action_profile
 from game_view import ALLOWED_FRAME_SIZES, is_clipped_game_frame
+from host import capabilities, platform_backend
 from message_log import message_scope
 from task_control import TaskStopped, task_session
 
@@ -142,7 +143,7 @@ def agent_recognition(name):
                             if (
                                 (argv.image.shape[1], argv.image.shape[0]) not in ALLOWED_FRAME_SIZES
                                 or is_clipped_game_frame(argv.image)
-                            ):
+                            ) and capabilities(platform_backend()).tall_window:
                                 from tall_window import ensure_16_9_window
                                 adjusted = ensure_16_9_window(
                                     session.controller,

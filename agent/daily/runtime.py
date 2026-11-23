@@ -19,7 +19,7 @@ from game_keys import GameKeys
 from performance import count, measure
 from message_log import write_message
 from game_view import ALLOWED_FRAME_SIZES, is_clipped_game_frame, require_game_frame
-from host import native_key
+from host import capabilities, native_key, platform_backend
 
 
 RESOURCE = RESOURCE_ROOT / "resource"
@@ -421,7 +421,8 @@ class Runtime:
                 inputs, action, fields, cap_size=cap_size, window_cursor_pos=window_cursor_pos)
             if dispatched is not None:
                 return dispatched
-        if action == "Click" and ui_click:
+        hover = capabilities(platform_backend()).pointer_hover
+        if action == "Click" and ui_click and hover:
             point = self._target_point(fields.get("target"), "界面点击目标")
             # Maa's rectangular Click target is random inside the box. UI
             # icons can have dead edges, and Seize must settle after moving.
@@ -431,6 +432,9 @@ class Runtime:
                     or not self.pause(.3)):
                 return False
             fields = {**fields, "target": point}
+        elif action == "Click" and not hover:
+            # Without hover the control unit places the cursor for the click and restores it.
+            fields = {**fields, "target": self._target_point(fields.get("target"), "界面点击目标")}
         if focus_generation is not None:
             self.check_focus()
             if self._focus_generation != focus_generation:
@@ -646,7 +650,8 @@ class Runtime:
                     continue
                 count("capture.failed")
                 return None
-            if (image.shape[1], image.shape[0]) not in ALLOWED_FRAME_SIZES or is_clipped_game_frame(image):
+            if ((image.shape[1], image.shape[0]) not in ALLOWED_FRAME_SIZES or is_clipped_game_frame(image)) \
+                    and capabilities(platform_backend()).tall_window:
                 from tall_window import ensure_16_9_window
                 adjusted = ensure_16_9_window(
                     self.controller, context=self.context, notify=self.log, write_log=False

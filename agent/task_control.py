@@ -656,6 +656,9 @@ def task_session(context, task_id, *, node_name=""):
             if stopping:
                 with _SESSIONS_LOCK:
                     _SESSIONS.pop(key, None)
+                from host import settle_controller_after_stop
+                if not settle_controller_after_stop(lambda: session.controller):
+                    write_message("停止后未能确认控制模块已松开全部输入；再次运行前请重新连接游戏。", None)
         finally:
             from game_hud import release_game_hud
             release_game_hud(tasker_key, immediate=stopping)

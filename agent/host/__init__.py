@@ -46,6 +46,7 @@ class Capabilities:
     overlay: bool = False
     tall_window: bool = False  # 16:9 healing and the temporary tall scan window
     work_area_bounds: bool = False  # click targets clipped to the monitor work area (taskbar, off-screen)
+    pointer_hover: bool = False  # the cursor may rest on a UI control before and after a click
     launch_game: bool = False
     close_game: bool = False
     clipboard: bool = False
@@ -64,6 +65,9 @@ class Target(Protocol):
 
     handle: int
     capture_requires_foreground: bool
+    # True where releasing through the controller never refocuses the game, so held input is
+    # released through it even after focus loss (macOS). Win32 releases directly instead.
+    release_ignores_focus: bool
 
     def exists(self) -> bool: ...
     def minimized(self) -> bool: ...
@@ -183,6 +187,23 @@ def controller_supports_foreground_input(controller) -> bool:
         from host.macos import supports_foreground_inputs
         return supports_foreground_inputs(controller)
     return False
+
+
+def settle_controller_after_stop(get_controller) -> bool:
+    """After a stopped task, make the controller release whatever its control unit still holds.
+
+    macOS: the patched unit tracks held keys and clicks itself, and a press the core had already
+    queued can land after the agent released its own; post_inactive() releases them and clears
+    pending cancellations. Returns False when that could not be confirmed (the core may refuse
+    new posts while stopping); the caller asks for a reconnect. Nothing to do on Win32, where the
+    controller is not even looked up (``get_controller`` is called only on macOS).
+    """
+    if platform_backend() != "macos":
+        return True
+    try:
+        return bool(get_controller().post_inactive().wait().succeeded)
+    except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
+        return False
 
 
 def background_input_class():

@@ -20,6 +20,21 @@ from host.win32.target import Win32Target  # noqa: E402
 from navigation.models import NavigationError  # noqa: E402
 
 
+from contextlib import ExitStack, contextmanager  # noqa: E402
+
+
+@contextmanager
+def backend(name):
+    """Pin the platform backend everywhere it is bound by name, so tests behave alike on every OS."""
+    import daily.runtime
+    import registration
+    import tall_window
+    with ExitStack() as stack:
+        for module in (host, daily.runtime, registration, tall_window):
+            stack.enter_context(patch.object(module, "platform_backend", return_value=name))
+        yield
+
+
 class FakeUser32:
     def __init__(self, hwnd=0x10, *, exists=True, iconic=False, foreground=0x10, hung=False):
         self.hwnd, self.exists, self.iconic, self.fg, self.hung_state = hwnd, exists, iconic, foreground, hung
@@ -318,6 +333,123 @@ class MacOSBackendTests(unittest.TestCase):
                                {"type": "Win32", "win32": {"mouse": "Seize", "keyboard": "Seize"}}, None):
                 with self.subTest(controller=controller):
                     self.assertFalse(client_config.supports_foreground_inputs(controller))
+
+
+class MacOSPreviewPathTests(unittest.TestCase):
+    """The daily runtime and ForegroundInput paths the Mac preview depends on, over fakes."""
+
+    def runtime(self):
+        from daily.runtime import Runtime
+        context = SimpleNamespace(
+            tasker=SimpleNamespace(stopping=False, controller=SimpleNamespace()),
+            get_node_data=Mock(return_value={}),
+            run_action=Mock(return_value=SimpleNamespace(success=True)),
+        )
+        rt = Runtime(context)
+        rt._frame_validated = True
+        rt.pause = Mock(return_value=True)
+        rt.log = Mock()
+        return rt
+
+    def dispatched(self, rt):
+        return [call.kwargs["pipeline_override"]["MaaNikki_Daily_Action"] for call in rt.context.run_action.call_args_list]
+
+    def claim_click(self, name):
+        from daily.mailbox import Mailbox
+        rt = self.runtime()
+        mailbox = Mailbox(rt)
+        mailbox.button_state = Mock(return_value=("available", [300, 670, 128, 25], object()))
+        rt.image_current = Mock(return_value=True)
+        if name == "win32":
+            rt.ui.unhover = Mock(return_value=True)  # its own cursor parking is covered elsewhere
+        with backend(name):
+            self.assertTrue(mailbox.click_claim())
+        return self.dispatched(rt)
+
+    def test_mailbox_claim_on_macos_sends_one_centred_click_without_hover(self):
+        self.assertEqual(self.claim_click("macos"), [{"action": "Click", "target": [364, 682]}])
+
+    def test_mailbox_claim_on_windows_still_hovers_first(self):
+        actions = self.claim_click("win32")
+        self.assertEqual(actions[:2], [{"action": "TouchMove", "target": [364, 682]},
+                                       {"action": "Click", "target": [364, 682]}])
+
+    def foreground_input(self, *, release_ignores_focus, foreground):
+        from navigation.controller import ForegroundInput
+        controller = Mock()
+        controller.post_key_down.return_value.wait.return_value.succeeded = True
+        controller.post_key_up.return_value.wait.return_value.succeeded = True
+        target = Mock(handle=1, capture_requires_foreground=False, release_ignores_focus=release_ignores_focus)
+        target.foreground.return_value = foreground
+        with patch("navigation.controller.connect_target", return_value=target), \
+                patch("task_control.active_session", return_value=None):
+            inputs = ForegroundInput(controller, lambda: False)
+        return inputs, controller, target
+
+    def test_macos_releases_through_the_controller_after_focus_loss(self):
+        from game_keys import Binding
+        with backend("macos"):
+            inputs, controller, target = self.foreground_input(release_ignores_focus=True, foreground=True)
+            inputs._down(Binding("key", 87))
+            target.foreground.return_value = False
+            inputs.release()
+            controller.post_key_up.assert_called_once_with(13)
+            target.input.return_value.force_key_up.assert_not_called()
+            # A release the controller could not deliver blocks that key until reconnect.
+            target.foreground.return_value = True
+            inputs._down(Binding("key", 87))
+            controller.post_key_up.return_value.wait.return_value.succeeded = False
+            inputs.release()
+            target.input.return_value.force_key_up.assert_called_once_with(87)
+            with self.assertRaisesRegex(NavigationError, "重新连接"):
+                inputs._down(Binding("key", 87))
+
+    def test_windows_still_releases_directly_after_focus_loss(self):
+        from game_keys import Binding
+        with backend("win32"):
+            inputs, controller, target = self.foreground_input(release_ignores_focus=False, foreground=True)
+            inputs._down(Binding("key", 87))
+            target.foreground.return_value = False
+            inputs.release()
+            controller.post_key_up.assert_not_called()
+            target.input.return_value.force_key_up.assert_called_once_with(87)
+
+    def test_unmapped_key_is_never_recorded_as_held(self):
+        from game_keys import Binding
+        with backend("macos"):
+            inputs, controller, _ = self.foreground_input(release_ignores_focus=True, foreground=True)
+            for _ in range(2):
+                with self.assertRaisesRegex(NavigationError, "没有对应的键位"):
+                    inputs._down(Binding("key", 255))
+            self.assertEqual(inputs.held, set())
+            controller.post_key_down.assert_not_called()
+
+    def test_wrong_frame_size_skips_window_resizing_without_the_capability(self):
+        import numpy as np
+        from game_view import GameFrameSizeError
+        rt = self.runtime()
+        job = Mock(succeeded=True)
+        job.get.return_value = np.zeros((700, 1280, 3), dtype=np.uint8)
+        job.wait.return_value = job
+        rt.context.tasker.controller = rt.controller = Mock()
+        rt.controller.post_screencap.return_value = job
+        with backend("macos"), \
+                patch("tall_window.ensure_16_9_window", side_effect=AssertionError("resized")):
+            with self.assertRaises(GameFrameSizeError):
+                rt.capture()
+
+    def test_stop_settles_the_control_unit_only_on_macos(self):
+        controller = Mock()
+        controller.post_inactive.return_value.wait.return_value.succeeded = True
+        get = Mock(return_value=controller)
+        with backend("win32"):
+            self.assertTrue(host.settle_controller_after_stop(get))
+        get.assert_not_called()
+        with backend("macos"):
+            self.assertTrue(host.settle_controller_after_stop(get))
+            controller.post_inactive.return_value.wait.return_value.succeeded = False
+            self.assertFalse(host.settle_controller_after_stop(get))
+        self.assertEqual(controller.post_inactive.call_count, 2)
 
 
 class SelectionTests(unittest.TestCase):

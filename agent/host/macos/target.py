@@ -40,6 +40,9 @@ class MacOSTarget:
     # Display-window capture renders the game window itself: other windows on top do not matter,
     # but it must be on screen (not minimized, not on another Space).
     capture_requires_foreground = False
+    # The patched unit posts releases to the game process without activating anything, and it
+    # tracks what it pressed: releasing around it would leave it believing a key is still down.
+    release_ignores_focus = True
 
     def __init__(self, info: dict):
         self.handle = self.window_id = check_controller_info(info)

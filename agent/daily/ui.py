@@ -347,6 +347,9 @@ class GameUI:
             return False
         if self._preserve_cursor:
             return True
+        from host import capabilities, platform_backend
+        if not capabilities(platform_backend()).pointer_hover:
+            return True  # the control unit restored the cursor after the click
         main = self.rt.hit("MaaNikki_MainDetected")
         self.rt.invalidate_frame()
         if main:
