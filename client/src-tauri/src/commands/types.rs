@@ -239,7 +239,7 @@ impl Drop for InstanceRuntime {
     fn drop(&mut self) {
         // 断开并销毁所有 agent
         for client in &self.agent_clients {
-            let _ = client.disconnect();
+            super::maa_agent::disconnect_agent(client);
         }
         self.agent_clients.clear();
 

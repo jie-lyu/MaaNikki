@@ -84,6 +84,11 @@ pub(crate) fn start_owned(run: Option<MacRun>, token: u64) -> bool {
     run == Some(MacRun::Starting(token))
 }
 
+/// 这一轮是否仍属于这次启动（不论是否已被取消）。
+pub(crate) fn start_owned_or_cancelled(run: Option<MacRun>, token: u64) -> bool {
+    matches!(run, Some(MacRun::Starting(t)) | Some(MacRun::StartCancelled(t)) if t == token)
+}
+
 /// 任务已提交（与提交在同一个临界区里）：这一轮转为运行中，之后由它的结束回调收尾。
 pub(crate) fn start_running(run: &mut Option<MacRun>, token: u64) {
     if *run == Some(MacRun::Starting(token)) {
@@ -401,8 +406,10 @@ mod tests {
         abandon_start(&mut runs.run, 1);
         assert!(runs.claim(2));
         cancel_start(&mut runs.run);
-        abandon_start(&mut runs.run, 1); // a stale start cannot release the new one's claim
+        assert!(!start_owned_or_cancelled(runs.run, 1)); // a stale start takes nothing
+        abandon_start(&mut runs.run, 1); // and cannot release the new one's claim
         assert_eq!(runs.run, Some(MacRun::StartCancelled(2)));
+        assert!(start_owned_or_cancelled(runs.run, 2));
     }
 
     #[test]

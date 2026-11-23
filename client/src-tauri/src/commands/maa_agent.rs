@@ -835,7 +835,7 @@ pub async fn start_tasks_impl(
             stale_children.len()
         );
         for client in &stale_clients {
-            let _ = client.disconnect();
+            disconnect_agent(client);
         }
         drop(stale_clients);
         for mut child in stale_children {
@@ -879,7 +879,7 @@ pub async fn start_tasks_impl(
                         idx, instance_id
                     );
                     for client in &new_clients {
-                        let _ = client.disconnect();
+                        disconnect_agent(client);
                     }
                     drop(new_clients);
                     for mut child in new_children {
@@ -923,7 +923,7 @@ pub async fn start_tasks_impl(
 
                         // 回滚：清理已启动的 agent
                         for client in &new_clients {
-                            let _ = client.disconnect();
+                            disconnect_agent(client);
                         }
                         for mut child in new_children {
                             let _ = child.kill();
@@ -959,7 +959,7 @@ pub async fn start_tasks_impl(
                     instance_id
                 );
                 for client in &new_clients {
-                    let _ = client.disconnect();
+                    disconnect_agent(client);
                 }
                 drop(new_clients);
                 for mut child in new_children {
@@ -1145,12 +1145,15 @@ pub async fn start_tasks_impl(
     Ok(task_ids_ret)
 }
 
-/// 被取消的 Mac 启动在一个临界区里撤销自己的那一轮并取走实例上的 agent（只可能是它自己启动的），
-/// 再在锁外停止它们。
+/// 被取消的 Mac 启动收尾：只有这一轮仍属于它时，才在一个临界区里取走实例上的 agent（只可能是它
+/// 自己启动的）；锁外断开后再撤销自己的那一轮，反注册完成前这一轮一直被占用。
 fn abandon_macos_start(maa_state: &Arc<MaaState>, instance_id: &str, token: u64) {
     let taken = maa_state.instances.lock().ok().and_then(|mut instances| {
         let instance = instances.get_mut(instance_id)?;
-        super::mac_connection::abandon_start(&mut instance.macos_run, token);
+        if !super::mac_connection::start_owned_or_cancelled(instance.macos_run, token) {
+            return None;
+        }
+        super::mac_connection::cancel_start(&mut instance.macos_run);
         Some((
             std::mem::take(&mut instance.agent_clients),
             std::mem::take(&mut instance.agent_children),
@@ -1158,6 +1161,11 @@ fn abandon_macos_start(maa_state: &Arc<MaaState>, instance_id: &str, token: u64)
     });
     if let Some((clients, children)) = taken {
         stop_taken_agents(clients, children);
+    }
+    if let Ok(mut instances) = maa_state.instances.lock() {
+        if let Some(instance) = instances.get_mut(instance_id) {
+            super::mac_connection::abandon_start(&mut instance.macos_run, token);
+        }
     }
 }
 
@@ -1262,7 +1270,8 @@ pub async fn maa_start_tasks(
 }
 
 /// 停止所有 Agent 的核心实现（Tauri invoke 和 HTTP handler 共享）
-pub fn stop_agent_impl(maa_state: &Arc<MaaState>, instance_id: &str) -> Result<(), String> {
+/// 返回是否真的停止了（Mac 这一轮仍在进行、它的 agent 留给它自己时返回 false，调用方也不应释放连接）。
+pub fn stop_agent_impl(maa_state: &Arc<MaaState>, instance_id: &str) -> Result<bool, String> {
     info!("stop_agent_impl called for instance: {}", instance_id);
 
     let (clients, children) = {
@@ -1278,7 +1287,7 @@ pub fn stop_agent_impl(maa_state: &Arc<MaaState>, instance_id: &str) -> Result<(
             instance.task_run_state.overall_status.as_deref() == Some("Running"),
         ) {
             info!("[stop_agent] Mac run in progress on instance {}, leaving its agents to it", instance_id);
-            return Ok(());
+            return Ok(false);
         }
         instance.start_generation = instance.start_generation.wrapping_add(1);
 
@@ -1289,7 +1298,18 @@ pub fn stop_agent_impl(maa_state: &Arc<MaaState>, instance_id: &str) -> Result<(
     };
 
     stop_taken_agents(clients, children);
-    Ok(())
+    Ok(true)
+}
+
+/// 断开一个 agent client。macOS 上先把超时改为 5 秒：关闭请求默认无限等待，已握手但不再回应的
+/// agent 会让收尾一直卡住（这一轮停在收尾中，之后无法再开始）。断开失败时，随后丢弃 client
+/// 仍会在本地清除它注册的动作。
+pub(crate) fn disconnect_agent(client: &AgentClient) {
+    #[cfg(target_os = "macos")]
+    if let Err(e) = client.set_timeout(5_000) {
+        warn!("[stop_agent] Failed to bound the agent disconnect: {}", e);
+    }
+    let _ = client.disconnect();
 }
 
 /// 停止已经从实例上取走的 agent：同步断开 client，后台等待子进程退出（超时强杀）。
@@ -1308,7 +1328,7 @@ pub(crate) fn stop_taken_agents(clients: Vec<AgentClient>, children: Vec<std::pr
     // 同步断开所有 client：确保 custom 反注册在返回前完成，
     // 避免旧 agent 的反注册晚于新 agent 的注册，误删新 agent 的同名 custom 条目。
     for client in &clients {
-        let _ = client.disconnect();
+        disconnect_agent(client);
     }
     drop(clients); // Drop 同步执行 clear_custom_registration()
 
@@ -1355,7 +1375,8 @@ pub fn maa_stop_agent(
     state: State<'_, Arc<MaaState>>,
     instance_id: String,
 ) -> Result<(), String> {
-    stop_agent_impl(&state, &instance_id)?;
-    super::maa_core::schedule_release_idle_desktop_controller(&app, &state, &instance_id);
+    if stop_agent_impl(&state, &instance_id)? {
+        super::maa_core::schedule_release_idle_desktop_controller(&app, &state, &instance_id);
+    }
     Ok(())
 }

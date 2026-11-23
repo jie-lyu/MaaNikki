@@ -1021,12 +1021,14 @@ async fn handle_stop_agent(
     axum::extract::Path(instance_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     match stop_agent_impl(&state.maa_state, &instance_id) {
-        Ok(()) => {
-            schedule_release_idle_desktop_controller(
-                &state.app_handle,
-                &state.maa_state,
-                &instance_id,
-            );
+        Ok(stopped) => {
+            if stopped {
+                schedule_release_idle_desktop_controller(
+                    &state.app_handle,
+                    &state.maa_state,
+                    &instance_id,
+                );
+            }
             Json(serde_json::json!({ "ok": true })).into_response()
         }
         Err(e) => (
