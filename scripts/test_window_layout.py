@@ -128,8 +128,9 @@ class FacadeTests(unittest.TestCase):
             self.assertIsNone(tall_window.persist_session_16_9_handoff())
             self.assertIsNone(tall_window.restore_session_16_9_windows())
             restore.assert_not_called()
+            self.assertIsNone(tall_window.window_hwnd())
             with self.assertRaisesRegex(RuntimeError, "不支持调整游戏窗口"):
-                tall_window.window_hwnd()
+                tall_window.heal_16_9_window()
 
     def test_on_windows_calls_pass_through_unchanged(self):
         import tall_window

@@ -232,10 +232,17 @@ MAP_OPEN_SCORE, MAP_CLOSED_SCORE = 0.85, 0.75
 
 
 def _map_back_score(image) -> float:
+    """Best landmark score among positions whose matched box contains the click point MAP_BACK."""
     import cv2
 
     template = cv2.imread(str(MAP_BACK_LANDMARK))
-    return round(float(cv2.matchTemplate(image[0:100, 0:140], template, cv2.TM_CCOEFF_NORMED).max()), 3)
+    height, width = template.shape[:2]
+    x, y = MAP_BACK
+    # Top-left corners for which the template box still covers (x, y).
+    left, top = max(0, x - width + 1), max(0, y - height + 1)
+    region = image[top:y + height, left:x + width]
+    scores = cv2.matchTemplate(region, template, cv2.TM_CCOEFF_NORMED)
+    return round(float(scores.max()), 3)
 
 
 def _changed(before, after) -> float:

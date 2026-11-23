@@ -69,7 +69,13 @@ def _layout():
 
 
 def window_hwnd(rt=None, controller=None) -> int | None:
-    """Return the active game window handle associated with rt/controller if available."""
+    """Return the active game window handle associated with rt/controller if available.
+
+    Callers pass it to the capture-safe point functions; without work-area bounds those use the
+    frame and need no handle, so there is none.
+    """
+    if not capabilities(platform_backend()).work_area_bounds:
+        return None
     return _layout().window_hwnd(rt=rt, controller=controller)
 
 

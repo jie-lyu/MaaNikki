@@ -128,9 +128,10 @@ class WindowsRuleTests(unittest.TestCase):
         with patch.object(host, "platform_backend", return_value=None):
             self.assertFalse(client_config.supports_foreground_inputs(self.SEIZE))
 
+    @unittest.skipUnless(os.name == "nt", "the Win32 overlay backend only imports on Windows")
     def test_window_only_capture_rule(self):
         from maa.define import MaaWin32ScreencapMethodEnum as Method
-        from host.win32.controller_config import capture_is_window_only
+        from host.win32.overlays import capture_is_window_only
         self.assertTrue(capture_is_window_only({"screencap_method": int(Method.FramePool)}))
         self.assertTrue(capture_is_window_only({"screencap_method": int(Method.PrintWindow)}))
         for info in ({"screencap_method": int(Method.GDI)}, {"screencap_method": int(Method.FramePool) | int(Method.GDI)},

@@ -144,7 +144,7 @@ def controller_supports_foreground_input(controller) -> bool:
     The rule belongs to the backend for this desktop; without one, never.
     """
     if platform_backend() == "win32":
-        from host.win32.controller_config import supports_foreground_inputs
+        from host.win32 import supports_foreground_inputs
         return supports_foreground_inputs(controller)
     return False
 

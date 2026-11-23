@@ -158,16 +158,17 @@ class MapMask:
         self.generation = 0
         self.next_submit = self.next_region = 0.0
         self.last_observed_at = 0.0
+        overlays = overlay_backend()
+        if overlays is None:
+            raise RuntimeError("当前系统不支持地图遮罩窗口。")
+        # Which capture methods leave a desktop overlay out of the game's frames is the backend's rule.
+        # Read before PearPal starts its workers, so a disconnected controller fails first.
+        window_capture = overlays.capture_is_window_only(rt.controller.info)
         self.data = None
         self.window = None
         self.thread = threading.Thread(target=self._run, name="map-mask-matching", daemon=True)
         try:
             self.data = PearPal(DATA_ROOT)
-            overlays = overlay_backend()
-            if overlays is None:
-                raise RuntimeError("当前系统不支持地图遮罩窗口。")
-            # Which capture methods leave a desktop overlay out of the game's frames is the backend's rule.
-            window_capture = overlays.capture_is_window_only(rt.controller.info)
             self.window = overlays.OverlayWindow(hwnd, exclude_from_capture=not window_capture,
                                                  tutorial_provider=self.data.tutorial, hud_sink=hud_sink)
             self.thread.start()
