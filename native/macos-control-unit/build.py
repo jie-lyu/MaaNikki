@@ -86,7 +86,7 @@ def source(work: Path) -> Path:
         sys.exit(f"{pin['tag']} resolves to {head}, expected {pin['commit']}; remove {src} if the clone is stale")
     # Drop earlier patch applications; MaaDeps under the submodule is untracked and kept.
     run("git", "reset", "--hard", "--quiet", pin["commit"], cwd=src)
-    run("git", "clean", "-fdq", "--", "source/MaaMacOSControlUnit", "source/ControlUnitCommon", cwd=src)
+    run("git", "clean", "-fdq", "--", "source/MaaMacOSControlUnit", "source/ControlUnitCommon", "test/maanikki", cwd=src)
     run("git", "submodule", "update", "--init", "--depth", "1", "source/MaaUtils", cwd=src)
     utils = run("git", "rev-parse", "HEAD", cwd=src / "source" / "MaaUtils")
     if utils != pin["maautils_commit"]:
@@ -126,6 +126,7 @@ def patch(src: Path) -> list[str]:
 
 
 def build(work: Path, src: Path, bin_dir: Path, variant: str) -> Path:
+    patched = variant == "patched"
     build_dir = work / f"build-{variant}"
     pin = LOCK["build"]
     off = ["ADB", "IOS", "CUSTOM", "PLAYCOVER", "RECORD", "REPLAY", "GAMEPAD", "LINUX", "WIN32", "ANDROID_NATIVE"]
@@ -142,8 +143,14 @@ def build(work: Path, src: Path, bin_dir: Path, variant: str) -> Path:
         # so a missing packaged dependency cannot resolve from this machine's build or MaaDeps directories.
         "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON",
         "-DWITH_MAA_AGENT=OFF", "-DENABLE_CCACHE=OFF",
+        # The patch's HybridInput tests: an extra executable, not part of the unit.
+        f"-DMAANIKKI_UNIT_TESTS={'ON' if patched else 'OFF'}",
         *[f"-DWITH_{name}_CONTROLLER=OFF" for name in off])
     run(bin_dir / "cmake", "--build", build_dir, "--target", "MaaMacOSControlUnit")
+    if patched:
+        run(bin_dir / "cmake", "--build", build_dir, "--target", "MaaNikkiHybridInputTest")
+        # Fake platform only: nothing is captured or sent. A failure stops the build.
+        run(build_dir / "bin" / "MaaNikkiHybridInputTest")
     unit = build_dir / "bin" / UNIT
     check_load_commands(unit)
     return unit

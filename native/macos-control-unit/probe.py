@@ -18,7 +18,13 @@ the agent's 720 short side. Neither sends input.
 `input-check` DOES send input and must only run with the maintainer at the
 machine, the game in fullscreen-window mode, in the open world with no menu
 open: M (posted to the game), a global click on the big map's back button,
-and with --release, W held across a controller destroy.
+and with --release, W held across a controller destroy. It waits for the game
+to be in front without activating it, and stops at the first step whose
+result the captures do not confirm.
+
+`refusal-check` expects the patched unit to refuse a click, a key press and a
+relative move aimed at a window whose app is not in front. Use a disposable
+target: if that app comes to the front during the run, the input is real.
 
 `--runtime` is the directory holding libMaaFramework.dylib and the control
 units; the binding reads it from MAAFW_BINARY_PATH before it is imported,
@@ -240,7 +246,11 @@ def _front_bundle_id() -> str | None:
 
 
 def cmd_refusal_check(args) -> int:
-    """Presses aimed at a window whose app is not focused must all be refused; nothing is sent."""
+    """Expected-refusal test: presses aimed at a window whose app is not in front must be refused.
+
+    The front check happens once before the presses; bringing the target forward meanwhile would let
+    real input through. Use a disposable target window.
+    """
     from maa.tasker import Tasker
     from maa.toolkit import Toolkit
 
@@ -367,7 +377,11 @@ def cmd_hit_test(args) -> int:
 
 
 def cmd_input_check(args) -> int:
-    """Sends input to the game. Only with the maintainer at the machine; see the README."""
+    """Sends input to the game. Only with the maintainer at the machine; see the README.
+
+    Each step runs only if the previous one did what it should, judged from captures; the first
+    failure stops the run with a non-zero exit, leaving at most the big map open.
+    """
     import cv2
     from maa.tasker import Tasker
     from maa.toolkit import Toolkit
@@ -375,44 +389,54 @@ def cmd_input_check(args) -> int:
     if _profile != "maanikki":
         sys.exit("input-check exercises the patched unit; pass --profile maanikki")
     out = Path(args.out).resolve()
+    if out.exists() and any(out.iterdir()):
+        sys.exit(f"{out} is not empty")
     out.mkdir(parents=True, exist_ok=True)
     Tasker.set_log_dir(out)
     window_id = _pick_window(args, Toolkit)
-    # Time to click into the game: the patched unit refuses clicks while another app is frontmost.
-    for remaining in range(args.delay, 0, -1):
-        print(f"starting in {remaining} s, bring the game to the front", flush=True)
+    game_pid = _bundle_pid(GAME_BUNDLE_ID)
+    # Wait for the operator to bring the game forward; never activate it from here.
+    for _ in range(args.wait):
+        if _front_pid() == game_pid:
+            break
         time.sleep(1)
+    else:
+        sys.exit("the game never became the front application; nothing sent")
     controller, ok, _ = _connect(window_id, raw=False)
     if not ok:
-        sys.exit("connection failed")
+        sys.exit("connection failed; nothing sent")
     steps = []
 
     def frame(name):
         image, _ = _grab(controller)
-        if image is None:
-            sys.exit(f"capture failed at {name}")
-        if image.shape[:2] != (720, 1280):
-            sys.exit(f"frame is {image.shape[1]}x{image.shape[0]}, expected 1280x720; is the game in fullscreen-window mode?")
+        if image is None or image.shape[:2] != (720, 1280):
+            fail(f"no 1280x720 frame at {name}")
         cv2.imwrite(str(out / f"{len(steps):02d}-{name}.png"), image)
         return image
 
-    def step(name, ok_, before, after):
-        entry = {"step": name, "sent": bool(ok_), "changed_pct": _changed(before, after)}
-        steps.append(entry)
-        print(json.dumps(entry), flush=True)
+    def fail(reason):
+        steps.append({"failed": reason})
+        print(json.dumps(steps, ensure_ascii=False, indent=2))
+        sys.exit(1)
 
     start = frame("start")
-    sent = controller.post_key_down(KEY_M).wait().succeeded and controller.post_key_up(KEY_M).wait().succeeded
+    # Held ~80 ms: the game reads input once per frame and missed a 12 ms press on the device.
+    sent = controller.post_key_down(KEY_M).wait().succeeded
+    time.sleep(0.08)
+    sent = controller.post_key_up(KEY_M).wait().succeeded and sent
     time.sleep(1.5)
     map_open = frame("after-key-m")
-    step("key M posted to the game process (expect the big map)", sent, start, map_open)
+    steps.append({"step": "key M", "sent": sent, "changed_pct": _changed(start, map_open)})
+    if not sent or steps[-1]["changed_pct"] < 50:
+        fail("M was refused or the big map did not open; not clicking")
 
     sent = controller.post_click(*MAP_BACK).wait().succeeded
     time.sleep(1.5)
     map_closed = frame("after-click-back")
-    step("global click on the map back button (expect the world again)", sent, map_open, map_closed)
-    steps.append({"step": "world again vs start", "changed_pct": _changed(start, map_closed)})
-    print(json.dumps(steps[-1]), flush=True)
+    steps.append({"step": "click map back", "sent": sent, "changed_pct": _changed(map_open, map_closed),
+                  "vs_start_pct": _changed(start, map_closed)})
+    if not sent or steps[-1]["changed_pct"] < 50:
+        fail("the click was refused or the map is still open")
 
     if args.release:
         # Hold W, then destroy the controller without a key-up: the unit must release W itself.
@@ -420,17 +444,22 @@ def cmd_input_check(args) -> int:
         time.sleep(0.6)
         del controller
         gc.collect()
-        time.sleep(0.4)
+        time.sleep(1.0)
         observer, ok, _ = _connect(window_id, raw=False)
         settled = _grab(observer)[0]
         time.sleep(1.0)
         later = _grab(observer)[0]
+        if settled is None or later is None:
+            fail("no frames after the destroy")
         cv2.imwrite(str(out / "release-settled.png"), settled)
         cv2.imwrite(str(out / "release-later.png"), later)
-        entry = {"step": "W held across destroy (expect no movement afterwards)", "sent": bool(sent),
-                 "changed_pct_after_destroy": _changed(settled, later)}
-        steps.append(entry)
-        print(json.dumps(entry), flush=True)
+        # Background band above the character: still when nobody walks.
+        band = (slice(100, 330), slice(700, 1280))
+        steps.append({"step": "W held across destroy", "sent": sent,
+                      "background_changed_pct": _changed(settled[band], later[band])})
+        if not sent or steps[-1]["background_changed_pct"] > 5:
+            fail("W was refused, or the scene still moves after the destroy (W may be held)")
+    print(json.dumps(steps, ensure_ascii=False, indent=2))
     print(f"frames and maafw.log in {out}")
     return 0
 
@@ -458,7 +487,7 @@ def main() -> int:
         else:
             command.add_argument("--out", required=True)
         if name == "input-check":
-            command.add_argument("--delay", type=int, default=5, help="seconds to bring the game to the front")
+            command.add_argument("--wait", type=int, default=60, help="seconds to wait for the game to be in front")
             command.add_argument("--release", action="store_true",
                                  help="also hold W across a controller destroy (the character walks briefly)")
     args = parser.parse_args()

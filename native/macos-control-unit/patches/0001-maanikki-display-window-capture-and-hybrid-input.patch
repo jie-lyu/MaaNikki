@@ -67,10 +67,10 @@ index 0000000..1e86efb
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Base/CaptureGeometry.h b/source/MaaMacOSControlUnit/Base/CaptureGeometry.h
 new file mode 100644
-index 0000000..4991002
+index 0000000..fde08e8
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Base/CaptureGeometry.h
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,108 @@
 +#pragma once
 +
 +#include <mutex>
@@ -99,9 +99,10 @@ index 0000000..4991002
 +    CGRect display_bounds = CGRectZero; // CGDisplayBounds at capture time
 +    size_t display_pixel_width = 0;     // display mode at capture time
 +    size_t display_pixel_height = 0;
-+    // Consecutive published frames with this geometry. A press is refused on the first frame after
-+    // a change: the click may have been computed from a frame with the previous geometry.
-+    int frames_with_geometry = 0;
++    // Latched once any published frame's geometry differs from an earlier one since connect. A click
++    // carries only coordinates, so it may have been computed from a frame with the old geometry;
++    // presses stay refused until the controller reconnects and recognition starts over.
++    bool geometry_changed = false;
 +};
 +
 +inline bool same_geometry(const CaptureFrame& a, const CaptureFrame& b)
@@ -129,9 +130,21 @@ index 0000000..4991002
 +    void publish(CaptureFrame frame)
 +    {
 +        std::lock_guard lock(mutex_);
-+        frame.frames_with_geometry = previous_ && same_geometry(*previous_, frame) ? previous_->frames_with_geometry + 1 : 1;
++        if (previous_ && !same_geometry(*previous_, frame)) {
++            changed_ = true;
++        }
++        frame.geometry_changed = changed_;
 +        frame_ = frame;
 +        previous_ = frame;
++    }
++
++    // A new connection: forget everything, including the latch.
++    void reset()
++    {
++        std::lock_guard lock(mutex_);
++        frame_.reset();
++        previous_.reset();
++        changed_ = false;
 +    }
 +
 +    // The target is gone or being rebuilt: no press may map through the old frame. The previous
@@ -152,6 +165,7 @@ index 0000000..4991002
 +    mutable std::mutex mutex_;
 +    std::optional<CaptureFrame> frame_;
 +    std::optional<CaptureFrame> previous_;
++    bool changed_ = false;
 +};
 +
 +// CGWindowList view of one window: owner pid, global bounds in points, on-screen flag.
@@ -165,23 +179,47 @@ index 0000000..4991002
 +std::optional<WindowState> query_window(uint32_t window_id);
 +
 +MAA_CTRL_UNIT_NS_END
+diff --git a/source/MaaMacOSControlUnit/CMakeLists.txt b/source/MaaMacOSControlUnit/CMakeLists.txt
+index 344f217..2744be9 100644
+--- a/source/MaaMacOSControlUnit/CMakeLists.txt
++++ b/source/MaaMacOSControlUnit/CMakeLists.txt
+@@ -48,3 +48,18 @@ install(
+ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${maa_macos_control_unit_src})
+ 
+ source_group(PREFIX "ControlUnitCommon" TREE ${CMAKE_CURRENT_SOURCE_DIR}/../ControlUnitCommon FILES ${maa_macos_app_lifecycle_src})
++
++# MaaNikki: deterministic HybridInput tests over a fake platform. Opt-in, never installed.
++option(MAANIKKI_UNIT_TESTS "build MaaNikki's HybridInput tests" OFF)
++if(MAANIKKI_UNIT_TESTS)
++    add_executable(MaaNikkiHybridInputTest
++        ${CMAKE_SOURCE_DIR}/test/maanikki/HybridInputTest.mm
++        ${CMAKE_CURRENT_SOURCE_DIR}/Input/HybridInput.mm
++        ${CMAKE_CURRENT_SOURCE_DIR}/Input/InputPlatform.mm
++        ${CMAKE_CURRENT_SOURCE_DIR}/Base/CaptureGeometry.cpp)
++    target_include_directories(MaaNikkiHybridInputTest
++        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../ControlUnitCommon ${MAA_PRIVATE_INC} ${MAA_PUBLIC_INC})
++    target_link_libraries(MaaNikkiHybridInputTest PRIVATE MaaUtils ${OpenCV_LIBS} ${APPLICATION_SERVICES} ${CORE_FOUNDATION} ${FOUNDATION})
++    # Runs from the build tree, where MaaUtils' dependencies live outside bin/.
++    set_target_properties(MaaNikkiHybridInputTest PROPERTIES BUILD_WITH_INSTALL_RPATH OFF)
++endif()
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.h b/source/MaaMacOSControlUnit/Input/HybridInput.h
 new file mode 100644
-index 0000000..7450533
+index 0000000..8c50bc8
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.h
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,98 @@
 +#pragma once
 +
-+#include <chrono>
 +#include <map>
 +#include <memory>
 +#include <mutex>
++#include <set>
 +#include <thread>
 +
 +#include "Base/CaptureGeometry.h"
 +#include "Base/UnitBase.h"
 +#include "Common/Conf.h"
++#include "Input/InputPlatform.h"
 +
 +#include <ApplicationServices/ApplicationServices.h>
 +
@@ -205,11 +243,13 @@ index 0000000..7450533
 +//
 +// The core calls releases from its stopping thread while its worker may be inside a press, so all
 +// state is guarded by one mutex. A release that arrives from another thread for a press the unit
-+// has not accepted yet cancels that press when it arrives shortly afterwards.
++// has not accepted yet cancels that press whenever it arrives; inactive(), which the core queues
++// behind any in-flight action once a task ends, clears cancellations that no press consumed.
 +class HybridInput : public InputBase
 +{
 +public:
-+    HybridInput(uint32_t window_id, std::shared_ptr<CaptureGeometry> geometry);
++    HybridInput(uint32_t window_id, std::shared_ptr<CaptureGeometry> geometry,
++                std::shared_ptr<InputPlatform> platform = system_input_platform());
 +    virtual ~HybridInput() override;
 +
 +public: // from InputBase
@@ -232,10 +272,10 @@ index 0000000..7450533
 +
 +    bool relative_move(int dx, int dy);
 +    void release_all();
++    // End of a task: release what is held and forget cancellations no press consumed.
++    void inactive();
 +
 +private:
-+    using Clock = std::chrono::steady_clock;
-+
 +    struct HeldContact
 +    {
 +        CGPoint point = CGPointZero;
@@ -249,28 +289,29 @@ index 0000000..7450533
 +    bool key_up_locked(int key);
 +
 +    // A release from a foreign thread for something not held: remember it briefly.
-+    void note_unmatched_release(std::map<int, Clock::time_point>& cancels, int id);
-+    bool take_cancel(std::map<int, Clock::time_point>& cancels, int id);
++    void note_unmatched_release(std::set<int>& cancels, int id);
++    void release_all_locked();
 +
 +    uint32_t window_id_ = 0;
 +    std::shared_ptr<CaptureGeometry> geometry_;
++    std::shared_ptr<InputPlatform> platform_;
 +
 +    mutable std::mutex mutex_;
 +    std::thread::id worker_;
 +    std::map<int, HeldContact> held_contacts_;
 +    std::map<int, pid_t> held_keys_; // key -> process the press went to
-+    std::map<int, Clock::time_point> cancelled_contacts_;
-+    std::map<int, Clock::time_point> cancelled_keys_;
++    std::set<int> cancelled_contacts_;
++    std::set<int> cancelled_keys_;
 +    CGPoint saved_cursor_ = { NAN, NAN };
 +};
 +
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
 new file mode 100644
-index 0000000..8620f54
+index 0000000..76c1b0a
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
-@@ -0,0 +1,468 @@
+@@ -0,0 +1,334 @@
 +#include "HybridInput.h"
 +
 +#include "InputUtils.h"
@@ -278,122 +319,12 @@ index 0000000..8620f54
 +
 +#include <cmath>
 +#include <tuple>
-+#include <unistd.h>
 +#include <vector>
 +
 +MAA_CTRL_UNIT_NS_BEGIN
 +
 +namespace
 +{
-+
-+constexpr auto kCancelWindow = std::chrono::milliseconds(500);
-+constexpr float kAxTimeoutSeconds = 0.25f;
-+
-+AXUIElementRef system_wide()
-+{
-+    static AXUIElementRef element = [] {
-+        AXUIElementRef created = AXUIElementCreateSystemWide();
-+        AXUIElementSetMessagingTimeout(created, kAxTimeoutSeconds);
-+        return created;
-+    }();
-+    return element;
-+}
-+
-+// The front (active) application. GetFrontProcess is deprecated but still answers from the window
-+// server without a run loop; NSWorkspace.frontmostApplication goes stale in a process that does not
-+// run its main loop, and the accessibility server's focused application fails for apps that do not
-+// answer accessibility requests (-25204 observed with Activity Monitor in front).
-+pid_t front_application_pid()
-+{
-+#pragma clang diagnostic push
-+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-+    ProcessSerialNumber psn {};
-+    pid_t pid = -1;
-+    if (GetFrontProcess(&psn) != noErr || GetProcessPID(&psn, &pid) != noErr) {
-+        pid = -1;
-+    }
-+#pragma clang diagnostic pop
-+    return pid;
-+}
-+
-+// The process whose window receives a click at this global point. The window server's hit test
-+// behind it skips click-through overlays, which the window list cannot tell apart (several apps keep
-+// full-screen transparent windows above everything).
-+pid_t process_at_point(CGPoint point, AXError* error)
-+{
-+    AXUIElementRef element = nullptr;
-+    *error = AXUIElementCopyElementAtPosition(system_wide(), static_cast<float>(point.x), static_cast<float>(point.y), &element);
-+    if (*error != kAXErrorSuccess || !element) {
-+        return -1;
-+    }
-+    pid_t pid = -1;
-+    if (AXUIElementGetPid(element, &pid) != kAXErrorSuccess) {
-+        pid = -1;
-+    }
-+    CFRelease(element);
-+    return pid;
-+}
-+
-+// Among the target process's own on-screen windows, the front-most one containing the point.
-+// Separates the game window from the process's other windows (dialogs, helper windows).
-+uint32_t front_window_of_process_at(pid_t pid, CGPoint point)
-+{
-+    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
-+    if (!list) {
-+        return 0;
-+    }
-+    uint32_t found = 0;
-+    for (CFIndex i = 0; i < CFArrayGetCount(list) && found == 0; ++i) {
-+        auto info = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(list, i));
-+        pid_t owner = -1;
-+        if (auto ref = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowOwnerPID))) {
-+            CFNumberGetValue(ref, kCFNumberIntType, &owner);
-+        }
-+        if (owner != pid) {
-+            continue;
-+        }
-+        double alpha = 1;
-+        if (auto ref = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowAlpha))) {
-+            CFNumberGetValue(ref, kCFNumberDoubleType, &alpha);
-+        }
-+        CGRect bounds = CGRectZero;
-+        if (auto ref = static_cast<CFDictionaryRef>(CFDictionaryGetValue(info, kCGWindowBounds))) {
-+            CGRectMakeWithDictionaryRepresentation(ref, &bounds);
-+        }
-+        if (alpha <= 0 || !CGRectContainsPoint(bounds, point)) {
-+            continue;
-+        }
-+        if (auto ref = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowNumber))) {
-+            CFNumberGetValue(ref, kCFNumberSInt32Type, &found);
-+        }
-+    }
-+    CFRelease(list);
-+    return found;
-+}
-+
-+bool post_mouse(CGEventType type, CGPoint location, CGMouseButton button)
-+{
-+    CGEventRef event = CGEventCreateMouseEvent(nullptr, type, location, button);
-+    if (!event) {
-+        LogError << "failed to create mouse event";
-+        return false;
-+    }
-+    CGEventPost(kCGHIDEventTap, event);
-+    CFRelease(event);
-+    return true;
-+}
-+
-+bool post_key(pid_t pid, CGKeyCode key, bool down)
-+{
-+    CGEventRef event = CGEventCreateKeyboardEvent(nullptr, key, down);
-+    if (!event) {
-+        LogError << "failed to create keyboard event";
-+        return false;
-+    }
-+    CGEventPostToPid(pid, event);
-+    CFRelease(event);
-+    return true;
-+}
 +
 +bool valid_key(int key)
 +{
@@ -406,9 +337,10 @@ index 0000000..8620f54
 +
 +} // namespace
 +
-+HybridInput::HybridInput(uint32_t window_id, std::shared_ptr<CaptureGeometry> geometry)
++HybridInput::HybridInput(uint32_t window_id, std::shared_ptr<CaptureGeometry> geometry, std::shared_ptr<InputPlatform> platform)
 +    : window_id_(window_id)
 +    , geometry_(std::move(geometry))
++    , platform_(std::move(platform))
 +{
 +}
 +
@@ -424,12 +356,12 @@ index 0000000..8620f54
 +
 +std::optional<pid_t> HybridInput::foreground_target(const char* action) const
 +{
-+    auto window = query_window(window_id_);
++    auto window = platform_->window(window_id_);
 +    if (!window || !window->on_screen) {
 +        LogError << "target window is gone or off screen, not sending" << VAR(action) << VAR(window_id_);
 +        return std::nullopt;
 +    }
-+    pid_t front = front_application_pid();
++    pid_t front = platform_->front_pid();
 +    if (front != window->pid) {
 +        LogError << "target is not the front application, not sending" << VAR(action) << VAR(window->pid) << VAR(front);
 +        return std::nullopt;
@@ -444,8 +376,8 @@ index 0000000..8620f54
 +        LogError << "no captured frame to map the point through, not sending" << VAR(action);
 +        return std::nullopt;
 +    }
-+    if (frame->frames_with_geometry < 2) {
-+        LogError << "geometry changed with the last frame; capture again before clicking" << VAR(action);
++    if (frame->geometry_changed) {
++        LogError << "window or display geometry changed since connect; reconnect before clicking" << VAR(action);
 +        return std::nullopt;
 +    }
 +    if (x < 0 || y < 0 || x >= frame->width || y >= frame->height) {
@@ -454,11 +386,11 @@ index 0000000..8620f54
 +        return std::nullopt;
 +    }
 +
-+    auto window = query_window(window_id_);
-+    DisplayMode mode = display_mode(frame->display_id);
++    auto window = platform_->window(window_id_);
++    DisplayMode mode = platform_->display_mode(frame->display_id);
 +    if (!window || !window->on_screen || window->pid != frame->pid
 +        || !CGRectEqualToRect(CGRectIntegral(window->bounds), CGRectIntegral(frame->window_bounds))
-+        || !CGRectEqualToRect(CGDisplayBounds(frame->display_id), frame->display_bounds) || mode.pixel_width != frame->display_pixel_width
++        || !CGRectEqualToRect(platform_->display_bounds(frame->display_id), frame->display_bounds) || mode.pixel_width != frame->display_pixel_width
 +        || mode.pixel_height != frame->display_pixel_height) {
 +        LogError << "window or display changed since the last frame, not sending" << VAR(action) << VAR(window.has_value());
 +        return std::nullopt;
@@ -471,39 +403,34 @@ index 0000000..8620f54
 +    // Frame pixel -> global point: one origin, one scale, the same ones the frame was cropped with.
 +    CGPoint point = CGPointMake(frame->captured_rect.origin.x + x / frame->scale, frame->captured_rect.origin.y + y / frame->scale);
 +
-+    AXError error = kAXErrorSuccess;
-+    pid_t owner = process_at_point(point, &error);
++    int error = 0;
++    pid_t owner = platform_->process_at(point, &error);
 +    if (owner != *pid) {
 +        LogError << "another process receives clicks at this point (Dock, menu bar, a window above?), not sending" << VAR(action)
 +                 << VAR(point.x) << VAR(point.y) << VAR(owner) << VAR(error);
 +        return std::nullopt;
 +    }
-+    uint32_t front = front_window_of_process_at(*pid, point);
++    uint32_t front = platform_->front_window_of_process_at(*pid, point);
 +    if (front != window_id_) {
 +        LogError << "another window of the game covers this point, not sending" << VAR(action) << VAR(point.x) << VAR(point.y) << VAR(front);
++        return std::nullopt;
++    }
++    // The hit test may block; the user can switch apps meanwhile. Check the front app once more last.
++    if (platform_->front_pid() != *pid) {
++        LogError << "target left the front during the checks, not sending" << VAR(action);
 +        return std::nullopt;
 +    }
 +    return point;
 +}
 +
-+void HybridInput::note_unmatched_release(std::map<int, Clock::time_point>& cancels, int id)
++void HybridInput::note_unmatched_release(std::set<int>& cancels, int id)
 +{
 +    // The core's own worker releases after a refused press; only a release racing in from the stopping
-+    // thread may belong to a press that is about to arrive.
++    // thread may belong to a press that is about to arrive. It stays until that press consumes it or
++    // inactive() ends the task.
 +    if (std::this_thread::get_id() != worker_) {
-+        cancels[id] = Clock::now();
++        cancels.insert(id);
 +    }
-+}
-+
-+bool HybridInput::take_cancel(std::map<int, Clock::time_point>& cancels, int id)
-+{
-+    auto it = cancels.find(id);
-+    if (it == cancels.end()) {
-+        return false;
-+    }
-+    bool fresh = Clock::now() - it->second < kCancelWindow;
-+    cancels.erase(it);
-+    return fresh;
 +}
 +
 +bool HybridInput::click(int x, int y)
@@ -530,7 +457,7 @@ index 0000000..8620f54
 +        LogError << "contact out of range" << VAR(contact);
 +        return false;
 +    }
-+    if (take_cancel(cancelled_contacts_, contact)) {
++    if (cancelled_contacts_.erase(contact)) {
 +        LogWarn << "press cancelled by a stop that arrived before it" << VAR(contact);
 +        return false;
 +    }
@@ -544,13 +471,9 @@ index 0000000..8620f54
 +    }
 +
 +    if (held_contacts_.empty()) {
-+        CGEventRef current = CGEventCreate(nullptr);
-+        if (current) {
-+            saved_cursor_ = CGEventGetLocation(current);
-+            CFRelease(current);
-+        }
++        saved_cursor_ = platform_->cursor().value_or(CGPoint { NAN, NAN });
 +    }
-+    if (!post_mouse(info.event_type, *point, info.mouse_button)) {
++    if (!platform_->post_mouse(info.event_type, *point, info.mouse_button)) {
 +        return false;
 +    }
 +    held_contacts_[contact] = { *point, info.mouse_button };
@@ -577,7 +500,7 @@ index 0000000..8620f54
 +    if (!point) {
 +        return false;
 +    }
-+    if (!post_mouse(info.event_type, *point, info.mouse_button)) {
++    if (!platform_->post_mouse(info.event_type, *point, info.mouse_button)) {
 +        return false;
 +    }
 +    held->second.point = *point;
@@ -601,10 +524,10 @@ index 0000000..8620f54
 +    MouseEventInfo info;
 +    contact_to_mouse_up_info(contact, info);
 +    // Released where it was pressed, whatever the window or the user's cursor did since.
-+    bool ok = post_mouse(info.event_type, held->second.point, held->second.button);
++    bool ok = platform_->post_mouse(info.event_type, held->second.point, held->second.button);
 +    held_contacts_.erase(held);
 +    if (held_contacts_.empty() && !std::isnan(saved_cursor_.x)) {
-+        CGWarpMouseCursorPosition(saved_cursor_);
++        platform_->warp_cursor(saved_cursor_);
 +        saved_cursor_ = { NAN, NAN };
 +    }
 +    return ok;
@@ -628,18 +551,7 @@ index 0000000..8620f54
 +        LogError << "failed to convert text" << VAR(text);
 +        return false;
 +    }
-+    for (bool down : { true, false }) {
-+        CGEventRef event = CGEventCreateKeyboardEvent(nullptr, 0, down);
-+        if (!event) {
-+            LogError << "failed to create keyboard event";
-+            return false;
-+        }
-+        CGEventKeyboardSetUnicodeString(event, chars.size(), chars.data());
-+        CGEventPostToPid(*pid, event);
-+        CFRelease(event);
-+        usleep(10000);
-+    }
-+    return true;
++    return platform_->post_text(*pid, chars);
 +}
 +
 +bool HybridInput::key_down(int key)
@@ -649,7 +561,7 @@ index 0000000..8620f54
 +    if (!valid_key(key)) {
 +        return false;
 +    }
-+    if (take_cancel(cancelled_keys_, key)) {
++    if (cancelled_keys_.erase(key)) {
 +        LogWarn << "key press cancelled by a stop that arrived before it" << VAR(key);
 +        return false;
 +    }
@@ -657,7 +569,7 @@ index 0000000..8620f54
 +        return true; // already down where it was sent
 +    }
 +    auto pid = foreground_target("key_down");
-+    if (!pid || !post_key(*pid, static_cast<CGKeyCode>(key), true)) {
++    if (!pid || !platform_->post_key(*pid, static_cast<CGKeyCode>(key), true)) {
 +        return false;
 +    }
 +    held_keys_[key] = *pid;
@@ -681,7 +593,7 @@ index 0000000..8620f54
 +        return true;
 +    }
 +    // To the process that got the press, even if the window has closed or its id was reused since.
-+    bool ok = post_key(held->second, static_cast<CGKeyCode>(key), false);
++    bool ok = platform_->post_key(held->second, static_cast<CGKeyCode>(key), false);
 +    held_keys_.erase(held);
 +    return ok;
 +}
@@ -698,30 +610,25 @@ index 0000000..8620f54
 +{
 +    std::lock_guard lock(mutex_);
 +    auto pid = foreground_target("relative_move");
-+    if (!pid) {
-+        return false;
-+    }
-+    CGEventRef current = CGEventCreate(nullptr);
-+    CGPoint location = current ? CGEventGetLocation(current) : CGPointZero;
-+    if (current) {
-+        CFRelease(current);
-+    }
-+    // Posted to the process, the cursor stays where it is and the game turns the camera.
-+    CGEventRef event = CGEventCreateMouseEvent(nullptr, kCGEventMouseMoved, location, kCGMouseButtonLeft);
-+    if (!event) {
-+        LogError << "failed to create mouse-moved event";
-+        return false;
-+    }
-+    CGEventSetIntegerValueField(event, kCGMouseEventDeltaX, dx);
-+    CGEventSetIntegerValueField(event, kCGMouseEventDeltaY, dy);
-+    CGEventPostToPid(*pid, event);
-+    CFRelease(event);
-+    return true;
++    return pid && platform_->post_relative_move(*pid, dx, dy);
 +}
 +
 +void HybridInput::release_all()
 +{
 +    std::lock_guard lock(mutex_);
++    release_all_locked();
++}
++
++void HybridInput::inactive()
++{
++    std::lock_guard lock(mutex_);
++    release_all_locked();
++    cancelled_contacts_.clear();
++    cancelled_keys_.clear();
++}
++
++void HybridInput::release_all_locked()
++{
 +    std::vector<int> contacts;
 +    for (const auto& [contact, _] : held_contacts_) {
 +        contacts.push_back(contact);
@@ -739,8 +646,243 @@ index 0000000..8620f54
 +}
 +
 +MAA_CTRL_UNIT_NS_END
+diff --git a/source/MaaMacOSControlUnit/Input/InputPlatform.h b/source/MaaMacOSControlUnit/Input/InputPlatform.h
+new file mode 100644
+index 0000000..c2fbecf
+--- /dev/null
++++ b/source/MaaMacOSControlUnit/Input/InputPlatform.h
+@@ -0,0 +1,41 @@
++#pragma once
++
++#include <memory>
++#include <optional>
++#include <vector>
++
++#include <ApplicationServices/ApplicationServices.h>
++
++#include "Base/CaptureGeometry.h"
++#include "Common/Conf.h"
++
++MAA_CTRL_UNIT_NS_BEGIN
++
++// Everything HybridInput asks of the desktop or sends to it. The system implementation wraps
++// CoreGraphics, the accessibility API and the Process Manager; tests substitute a fake to drive
++// orderings (a stop racing a press) that cannot be produced reliably on a real desktop.
++class InputPlatform
++{
++public:
++    virtual ~InputPlatform() = default;
++
++    virtual std::optional<WindowState> window(uint32_t window_id) = 0;
++    virtual pid_t front_pid() = 0;
++    // The process a click at this global point reaches (accessibility hit test); -1 with error set otherwise.
++    virtual pid_t process_at(CGPoint point, int* error) = 0;
++    // Among pid's on-screen windows, the front-most one containing the point; 0 if none.
++    virtual uint32_t front_window_of_process_at(pid_t pid, CGPoint point) = 0;
++    virtual CGRect display_bounds(CGDirectDisplayID display_id) = 0;
++    virtual DisplayMode display_mode(CGDirectDisplayID display_id) = 0;
++
++    virtual bool post_mouse(CGEventType type, CGPoint location, CGMouseButton button) = 0;
++    virtual bool post_key(pid_t pid, CGKeyCode key, bool down) = 0;
++    virtual bool post_text(pid_t pid, const std::vector<UniChar>& chars) = 0;
++    virtual bool post_relative_move(pid_t pid, int dx, int dy) = 0;
++    virtual std::optional<CGPoint> cursor() = 0;
++    virtual void warp_cursor(CGPoint point) = 0;
++};
++
++std::shared_ptr<InputPlatform> system_input_platform();
++
++MAA_CTRL_UNIT_NS_END
+diff --git a/source/MaaMacOSControlUnit/Input/InputPlatform.mm b/source/MaaMacOSControlUnit/Input/InputPlatform.mm
+new file mode 100644
+index 0000000..23af288
+--- /dev/null
++++ b/source/MaaMacOSControlUnit/Input/InputPlatform.mm
+@@ -0,0 +1,182 @@
++#include "InputPlatform.h"
++
++#include "MaaUtils/Logger.h"
++
++#include <unistd.h>
++
++MAA_CTRL_UNIT_NS_BEGIN
++
++namespace
++{
++
++constexpr float kAxTimeoutSeconds = 0.25f;
++
++AXUIElementRef system_wide()
++{
++    static AXUIElementRef element = [] {
++        AXUIElementRef created = AXUIElementCreateSystemWide();
++        AXUIElementSetMessagingTimeout(created, kAxTimeoutSeconds);
++        return created;
++    }();
++    return element;
++}
++
++class SystemInputPlatform : public InputPlatform
++{
++public:
++    std::optional<WindowState> window(uint32_t window_id) override { return query_window(window_id); }
++
++    // GetFrontProcess is deprecated but still answers from the window server without a run loop;
++    // NSWorkspace.frontmostApplication goes stale in a process that does not run its main loop, and
++    // the accessibility server's focused application fails for apps that do not answer accessibility
++    // requests (-25204 observed with Activity Monitor in front).
++    pid_t front_pid() override
++    {
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wdeprecated-declarations"
++        ProcessSerialNumber psn {};
++        pid_t pid = -1;
++        if (GetFrontProcess(&psn) != noErr || GetProcessPID(&psn, &pid) != noErr) {
++            pid = -1;
++        }
++#pragma clang diagnostic pop
++        return pid;
++    }
++
++    // The window server's hit test behind this skips click-through overlays, which the window list
++    // cannot tell apart (several apps keep full-screen transparent windows above everything).
++    pid_t process_at(CGPoint point, int* error) override
++    {
++        AXUIElementRef element = nullptr;
++        AXError result =
++            AXUIElementCopyElementAtPosition(system_wide(), static_cast<float>(point.x), static_cast<float>(point.y), &element);
++        *error = result;
++        if (result != kAXErrorSuccess || !element) {
++            return -1;
++        }
++        pid_t pid = -1;
++        if (AXUIElementGetPid(element, &pid) != kAXErrorSuccess) {
++            pid = -1;
++        }
++        CFRelease(element);
++        return pid;
++    }
++
++    uint32_t front_window_of_process_at(pid_t pid, CGPoint point) override
++    {
++        CFArrayRef list =
++            CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
++        if (!list) {
++            return 0;
++        }
++        uint32_t found = 0;
++        for (CFIndex i = 0; i < CFArrayGetCount(list) && found == 0; ++i) {
++            auto info = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(list, i));
++            pid_t owner = -1;
++            if (auto ref = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowOwnerPID))) {
++                CFNumberGetValue(ref, kCFNumberIntType, &owner);
++            }
++            if (owner != pid) {
++                continue;
++            }
++            double alpha = 1;
++            if (auto ref = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowAlpha))) {
++                CFNumberGetValue(ref, kCFNumberDoubleType, &alpha);
++            }
++            CGRect bounds = CGRectZero;
++            if (auto ref = static_cast<CFDictionaryRef>(CFDictionaryGetValue(info, kCGWindowBounds))) {
++                CGRectMakeWithDictionaryRepresentation(ref, &bounds);
++            }
++            if (alpha <= 0 || !CGRectContainsPoint(bounds, point)) {
++                continue;
++            }
++            if (auto ref = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowNumber))) {
++                CFNumberGetValue(ref, kCFNumberSInt32Type, &found);
++            }
++        }
++        CFRelease(list);
++        return found;
++    }
++
++    CGRect display_bounds(CGDirectDisplayID display_id) override { return CGDisplayBounds(display_id); }
++
++    DisplayMode display_mode(CGDirectDisplayID display_id) override { return MAA_CTRL_UNIT_NS::display_mode(display_id); }
++
++    bool post_mouse(CGEventType type, CGPoint location, CGMouseButton button) override
++    {
++        CGEventRef event = CGEventCreateMouseEvent(nullptr, type, location, button);
++        if (!event) {
++            LogError << "failed to create mouse event";
++            return false;
++        }
++        CGEventPost(kCGHIDEventTap, event);
++        CFRelease(event);
++        return true;
++    }
++
++    bool post_key(pid_t pid, CGKeyCode key, bool down) override
++    {
++        CGEventRef event = CGEventCreateKeyboardEvent(nullptr, key, down);
++        if (!event) {
++            LogError << "failed to create keyboard event";
++            return false;
++        }
++        CGEventPostToPid(pid, event);
++        CFRelease(event);
++        return true;
++    }
++
++    bool post_text(pid_t pid, const std::vector<UniChar>& chars) override
++    {
++        for (bool down : { true, false }) {
++            CGEventRef event = CGEventCreateKeyboardEvent(nullptr, 0, down);
++            if (!event) {
++                LogError << "failed to create keyboard event";
++                return false;
++            }
++            CGEventKeyboardSetUnicodeString(event, chars.size(), chars.data());
++            CGEventPostToPid(pid, event);
++            CFRelease(event);
++            usleep(10000);
++        }
++        return true;
++    }
++
++    // Posted to the process, the cursor stays where it is and the game turns the camera.
++    bool post_relative_move(pid_t pid, int dx, int dy) override
++    {
++        CGPoint location = cursor().value_or(CGPointZero);
++        CGEventRef event = CGEventCreateMouseEvent(nullptr, kCGEventMouseMoved, location, kCGMouseButtonLeft);
++        if (!event) {
++            LogError << "failed to create mouse-moved event";
++            return false;
++        }
++        CGEventSetIntegerValueField(event, kCGMouseEventDeltaX, dx);
++        CGEventSetIntegerValueField(event, kCGMouseEventDeltaY, dy);
++        CGEventPostToPid(pid, event);
++        CFRelease(event);
++        return true;
++    }
++
++    std::optional<CGPoint> cursor() override
++    {
++        CGEventRef current = CGEventCreate(nullptr);
++        if (!current) {
++            return std::nullopt;
++        }
++        CGPoint point = CGEventGetLocation(current);
++        CFRelease(current);
++        return point;
++    }
++
++    void warp_cursor(CGPoint point) override { CGWarpMouseCursorPosition(point); }
++};
++
++} // namespace
++
++std::shared_ptr<InputPlatform> system_input_platform()
++{
++    return std::make_shared<SystemInputPlatform>();
++}
++
++MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.cpp b/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.cpp
-index 1d30e69..2967d44 100644
+index 1d30e69..c54fbed 100644
 --- a/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.cpp
 +++ b/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.cpp
 @@ -4,8 +4,10 @@
@@ -759,7 +901,7 @@ index 1d30e69..2967d44 100644
  {
      connected_ = false;
 +    hybrid_input_ = nullptr;
-+    geometry_->invalidate();
++    geometry_->reset();
  
      switch (screencap_method_) {
      case MaaMacOSScreencapMethod_ScreenCaptureKit:
@@ -809,7 +951,7 @@ index 1d30e69..2967d44 100644
  bool MacOSControlUnitMgr::inactive()
  {
 +    if (hybrid_input_) {
-+        hybrid_input_->release_all();
++        hybrid_input_->inactive();
 +    }
      return true;
  }
@@ -1160,3 +1302,330 @@ index 0000000..c17723a
 +}
 +
 +MAA_CTRL_UNIT_NS_END
+diff --git a/test/maanikki/HybridInputTest.mm b/test/maanikki/HybridInputTest.mm
+new file mode 100644
+index 0000000..cfc0017
+--- /dev/null
++++ b/test/maanikki/HybridInputTest.mm
+@@ -0,0 +1,321 @@
++// Deterministic tests for HybridInput over a fake InputPlatform: orderings a real desktop cannot
++// reproduce on demand (a stop racing a press), and every refusal path. Nothing reaches the system.
++// Built only with -DMAANIKKI_UNIT_TESTS=ON; never part of the shipped unit.
++
++#include "Base/CaptureGeometry.h"
++#include "Input/HybridInput.h"
++#include "Input/InputPlatform.h"
++
++#include <condition_variable>
++#include <cstdio>
++#include <functional>
++#include <future>
++#include <string>
++#include <thread>
++#include <vector>
++
++using namespace MAA_CTRL_UNIT_NS;
++
++namespace
++{
++
++constexpr uint32_t kWindow = 42;
++constexpr pid_t kGame = 100;
++int failures = 0;
++
++#define CHECK(condition)                                                              \
++    do {                                                                              \
++        if (!(condition)) {                                                           \
++            std::fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #condition); \
++            ++failures;                                                               \
++        }                                                                             \
++    } while (false)
++
++struct FakePlatform : InputPlatform
++{
++    std::mutex mutex;
++    WindowState win { kGame, CGRectMake(0, 0, 1920, 1080), true };
++    pid_t front = kGame;
++    pid_t hit_pid = kGame;
++    uint32_t hit_window = kWindow;
++    std::function<void()> on_hit_test;
++    std::vector<std::string> events;
++
++    // When set, the next mouse-down blocks inside post_mouse until `release_down` is fulfilled.
++    bool block_down = false;
++    std::promise<void> down_entered;
++    std::shared_future<void> release_down;
++
++    std::optional<WindowState> window(uint32_t id) override
++    {
++        std::lock_guard lock(mutex);
++        return id == kWindow ? std::optional(win) : std::nullopt;
++    }
++
++    pid_t front_pid() override
++    {
++        std::lock_guard lock(mutex);
++        return front;
++    }
++
++    pid_t process_at(CGPoint, int* error) override
++    {
++        if (on_hit_test) {
++            on_hit_test();
++        }
++        *error = 0;
++        std::lock_guard lock(mutex);
++        return hit_pid;
++    }
++
++    uint32_t front_window_of_process_at(pid_t, CGPoint) override
++    {
++        std::lock_guard lock(mutex);
++        return hit_window;
++    }
++
++    CGRect display_bounds(CGDirectDisplayID) override { return CGRectMake(0, 0, 1920, 1080); }
++
++    DisplayMode display_mode(CGDirectDisplayID) override { return { 3840, 2160 }; }
++
++    bool post_mouse(CGEventType type, CGPoint location, CGMouseButton) override
++    {
++        bool is_down = type == kCGEventLeftMouseDown;
++        if (is_down && block_down) {
++            block_down = false;
++            down_entered.set_value();
++            release_down.wait();
++        }
++        record((is_down ? "down@" : type == kCGEventLeftMouseUp ? "up@" : "drag@") + std::to_string(int(location.x)) + ","
++               + std::to_string(int(location.y)));
++        return true;
++    }
++
++    bool post_key(pid_t pid, CGKeyCode key, bool down) override
++    {
++        record(std::string(down ? "key_down " : "key_up ") + std::to_string(key) + " pid=" + std::to_string(pid));
++        return true;
++    }
++
++    bool post_text(pid_t, const std::vector<UniChar>&) override
++    {
++        record("text");
++        return true;
++    }
++
++    bool post_relative_move(pid_t, int dx, int dy) override
++    {
++        record("move " + std::to_string(dx) + "," + std::to_string(dy));
++        return true;
++    }
++
++    std::optional<CGPoint> cursor() override { return CGPointMake(7, 7); }
++
++    void warp_cursor(CGPoint point) override { record("warp@" + std::to_string(int(point.x)) + "," + std::to_string(int(point.y))); }
++
++    void record(std::string event)
++    {
++        std::lock_guard lock(mutex);
++        events.push_back(std::move(event));
++    }
++
++    std::vector<std::string> take()
++    {
++        std::lock_guard lock(mutex);
++        return std::exchange(events, {});
++    }
++};
++
++CaptureFrame frame(CGRect window_bounds = CGRectMake(0, 0, 1920, 1080))
++{
++    CaptureFrame f;
++    f.window_id = kWindow;
++    f.pid = kGame;
++    f.display_id = 1;
++    f.window_bounds = window_bounds;
++    f.captured_rect = window_bounds;
++    f.scale = 2;
++    f.width = int(window_bounds.size.width * 2);
++    f.height = int(window_bounds.size.height * 2);
++    f.display_bounds = CGRectMake(0, 0, 1920, 1080);
++    f.display_pixel_width = 3840;
++    f.display_pixel_height = 2160;
++    return f;
++}
++
++struct Fixture
++{
++    std::shared_ptr<FakePlatform> platform = std::make_shared<FakePlatform>();
++    std::shared_ptr<CaptureGeometry> geometry = std::make_shared<CaptureGeometry>();
++    std::unique_ptr<HybridInput> input;
++
++    Fixture()
++    {
++        geometry->publish(frame());
++        input = std::make_unique<HybridInput>(kWindow, geometry, platform);
++    }
++};
++
++using Events = std::vector<std::string>;
++
++void accepted_click_maps_once_and_restores_cursor()
++{
++    Fixture t;
++    CHECK(t.input->touch_down(0, 100, 200, 0));
++    CHECK(t.input->touch_up(0));
++    CHECK((t.platform->take() == Events { "down@50,100", "up@50,100", "warp@7,7" }));
++}
++
++void refused_press_sends_no_release_or_drag()
++{
++    Fixture t;
++    t.platform->front = 999;
++    CHECK(!t.input->touch_down(0, 100, 200, 0));
++    CHECK(!t.input->touch_move(0, 110, 200, 0));
++    CHECK(t.input->touch_up(0));
++    t.platform->front = kGame;
++    CHECK(t.platform->take().empty());
++    // The worker's own release after a refusal does not cancel the next press.
++    CHECK(t.input->touch_down(0, 100, 200, 0));
++    CHECK(t.input->touch_up(0));
++    CHECK(t.platform->take().size() == 3);
++}
++
++void stop_before_press_cancels_it_however_late()
++{
++    Fixture t;
++    // The core recorded the press, then its stopping thread released it before the unit saw it.
++    std::thread([&] { t.input->touch_up(0); t.input->key_up(13); }).join();
++    std::this_thread::sleep_for(std::chrono::milliseconds(700)); // longer than any timeout would allow
++    CHECK(!t.input->touch_down(0, 100, 200, 0));
++    CHECK(!t.input->key_down(13));
++    CHECK(t.platform->take().empty());
++    // The cancellation was consumed; the next press goes through.
++    CHECK(t.input->key_down(13));
++    CHECK(t.input->key_up(13));
++    CHECK(t.platform->take().size() == 2);
++}
++
++void inactive_clears_unconsumed_cancellations()
++{
++    Fixture t;
++    std::thread([&] { t.input->touch_up(0); }).join();
++    t.input->inactive();
++    CHECK(t.input->touch_down(0, 100, 200, 0));
++    t.input->inactive();
++    CHECK((t.platform->take() == Events { "down@50,100", "up@50,100", "warp@7,7" }));
++}
++
++void stop_during_press_releases_after_it()
++{
++    Fixture t;
++    std::promise<void> release;
++    t.platform->block_down = true;
++    t.platform->release_down = release.get_future().share();
++    auto entered = t.platform->down_entered.get_future();
++
++    std::thread worker([&] { CHECK(t.input->touch_down(0, 100, 200, 0)); });
++    entered.wait(); // the worker is inside the press, holding the input lock
++    std::atomic<bool> stop_returned = false;
++    std::thread stopper([&] {
++        t.input->touch_up(0);
++        stop_returned = true;
++    });
++    std::this_thread::sleep_for(std::chrono::milliseconds(100));
++    CHECK(!stop_returned); // the release waits for the press to finish
++    release.set_value();
++    worker.join();
++    stopper.join();
++    CHECK((t.platform->take() == Events { "down@50,100", "up@50,100", "warp@7,7" }));
++}
++
++void key_release_goes_to_the_pressing_process()
++{
++    Fixture t;
++    CHECK(t.input->key_down(13));
++    t.platform->win.pid = 300; // window id reused by another process
++    CHECK(t.input->key_up(13));
++    CHECK((t.platform->take() == Events { "key_down 13 pid=100", "key_up 13 pid=100" }));
++}
++
++void foreground_is_required_for_keys_text_and_moves()
++{
++    Fixture t;
++    t.platform->front = 999;
++    CHECK(!t.input->key_down(13));
++    CHECK(!t.input->input_text("a"));
++    CHECK(!t.input->relative_move(10, 0));
++    t.platform->win.on_screen = false;
++    t.platform->front = kGame;
++    CHECK(!t.input->key_down(13));
++    CHECK(t.platform->take().empty());
++}
++
++void click_needs_hit_test_evidence()
++{
++    Fixture t;
++    t.platform->hit_pid = 555; // Dock, menu bar or another app receives the click there
++    CHECK(!t.input->touch_down(0, 100, 200, 0));
++    t.platform->hit_pid = kGame;
++    t.platform->hit_window = 43; // another window of the game covers the point
++    CHECK(!t.input->touch_down(0, 100, 200, 0));
++    t.platform->hit_window = kWindow;
++    t.platform->on_hit_test = [&] { t.platform->front = 999; }; // user switches apps during the hit test
++    CHECK(!t.input->touch_down(0, 100, 200, 0));
++    CHECK(t.platform->take().empty());
++}
++
++void click_outside_frame_or_moved_window_is_refused()
++{
++    Fixture t;
++    CHECK(!t.input->touch_down(0, 3840, 10, 0));
++    t.platform->win.bounds = CGRectMake(10, 0, 1920, 1080);
++    CHECK(!t.input->touch_down(0, 100, 200, 0));
++    CHECK(t.platform->take().empty());
++}
++
++void geometry_change_latches_until_reconnect()
++{
++    Fixture t;
++    CGRect moved = CGRectMake(0, 0, 1600, 900);
++    t.platform->win.bounds = moved;
++    t.geometry->publish(frame(moved));
++    t.geometry->publish(frame(moved));
++    CHECK(!t.input->touch_down(0, 100, 200, 0)); // still refused after more frames at the new geometry
++    t.geometry->reset();                         // reconnect
++    t.geometry->publish(frame(moved));
++    CHECK(t.input->touch_down(0, 100, 200, 0));
++    CHECK(t.input->touch_up(0));
++    CHECK(t.platform->take().size() == 3);
++}
++
++void inactive_and_destruction_release_everything()
++{
++    Fixture t;
++    CHECK(t.input->key_down(13));
++    CHECK(t.input->touch_down(0, 100, 200, 0));
++    t.input->inactive();
++    CHECK((t.platform->take() == Events { "key_down 13 pid=100", "down@50,100", "up@50,100", "warp@7,7", "key_up 13 pid=100" }));
++    CHECK(t.input->key_down(1));
++    t.input.reset();
++    CHECK((t.platform->take() == Events { "key_down 1 pid=100", "key_up 1 pid=100" }));
++}
++
++} // namespace
++
++int main()
++{
++    accepted_click_maps_once_and_restores_cursor();
++    refused_press_sends_no_release_or_drag();
++    stop_before_press_cancels_it_however_late();
++    inactive_clears_unconsumed_cancellations();
++    stop_during_press_releases_after_it();
++    key_release_goes_to_the_pressing_process();
++    foreground_is_required_for_keys_text_and_moves();
++    click_needs_hit_test_evidence();
++    click_outside_frame_or_moved_window_is_refused();
++    geometry_change_latches_until_reconnect();
++    inactive_and_destruction_release_everything();
++    std::printf(failures ? "HybridInputTest: %d failure(s)\n" : "HybridInputTest: all passed\n", failures);
++    return failures ? 1 : 0;
++}
