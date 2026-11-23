@@ -557,7 +557,6 @@ def cmd_camera_check(args) -> int:
     start = frame("start")
     if _map_back_score(start) >= MAP_CLOSED_SCORE:
         fail("the big map is open; start in the open world")
-    cursor_before = _cursor()
 
     def option_press(name):
         before = frame(f"before-{name}")
@@ -572,30 +571,30 @@ def cmd_camera_check(args) -> int:
     if args.option:
         # The navigation engine's order: release the cursor mode with Option, then turn.
         start = option_press("option-before-turn")
-    sent = controller.post_relative_move(args.pixels, 0).wait().succeeded
-    if not sent:
-        fail("the unit refused the relative move (game not in front?)")
-    time.sleep(0.8)
-    turned = frame("after-turn")
-    turn_pct = _changed(start[band], turned[band])
-    steps.append({"step": f"relative move +{args.pixels}", "sent": sent, "scene_changed_pct": turn_pct})
-    sent = controller.post_relative_move(-args.pixels, 0).wait().succeeded
-    if not sent:
-        fail("the unit refused the reverse relative move")
-    time.sleep(0.8)
-    back = frame("after-turn-back")
-    steps.append({"step": f"relative move -{args.pixels}", "sent": sent, "scene_changed_pct": _changed(turned[band], back[band]),
-                  "vs_start_pct": _changed(start[band], back[band])})
-    cursor_after = _cursor()
-    steps.append({"step": "real cursor", "before": cursor_before, "after": cursor_after})
+
+    # Every step is judged before the next input is sent: the first anomaly stops the probe.
+    baseline = _cursor()  # after Option, which may legitimately change the cursor
+    for sign, name in ((1, f"relative move +{args.pixels}"), (-1, f"relative move -{args.pixels}")):
+        before = start if sign > 0 else turned
+        sent = controller.post_relative_move(sign * args.pixels, 0).wait().succeeded
+        if not sent:
+            fail(f"the unit refused {name} (game not in front?)")
+        time.sleep(0.8)
+        after = frame("after-turn" if sign > 0 else "after-turn-back")
+        changed = _changed(before[band], after[band])
+        cursor = _cursor()
+        steps.append({"step": name, "sent": sent, "scene_changed_pct": changed, "cursor": cursor,
+                      **({"vs_start_pct": _changed(start[band], after[band])} if sign < 0 else {})})
+        if abs(cursor[0] - baseline[0]) > 1 or abs(cursor[1] - baseline[1]) > 1:
+            fail(f"the real cursor moved after {name}: relative moves must not move it")
+        if changed < 1:
+            fail(f"{name} did not change the scene: the camera did not turn")
+        if sign > 0:
+            turned = after
     if args.option:
         option_press("option-after-turn")  # back to the cursor mode the game started in
-    if abs(cursor_after[0] - cursor_before[0]) > 1 or abs(cursor_after[1] - cursor_before[1]) > 1:
-        fail("the real cursor moved: relative moves must not move it")
-    if turn_pct < 1:
-        fail(f"+{args.pixels} did not change the scene: the camera did not turn")
-    # A turn changes the scene; whether it is a clean horizontal turn and comes back is judged from
-    # the saved frames, not from these numbers.
+    # Both turns changed the scene; whether they are clean horizontal turns and the second comes back
+    # is judged from the saved frames, not from these numbers.
     steps.append({"verdict": "needs_review", "frames": str(out)})
     print(json.dumps(steps, ensure_ascii=False, indent=2))
     print(f"needs review: look at the frames in {out}. The turn passes when +{args.pixels} turns the camera "

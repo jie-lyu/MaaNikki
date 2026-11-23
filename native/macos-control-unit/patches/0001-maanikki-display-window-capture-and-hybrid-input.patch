@@ -383,10 +383,10 @@ index 0000000..1e07764
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
 new file mode 100644
-index 0000000..799496b
+index 0000000..2476792
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
-@@ -0,0 +1,748 @@
+@@ -0,0 +1,751 @@
 +#include "HybridInput.h"
 +
 +#include "InputUtils.h"
@@ -772,8 +772,8 @@ index 0000000..799496b
 +    std::ignore = pressure;
 +    std::lock_guard lock(mutex_);
 +
-+    // Drags only follow an accepted press. A bare touch_move moves nothing: the core sends one to "move
-+    // to the scroll position" right before scroll(), which hovers that point itself.
++    // Any move forgets the previous scroll position; only a hover that happens registers a new one.
++    scroll_target_.reset();
 +    auto held = held_contacts_.find(contact);
 +    if (held == held_contacts_.end()) {
 +        if (refused_contacts_.contains(contact)) {
@@ -901,6 +901,9 @@ index 0000000..799496b
 +            const auto restore_started = Clock::now();
 +            cursor = restore_cursor(saved_cursor_);
 +            restore_ms = ms_since(restore_started);
++            if (cursor == "warp failed") {
++                hover_saved_ = saved_cursor_; // the button is up; the cursor is retried by the next cleanup
++            }
 +            saved_cursor_ = { NAN, NAN };
 +        }
 +    }
@@ -1823,10 +1826,10 @@ index 0000000..c17723a
 +MAA_CTRL_UNIT_NS_END
 diff --git a/test/maanikki/HybridInputTest.mm b/test/maanikki/HybridInputTest.mm
 new file mode 100644
-index 0000000..c6e91db
+index 0000000..c264501
 --- /dev/null
 +++ b/test/maanikki/HybridInputTest.mm
-@@ -0,0 +1,780 @@
+@@ -0,0 +1,804 @@
 +// Deterministic tests for HybridInput over a fake InputPlatform: orderings a real desktop cannot
 +// reproduce on demand (a stop racing a press), and every refusal path. Nothing reaches the system.
 +// Built only with -DMAANIKKI_UNIT_TESTS=ON; never part of the shipped unit.
@@ -2564,6 +2567,28 @@ index 0000000..c6e91db
 +    CHECK(t.input->touch_move(0, 300, 200, 0)); // after its touch_up, hovers work again
 +}
 +
++void a_click_whose_restore_fails_is_retried_by_the_cleanup()
++{
++    Fixture t;
++    CHECK(t.input->touch_down(0, 100, 200, 0));
++    t.platform->fail_warps = 1;
++    CHECK(t.input->touch_up(0)); // the button is up even though the cursor could not be moved back
++    CHECK(t.input->inactive());  // retried
++    CHECK((t.platform->take() == Events { "move@50,100", "down@50,100", "up@50,100", "warp@7,7" }));
++}
++
++void a_refused_move_also_forgets_the_old_scroll_target()
++{
++    Fixture t;
++    CHECK(t.input->touch_move(0, 100, 200, 0)); // hover A
++    t.platform->front = 999;
++    CHECK(!t.input->touch_down(0, 300, 200, 0)); // refused: contact 0 is marked
++    t.platform->front = kGame;
++    CHECK(!t.input->touch_move(0, 300, 200, 0)); // refused move (the swipe's rest)
++    CHECK(!t.input->scroll(0, 120));             // no wheel at A
++    CHECK((t.platform->take() == Events { "move@50,100" }));
++}
++
 +} // namespace
 +
 +int main()
@@ -2604,6 +2629,8 @@ index 0000000..c6e91db
 +    the_users_cursor_is_restored_once_and_retried_when_a_warp_fails();
 +    early_refusals_after_a_hover_leave_it_to_the_cleanup();
 +    a_refused_swipe_never_hovers_along_its_path();
++    a_click_whose_restore_fails_is_retried_by_the_cleanup();
++    a_refused_move_also_forgets_the_old_scroll_target();
 +    std::printf(failures ? "HybridInputTest: %d failure(s)\n" : "HybridInputTest: all passed\n", failures);
 +    return failures ? 1 : 0;
 +}
