@@ -107,4 +107,6 @@ jobs:
           try {
             cargo check --locked
             if ($LASTEXITCODE -ne 0) { throw 'cargo check failed' }
+            cargo test --locked --lib
+            if ($LASTEXITCODE -ne 0) { throw 'cargo test failed' }
           } finally { Pop-Location }

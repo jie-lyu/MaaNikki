@@ -110,7 +110,7 @@
 
 祝福闪光提示框字段由 `agent/collection/details.py` 统一解析，库存扫描与整理共用。名称和等级沿用调用方的 OCR 门槛；颜色可单独采用 0.70 门槛，但低于普通门槛的行须完整匹配合法颜色词（可带圆点前缀），并通过提示框位置、套装颜色及等级约束。整理流程的严格识别仍使用 0.90，颜色降门槛的结果走两次 OCR 一致且字段像素稳定的确认路径，不用于单次识别快速放行。
 
-`agent/app_paths.py` 区分只读的 `RESOURCE_ROOT`（`interface.json`、`resource/`、`tasks/`、`maafw/`）和可写的 `DATA_ROOT`（`config/`、`logs/`、`debug/`、`cache/`、`data_overlay/`）。客户端通过 `MAANIKKI_RESOURCE_ROOT` 与 `MAANIKKI_DATA_ROOT` 传给 agent、启动游戏前置任务和路线生成子进程；未传入时两者都是程序目录，Windows 便携版上两者也都是程序目录。Agent 模块不再从 `__file__` 推导目录；接收 `root` 参数的函数中，存储用户数据的（账号、统计、库存、冒险报告、客户端配置）取数据根，加载游戏资源的（路线生成、材料目录）取资源根，需要另一根时从 `app_paths` 读取。
+`agent/app_paths.py` 区分只读的 `RESOURCE_ROOT`（`interface.json`、`resource/`、`tasks/`、`maafw/`）和可写的 `DATA_ROOT`（`config/`、`logs/`、`debug/`、`cache/`、`data_overlay/`）。客户端通过 `MAANIKKI_RESOURCE_ROOT` 与 `MAANIKKI_DATA_ROOT` 传给 agent、启动游戏前置任务和路线生成子进程；未传入时两者都是程序目录，Windows 便携版上两者也都是程序目录。客户端 `read_local_file` 读取上述可写目录下的文件时同样使用数据目录，与 agent 写入的位置一致。Agent 模块不再从 `__file__` 推导目录；接收 `root` 参数的函数中，存储用户数据的（账号、统计、库存、冒险报告、客户端配置）取数据根，加载游戏资源的（路线生成、材料目录）取资源根，需要另一根时从 `app_paths` 读取。
 
 `agent/file_io.py` 提供唯一的原子 JSON 快照写入：UTF-8 编码、拒绝非有限数值、同目录唯一临时文件、刷盘后替换。账号状态、祝福闪光报告、启动记录、日常诊断及性能快照使用此入口；它不依赖任何业务模块。
 

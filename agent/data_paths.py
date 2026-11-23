@@ -38,10 +38,17 @@ def _slot_complete(slot_dir: Path) -> bool:
     return slot_dir.is_dir() and all((slot_dir / rel).is_file() for rel in _REQUIRED_OVERLAY_FILES)
 
 
-def active_overlay_dir(data_root: Path | None = None, resource_root: Path | None = None) -> Path | None:
+def _roots(root, data_root, resource_root) -> tuple[Path, Path]:
+    # A single positional root keeps the old meaning: both overlay and built-in files live there.
+    data_root = data_root if data_root is not None else (root if root is not None else DATA_ROOT)
+    resource_root = resource_root if resource_root is not None else (root if root is not None else RESOURCE_ROOT)
+    return Path(data_root), Path(resource_root)
+
+
+def active_overlay_dir(root: Path | None = None, *, data_root: Path | None = None,
+                       resource_root: Path | None = None) -> Path | None:
     """The hot-update slot under the data root, if complete and not older than the built-in data."""
-    data_root = DATA_ROOT if data_root is None else data_root
-    resource_root = RESOURCE_ROOT if resource_root is None else resource_root
+    data_root, resource_root = _roots(root, data_root, resource_root)
     env_slot = os.environ.get("PI_MAANIKKI_DATA_OVERLAY", "").strip()
     if env_slot:
         candidate = Path(env_slot)
@@ -77,12 +84,14 @@ def active_overlay_dir(data_root: Path | None = None, resource_root: Path | None
     return candidate
 
 
-def data_path(rel_path: str, data_root: Path | None = None, resource_root: Path | None = None) -> Path:
+def data_path(rel_path: str, root: Path | None = None, *, data_root: Path | None = None,
+              resource_root: Path | None = None) -> Path:
     """rel_path from the active overlay when present there, otherwise from the resource root."""
+    data_root, resource_root = _roots(root, data_root, resource_root)
     clean = rel_path.replace("\\", "/").lstrip("./")
-    overlay = active_overlay_dir(data_root, resource_root)
+    overlay = active_overlay_dir(data_root=data_root, resource_root=resource_root)
     if overlay is not None:
         candidate = overlay / clean
         if candidate.exists():
             return candidate
-    return (RESOURCE_ROOT if resource_root is None else resource_root) / clean
+    return resource_root / clean

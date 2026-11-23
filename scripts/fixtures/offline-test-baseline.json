@@ -15,6 +15,7 @@
     "DataPathTests.test_single_root_behaves_as_before",
     "LayoutGuardTests.test_agent_modules_take_roots_from_app_paths",
     "LayoutGuardTests.test_client_passes_roots_to_every_python_process",
+    "LayoutGuardTests.test_client_reads_agent_output_from_the_data_root",
     "RootResolutionTests.test_blank_values_fall_back",
     "RootResolutionTests.test_defaults_to_install_directory",
     "RootResolutionTests.test_install_directory_keeps_its_spelling",

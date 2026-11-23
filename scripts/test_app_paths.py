@@ -79,10 +79,11 @@ class DataPathTests(unittest.TestCase):
             data, resource = Path(data), Path(resource)
             slot = self.overlay(data, resource)
             os.environ.pop("PI_MAANIKKI_DATA_OVERLAY", None)
-            self.assertEqual(data_paths.active_overlay_dir(data, resource), slot)
-            self.assertEqual(data_paths.data_path("resource/model/blessing_badge.json", data, resource),
+            roots = {"data_root": data, "resource_root": resource}
+            self.assertEqual(data_paths.active_overlay_dir(**roots), slot)
+            self.assertEqual(data_paths.data_path("resource/model/blessing_badge.json", **roots),
                              slot / "resource/model/blessing_badge.json")
-            self.assertEqual(data_paths.data_path("resource/data/other.json", data, resource),
+            self.assertEqual(data_paths.data_path("resource/data/other.json", **roots),
                              resource / "resource/data/other.json")
 
     def test_single_root_behaves_as_before(self):
@@ -90,9 +91,11 @@ class DataPathTests(unittest.TestCase):
             root = Path(folder)
             slot = self.overlay(root, root)
             os.environ.pop("PI_MAANIKKI_DATA_OVERLAY", None)
-            self.assertEqual(data_paths.data_path("resource/data/blessing_catalog.json", root, root),
+            # The old one-root calling convention: overlay and built-in files under the same root.
+            self.assertEqual(data_paths.active_overlay_dir(root), slot)
+            self.assertEqual(data_paths.data_path("resource/data/blessing_catalog.json", root),
                              slot / "resource/data/blessing_catalog.json")
-            self.assertEqual(data_paths.data_path("./resource/data/x.json", root, root), root / "resource/data/x.json")
+            self.assertEqual(data_paths.data_path("./resource/data/x.json", root), root / "resource/data/x.json")
 
     def test_older_overlay_is_ignored(self):
         with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as resource:
@@ -101,7 +104,7 @@ class DataPathTests(unittest.TestCase):
             (resource / "resource/data/wardrobe_scoring.json").write_text(
                 json.dumps({"version": "3", "game_items": {"a": 1}}), encoding="utf-8")
             os.environ.pop("PI_MAANIKKI_DATA_OVERLAY", None)
-            self.assertIsNone(data_paths.active_overlay_dir(data, resource))
+            self.assertIsNone(data_paths.active_overlay_dir(data_root=data, resource_root=resource))
 
 
 class LayoutGuardTests(unittest.TestCase):
@@ -114,6 +117,23 @@ class LayoutGuardTests(unittest.TestCase):
                 if isinstance(node, ast.Name) and node.id == "__file__":
                     offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
         self.assertEqual(offenders, [], "derive install/data paths from app_paths, not __file__")
+
+    def test_client_reads_agent_output_from_the_data_root(self):
+        import app_paths
+        rust = (ROOT / "client/src-tauri/src/commands/file_ops.rs").read_text(encoding="utf-8")
+        listed = re.search(r"const DATA_ROOT_DIRS: &\[&str\] = &\[(.*?)\];", rust, re.DOTALL).group(1)
+        self.assertEqual(tuple(re.findall(r'"([^"]+)"', listed)), app_paths.DATA_DIRS)
+        # Files the agent writes and the frontend polls through read_local_file.
+        agent_writes = {
+            "client/src/services/gameKeysReadService.ts": ["RESULT_FILE"],
+            "client/src/services/routeStudioService.ts": ["RECORDING_FILE", "TRIAL_FILE"],
+        }
+        for relative, names in agent_writes.items():
+            source = (ROOT / relative).read_text(encoding="utf-8")
+            for name in names:
+                value = re.search(rf"const {name} = '([^']+)'", source).group(1)
+                with self.subTest(file=value):
+                    self.assertIn(value.split("/", 1)[0], app_paths.DATA_DIRS)
 
     def test_client_passes_roots_to_every_python_process(self):
         sources = {

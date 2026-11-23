@@ -20,6 +20,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+# Top-level folders under DATA_ROOT; the client reads these from its data directory too.
+DATA_DIRS = ("config", "logs", "debug", "cache", "data_overlay")
+
 RESOURCE_ROOT_ENV = "MAANIKKI_RESOURCE_ROOT"
 DATA_ROOT_ENV = "MAANIKKI_DATA_ROOT"
 
