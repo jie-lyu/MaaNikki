@@ -443,7 +443,8 @@
     "HostImportTests.test_backends_import_maa_only_inside_functions",
     "HostImportTests.test_registered_handlers_match_snapshot",
     "HostImportTests.test_registration_loads_no_platform_backend",
-    "HostImportTests.test_win32_overlay_backend_imports"
+    "HostImportTests.test_win32_overlay_backend_imports",
+    "OpenCvUseTests.test_agent_never_uses_cv2_video_or_window_interfaces"
    ],
    "known_failures": [],
    "skips": []

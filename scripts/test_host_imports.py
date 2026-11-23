@@ -107,6 +107,37 @@ class HostImportTests(unittest.TestCase):
         self.assertEqual(self.result["recognitions"], expected["recognitions"])
 
 
+
+# OpenCV's video and window interfaces. MaaFramework's own OpenCV (maafw/libopencv_world) and the
+# pip cv2 both contain the AVFoundation camera delegate class CaptureDelegate; in one process the
+# Objective-C runtime keeps only one of them (the "implemented in both" warning on macOS). Harmless
+# while nothing captures video or opens HighGUI windows, which this keeps true.
+CV2_FORBIDDEN = {
+    "VideoCapture", "VideoWriter", "VideoWriter_fourcc", "imshow", "namedWindow", "waitKey", "waitKeyEx",
+    "pollKey", "destroyWindow", "destroyAllWindows", "moveWindow", "resizeWindow", "setWindowProperty",
+    "getWindowProperty", "setWindowTitle", "createTrackbar", "setMouseCallback", "selectROI", "selectROIs",
+    "startWindowThread",
+}
+
+
+class OpenCvUseTests(unittest.TestCase):
+    def test_agent_never_uses_cv2_video_or_window_interfaces(self):
+        import ast
+        found = []
+        for path in sorted((ROOT / "agent").rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            aliases = {alias.asname or alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
+                       for alias in node.names if alias.name == "cv2"}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module == "cv2":
+                    found += [f"{path.relative_to(ROOT)}:{node.lineno} from cv2 import {alias.name}"
+                              for alias in node.names if alias.name in CV2_FORBIDDEN or alias.name == "*"]
+                elif (isinstance(node, ast.Attribute) and node.attr in CV2_FORBIDDEN
+                      and isinstance(node.value, ast.Name) and node.value.id in aliases):
+                    found.append(f"{path.relative_to(ROOT)}:{node.lineno} {node.value.id}.{node.attr}")
+        self.assertEqual(found, [], "the agent must not use OpenCV video capture or HighGUI windows")
+
+
 if __name__ == "__main__":
     if "--update" in sys.argv:
         result = registrations()
