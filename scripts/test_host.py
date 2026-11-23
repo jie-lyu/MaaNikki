@@ -112,6 +112,49 @@ class CaptureBoundsTests(unittest.TestCase):
         layout.safe_capture_y_range.assert_called_once_with(7, 720, margin_px=8)
 
 
+class WindowsRuleTests(unittest.TestCase):
+    """Windows-only rules decided by the host backend instead of by callers."""
+
+    SEIZE = {"type": "Win32", "win32": {"mouse": "Seize", "keyboard": "SeizeWithBlockInput"}}
+
+    def test_foreground_input_rule_is_the_win32_backends(self):
+        import client_config
+        with patch.object(host, "platform_backend", return_value="win32"):
+            self.assertTrue(client_config.supports_foreground_inputs(self.SEIZE))
+            for controller in ({"type": "Win32", "win32": {"mouse": "Seize", "keyboard": "PostMessage"}},
+                               {"type": "MacOS", "macos": {}}, {"type": "Win32"}, None, "Win32"):
+                with self.subTest(controller=controller):
+                    self.assertFalse(client_config.supports_foreground_inputs(controller))
+        with patch.object(host, "platform_backend", return_value=None):
+            self.assertFalse(client_config.supports_foreground_inputs(self.SEIZE))
+
+    def test_window_only_capture_rule(self):
+        from maa.define import MaaWin32ScreencapMethodEnum as Method
+        from host.win32.controller_config import capture_is_window_only
+        self.assertTrue(capture_is_window_only({"screencap_method": int(Method.FramePool)}))
+        self.assertTrue(capture_is_window_only({"screencap_method": int(Method.PrintWindow)}))
+        for info in ({"screencap_method": int(Method.GDI)}, {"screencap_method": int(Method.FramePool) | int(Method.GDI)},
+                     {"screencap_method": 0}, {"screencap_method": True}, {}, None):
+            with self.subTest(info=info):
+                self.assertFalse(capture_is_window_only(info))
+
+    def test_launch_probes_follow_the_launch_capability(self):
+        with patch.object(host, "platform_backend", return_value=None):
+            self.assertIsNone(host.launch_window_probes())
+        with patch.object(host, "platform_backend", return_value="win32"):
+            probes = host.launch_window_probes()
+        self.assertTrue(callable(probes._is_window_hung) and callable(probes.start_program))
+        hung = Mock(IsHungAppWindow=Mock(return_value=1))
+        self.assertTrue(probes._is_window_hung(hung, 0x10))
+        self.assertFalse(probes._is_window_hung(None, 0x10))
+        self.assertFalse(probes._is_window_hung(hung, 0))
+
+    def test_hud_needs_the_overlay_capability(self):
+        import game_hud
+        with patch("host.overlay_backend", return_value=None):
+            self.assertIsNone(game_hud.acquire_game_hud(1, 0x10))
+
+
 class OverlayThemeTests(unittest.TestCase):
     def test_theme_resolves_without_a_windows_registry(self):
         import overlay_style

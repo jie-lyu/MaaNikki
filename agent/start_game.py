@@ -24,7 +24,7 @@ configure_worker_threads(2)
 from file_io import write_json
 from client_config import mxu_config
 from host.win32.launch import (LauncherWindows, ensure_unminimized, focus_window, game_window, initialize_winrt,
-                               window_exists_check)
+                               start_program, window_exists_check)
 
 configure_utf8_streams()
 
@@ -386,7 +386,7 @@ def launch_game(program, timeout, record, *, background=False):
     windows = LauncherWindows(program.parent)
     hwnd = windows.find()
     if not hwnd:
-        os.startfile(str(program), cwd=str(program.parent))
+        start_program(program)
     record["stage"] = "wait_launcher"
     save_record(record)
     runtime, remaining = None, float(timeout)

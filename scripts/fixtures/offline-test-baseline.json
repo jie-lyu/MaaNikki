@@ -408,7 +408,11 @@
     "Win32TargetTests.test_bring_to_foreground_is_a_noop_when_focused",
     "Win32TargetTests.test_bring_to_foreground_restores_then_releases_alt_through_maa",
     "Win32TargetTests.test_focus_details",
-    "Win32TargetTests.test_focus_queries"
+    "Win32TargetTests.test_focus_queries",
+    "WindowsRuleTests.test_foreground_input_rule_is_the_win32_backends",
+    "WindowsRuleTests.test_hud_needs_the_overlay_capability",
+    "WindowsRuleTests.test_launch_probes_follow_the_launch_capability",
+    "WindowsRuleTests.test_window_only_capture_rule"
    ],
    "known_failures": [],
    "skips": []

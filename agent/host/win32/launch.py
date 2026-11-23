@@ -139,6 +139,11 @@ def game_window():
     return found[0] if found else None
 
 
+def start_program(program) -> None:
+    """Start the official launcher the way Explorer would, from its own folder."""
+    os.startfile(str(program), cwd=str(program.parent))
+
+
 class LauncherWindows:
     def __init__(self, folder):
         self.folder = folder.resolve()
@@ -350,6 +355,11 @@ def _is_window_process_alive(u32, hwnd) -> bool:
         return bool(u32.IsWindow(hwnd))
     finally:
         k32.CloseHandle(proc)
+
+
+def _is_window_hung(u32, hwnd) -> bool:
+    """The window manager's own verdict: the window stopped pumping messages (IsHungAppWindow)."""
+    return bool(u32 is not None and hwnd and u32.IsHungAppWindow(hwnd))
 
 
 def _is_window_unresponsive(u32, hwnd) -> bool:
