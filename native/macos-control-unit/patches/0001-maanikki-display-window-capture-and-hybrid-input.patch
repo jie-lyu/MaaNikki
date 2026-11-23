@@ -204,10 +204,10 @@ index 344f217..2744be9 100644
 +endif()
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.h b/source/MaaMacOSControlUnit/Input/HybridInput.h
 new file mode 100644
-index 0000000..8c50bc8
+index 0000000..caed72d
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.h
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,101 @@
 +#pragma once
 +
 +#include <map>
@@ -239,7 +239,9 @@ index 0000000..8c50bc8
 +// what receives a click at that point. Otherwise nothing is sent.
 +//
 +// Releases only follow accepted presses, go where the press went (same point, same process), and
-+// are always sent. inactive() and destruction release everything still held.
++// are always sent; one that cannot be posted stays held for the next attempt and is reported.
++// inactive() and destruction release everything still held. A press of a key the unit still counts
++// as down is posted again, so a release made behind the unit's back cannot swallow the next press.
 +//
 +// The core calls releases from its stopping thread while its worker may be inside a press, so all
 +// state is guarded by one mutex. A release that arrives from another thread for a press the unit
@@ -271,9 +273,10 @@ index 0000000..8c50bc8
 +    virtual bool scroll(int dx, int dy) override;
 +
 +    bool relative_move(int dx, int dy);
-+    void release_all();
++    // Each returns false when some release could not be posted; that input stays held for a retry.
++    bool release_all();
 +    // End of a task: release what is held and forget cancellations no press consumed.
-+    void inactive();
++    bool inactive();
 +
 +private:
 +    struct HeldContact
@@ -290,7 +293,7 @@ index 0000000..8c50bc8
 +
 +    // A release from a foreign thread for something not held: remember it briefly.
 +    void note_unmatched_release(std::set<int>& cancels, int id);
-+    void release_all_locked();
++    bool release_all_locked();
 +
 +    uint32_t window_id_ = 0;
 +    std::shared_ptr<CaptureGeometry> geometry_;
@@ -308,10 +311,10 @@ index 0000000..8c50bc8
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
 new file mode 100644
-index 0000000..76c1b0a
+index 0000000..8dff40d
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
-@@ -0,0 +1,334 @@
+@@ -0,0 +1,347 @@
 +#include "HybridInput.h"
 +
 +#include "InputUtils.h"
@@ -524,13 +527,17 @@ index 0000000..76c1b0a
 +    MouseEventInfo info;
 +    contact_to_mouse_up_info(contact, info);
 +    // Released where it was pressed, whatever the window or the user's cursor did since.
-+    bool ok = platform_->post_mouse(info.event_type, held->second.point, held->second.button);
++    if (!platform_->post_mouse(info.event_type, held->second.point, held->second.button)) {
++        // Still down as far as anyone knows: keep it for the next release attempt.
++        LogError << "mouse-up could not be posted; the contact stays held" << VAR(contact);
++        return false;
++    }
 +    held_contacts_.erase(held);
 +    if (held_contacts_.empty() && !std::isnan(saved_cursor_.x)) {
 +        platform_->warp_cursor(saved_cursor_);
 +        saved_cursor_ = { NAN, NAN };
 +    }
-+    return ok;
++    return true;
 +}
 +
 +bool HybridInput::click_key(int key)
@@ -565,11 +572,14 @@ index 0000000..76c1b0a
 +        LogWarn << "key press cancelled by a stop that arrived before it" << VAR(key);
 +        return false;
 +    }
-+    if (held_keys_.contains(key)) {
-+        return true; // already down where it was sent
-+    }
 +    auto pid = foreground_target("key_down");
-+    if (!pid || !platform_->post_key(*pid, static_cast<CGKeyCode>(key), true)) {
++    if (!pid) {
++        return false;
++    }
++    // A key this unit still counts as down may have been released behind its back (the agent posts
++    // releases straight to the game when the controller channel fails). Post the press again rather
++    // than report a press that sent nothing; a repeated key-down is harmless to the game.
++    if (!platform_->post_key(*pid, static_cast<CGKeyCode>(key), true)) {
 +        return false;
 +    }
 +    held_keys_[key] = *pid;
@@ -593,9 +603,12 @@ index 0000000..76c1b0a
 +        return true;
 +    }
 +    // To the process that got the press, even if the window has closed or its id was reused since.
-+    bool ok = platform_->post_key(held->second, static_cast<CGKeyCode>(key), false);
++    if (!platform_->post_key(held->second, static_cast<CGKeyCode>(key), false)) {
++        LogError << "key-up could not be posted; the key stays held" << VAR(key);
++        return false;
++    }
 +    held_keys_.erase(held);
-+    return ok;
++    return true;
 +}
 +
 +bool HybridInput::scroll(int dx, int dy)
@@ -613,36 +626,39 @@ index 0000000..76c1b0a
 +    return pid && platform_->post_relative_move(*pid, dx, dy);
 +}
 +
-+void HybridInput::release_all()
++bool HybridInput::release_all()
 +{
 +    std::lock_guard lock(mutex_);
-+    release_all_locked();
++    return release_all_locked();
 +}
 +
-+void HybridInput::inactive()
++bool HybridInput::inactive()
 +{
 +    std::lock_guard lock(mutex_);
-+    release_all_locked();
++    bool released = release_all_locked();
 +    cancelled_contacts_.clear();
 +    cancelled_keys_.clear();
++    return released;
 +}
 +
-+void HybridInput::release_all_locked()
++bool HybridInput::release_all_locked()
 +{
++    bool released = true;
 +    std::vector<int> contacts;
 +    for (const auto& [contact, _] : held_contacts_) {
 +        contacts.push_back(contact);
 +    }
 +    for (int contact : contacts) {
-+        touch_up_locked(contact);
++        released = touch_up_locked(contact) && released;
 +    }
 +    std::vector<int> keys;
 +    for (const auto& [key, _] : held_keys_) {
 +        keys.push_back(key);
 +    }
 +    for (int key : keys) {
-+        key_up_locked(key);
++        released = key_up_locked(key) && released;
 +    }
++    return released;
 +}
 +
 +MAA_CTRL_UNIT_NS_END
@@ -882,7 +898,7 @@ index 0000000..23af288
 +
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.cpp b/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.cpp
-index 1d30e69..c54fbed 100644
+index 1d30e69..3c0aeda 100644
 --- a/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.cpp
 +++ b/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.cpp
 @@ -4,8 +4,10 @@
@@ -946,17 +962,17 @@ index 1d30e69..c54fbed 100644
      (void)dx;
      (void)dy;
      LogWarn << "relative_move not supported on macOS controller";
-@@ -217,6 +241,9 @@ bool MacOSControlUnitMgr::scroll(int dx, int dy)
+@@ -217,7 +241,8 @@ bool MacOSControlUnitMgr::scroll(int dx, int dy)
  
  bool MacOSControlUnitMgr::inactive()
  {
-+    if (hybrid_input_) {
-+        hybrid_input_->inactive();
-+    }
-     return true;
+-    return true;
++    // False when the hybrid input could not release something; the agent then asks for a reconnect.
++    return !hybrid_input_ || hybrid_input_->inactive();
  }
  
-@@ -227,6 +254,7 @@ json::object MacOSControlUnitMgr::get_info() const
+ json::object MacOSControlUnitMgr::get_info() const
+@@ -227,6 +252,7 @@ json::object MacOSControlUnitMgr::get_info() const
      info["window_id"] = window_id_;
      info["screencap_method"] = static_cast<int64_t>(screencap_method_);
      info["input_method"] = static_cast<int64_t>(input_method_);
@@ -1304,10 +1320,10 @@ index 0000000..c17723a
 +MAA_CTRL_UNIT_NS_END
 diff --git a/test/maanikki/HybridInputTest.mm b/test/maanikki/HybridInputTest.mm
 new file mode 100644
-index 0000000..cfc0017
+index 0000000..e412ba0
 --- /dev/null
 +++ b/test/maanikki/HybridInputTest.mm
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,356 @@
 +// Deterministic tests for HybridInput over a fake InputPlatform: orderings a real desktop cannot
 +// reproduce on demand (a stop racing a press), and every refusal path. Nothing reaches the system.
 +// Built only with -DMAANIKKI_UNIT_TESTS=ON; never part of the shipped unit.
@@ -1350,6 +1366,7 @@ index 0000000..cfc0017
 +    uint32_t hit_window = kWindow;
 +    std::function<void()> on_hit_test;
 +    std::vector<std::string> events;
++    bool reject_ups = false; // post_mouse/post_key fail for releases
 +
 +    // When set, the next mouse-down blocks inside post_mouse until `release_down` is fulfilled.
 +    bool block_down = false;
@@ -1391,6 +1408,9 @@ index 0000000..cfc0017
 +    bool post_mouse(CGEventType type, CGPoint location, CGMouseButton) override
 +    {
 +        bool is_down = type == kCGEventLeftMouseDown;
++        if (type == kCGEventLeftMouseUp && reject_ups) {
++            return false;
++        }
 +        if (is_down && block_down) {
 +            block_down = false;
 +            down_entered.set_value();
@@ -1403,6 +1423,9 @@ index 0000000..cfc0017
 +
 +    bool post_key(pid_t pid, CGKeyCode key, bool down) override
 +    {
++        if (!down && reject_ups) {
++            return false;
++        }
 +        record(std::string(down ? "key_down " : "key_up ") + std::to_string(key) + " pid=" + std::to_string(pid));
 +        return true;
 +    }
@@ -1604,11 +1627,37 @@ index 0000000..cfc0017
 +    Fixture t;
 +    CHECK(t.input->key_down(13));
 +    CHECK(t.input->touch_down(0, 100, 200, 0));
-+    t.input->inactive();
++    CHECK(t.input->inactive());
 +    CHECK((t.platform->take() == Events { "key_down 13 pid=100", "down@50,100", "up@50,100", "warp@7,7", "key_up 13 pid=100" }));
 +    CHECK(t.input->key_down(1));
 +    t.input.reset();
 +    CHECK((t.platform->take() == Events { "key_down 1 pid=100", "key_up 1 pid=100" }));
++}
++
++void failed_release_stays_held_and_is_reported()
++{
++    Fixture t;
++    CHECK(t.input->key_down(13));
++    CHECK(t.input->touch_down(0, 100, 200, 0));
++    t.platform->take();
++    t.platform->reject_ups = true;
++    CHECK(!t.input->inactive()); // the core and the agent learn that something is still down
++    CHECK(!t.input->touch_up(0));
++    CHECK(t.platform->take().empty());
++    t.platform->reject_ups = false;
++    CHECK(t.input->inactive()); // retried and released
++    CHECK((t.platform->take() == Events { "up@50,100", "warp@7,7", "key_up 13 pid=100" }));
++}
++
++void press_of_a_still_held_key_is_posted_again()
++{
++    Fixture t;
++    CHECK(t.input->key_down(13));
++    // The agent released W straight to the game; the unit still counts it as down.
++    CHECK(t.input->key_down(13));
++    CHECK((t.platform->take() == Events { "key_down 13 pid=100", "key_down 13 pid=100" }));
++    t.platform->front = 999;
++    CHECK(!t.input->key_down(13)); // still foreground-only
 +}
 +
 +} // namespace
@@ -1626,6 +1675,8 @@ index 0000000..cfc0017
 +    click_outside_frame_or_moved_window_is_refused();
 +    geometry_change_latches_until_reconnect();
 +    inactive_and_destruction_release_everything();
++    failed_release_stays_held_and_is_reported();
++    press_of_a_still_held_key_is_posted_again();
 +    std::printf(failures ? "HybridInputTest: %d failure(s)\n" : "HybridInputTest: all passed\n", failures);
 +    return failures ? 1 : 0;
 +}
