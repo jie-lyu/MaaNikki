@@ -11,6 +11,9 @@ nikki_macos controller), maafw/ is the official runtime with MaaNikki's patched 
 (native/macos-control-unit/build.py --runtime-out), and python/ is a virtual environment with
 requirements.txt. The repository's interface.json, which the Windows package copies unchanged,
 is not touched. User data still goes to ~/Library/Application Support/MaaNikki.
+
+Supervised device tests of tasks not yet on the verified allowlist can set
+MAANIKKI_MACOS_EXTRA_TASKS=<entry>,<entry> before starting the client; only a debug client honours it.
 """
 from __future__ import annotations
 

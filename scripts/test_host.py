@@ -500,12 +500,26 @@ class TaskAllowlistTests(unittest.TestCase):
         import glob
         entries = [task["entry"] for path in glob.glob(str(ROOT / "tasks/*.json"))
                    for task in json.loads(Path(path).read_text(encoding="utf-8")).get("task", [])]
-        with backend("win32"):
+        with patch.dict(os.environ), backend("win32"):
+            os.environ.pop("MAANIKKI_MACOS_EXTRA_TASKS", None)
             self.assertTrue(all(host.task_entry_supported(entry) for entry in entries + ["MaaNikki_GameKeysRead", None]))
-        with backend("macos"):
+        with patch.dict(os.environ), backend("macos"):
+            os.environ.pop("MAANIKKI_MACOS_EXTRA_TASKS", None)
             self.assertEqual([entry for entry in entries if host.task_entry_supported(entry)], ["MaaNikki_Mailbox"])
             self.assertFalse(host.task_entry_supported("MaaNikki_GameKeysRead"))
             self.assertFalse(host.task_entry_supported(None))
+
+    def test_dev_switch_adds_exact_entries_on_macos_only(self):
+        with patch.dict(os.environ, {"MAANIKKI_MACOS_EXTRA_TASKS": " MaaNikki_Dig ,, MaaNikki_MonthlyPass"}):
+            with backend("macos"):
+                self.assertTrue(host.task_entry_supported("MaaNikki_Dig"))
+                self.assertTrue(host.task_entry_supported("MaaNikki_MonthlyPass"))
+                self.assertTrue(host.task_entry_supported("MaaNikki_Mailbox"))
+                self.assertFalse(host.task_entry_supported("MaaNikki_Fishing"))
+                self.assertFalse(host.task_entry_supported(None))
+                self.assertFalse(host.task_entry_supported(""))
+            with backend("win32"):
+                self.assertTrue(host.task_entry_supported("MaaNikki_Fishing"))  # unchanged: every task
 
     def test_unsupported_entry_is_refused_before_any_task_code(self):
         import registration

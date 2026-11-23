@@ -443,6 +443,9 @@ async fn start_single_agent(
             .stderr(Stdio::piped());
 
         super::utils::apply_agent_root_env(&mut cmd);
+        // 发布构建的 Mac 客户端从不把开发开关传给 agent，即使用户的环境里有这个变量。
+        #[cfg(all(target_os = "macos", not(debug_assertions)))]
+        cmd.env_remove(super::utils::MACOS_EXTRA_TASKS_ENV);
 
         if let Some(overlay_dir) = super::data_update::active_slot_dir() {
             cmd.env("PI_MAANIKKI_DATA_OVERLAY", overlay_dir);

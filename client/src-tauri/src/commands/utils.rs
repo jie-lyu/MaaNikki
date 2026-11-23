@@ -334,6 +334,15 @@ const MACOS_DATA_DIR_NAME: &str = "MaaNikki";
 #[cfg(target_os = "macos")]
 const MACOS_PREVIEW_TASKS: &str = "agent/host/macos/preview_tasks.json";
 
+/// 开发专用开关：逗号分隔的任务入口，只在开发构建的 macOS 客户端里额外放行（agent 侧同名变量）。
+/// 发布构建既不读取，也会从 agent 的环境里去掉，已验证的白名单仍是 preview_tasks.json。
+pub const MACOS_EXTRA_TASKS_ENV: &str = "MAANIKKI_MACOS_EXTRA_TASKS";
+
+/// 开发开关的取值（逗号分隔，忽略空白和空项）是否包含该入口。
+pub fn extra_tasks_allow(list: &str, entry: &str) -> bool {
+    !entry.is_empty() && list.split(',').map(str::trim).any(|item| item == entry)
+}
+
 /// 判断清单 JSON（`{"entries": [...]}`）是否包含该任务入口；清单无法解析时报错。
 pub fn preview_task_allowed(manifest_json: &str, entry: &str) -> Result<bool, String> {
     let manifest: serde_json::Value =
@@ -365,6 +374,15 @@ pub fn run_plan_with_entries(plan: &str, entries: &[&str]) -> String {
 pub fn platform_refuses_task(entry: &str) -> Option<String> {
     #[cfg(target_os = "macos")]
     {
+        // 开发构建（tauri dev）专用：在有人值守的实机测试中放行尚未验证的任务。发布构建忽略它，
+        // 也不把它传给 agent（见 maa_agent.rs）。
+        #[cfg(debug_assertions)]
+        if let Ok(extra) = std::env::var(MACOS_EXTRA_TASKS_ENV) {
+            if extra_tasks_allow(&extra, entry) {
+                log::warn!("[dev] {} 放行未验证的 Mac 任务：{}", MACOS_EXTRA_TASKS_ENV, entry);
+                return None;
+            }
+        }
         let allowed = get_exe_directory()
             .and_then(|root| {
                 std::fs::read_to_string(root.join(MACOS_PREVIEW_TASKS)).map_err(|e| e.to_string())
@@ -565,7 +583,7 @@ pub fn build_launch_command(
 
 #[cfg(test)]
 mod preview_task_tests {
-    use super::preview_task_allowed;
+    use super::{extra_tasks_allow, preview_task_allowed};
 
     #[test]
     fn the_shared_manifest_parses_and_allows_only_listed_entries() {
@@ -585,6 +603,14 @@ mod preview_task_tests {
         assert_eq!(rewritten["entries"], serde_json::json!(["MaaNikki_Mailbox"]));
         assert_eq!(rewritten["id"], "x");
         assert_eq!(run_plan_with_entries("not json", &["a"]), "not json");
+    }
+
+    #[test]
+    fn the_dev_switch_lists_exact_entries() {
+        assert!(extra_tasks_allow("MaaNikki_Dig, MaaNikki_MonthlyPass", "MaaNikki_MonthlyPass"));
+        assert!(!extra_tasks_allow("MaaNikki_Dig", "MaaNikki_Di"));
+        assert!(!extra_tasks_allow("", ""));
+        assert!(!extra_tasks_allow(" , ", ""));
     }
 
     #[test]

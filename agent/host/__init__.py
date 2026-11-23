@@ -218,7 +218,9 @@ def task_entry_supported(entry) -> bool:
     Win32 runs every task, as before. macOS runs only the preview's allowlist.
     """
     if platform_backend() == "macos":
-        from host.macos import preview_task_entries
+        from host.macos import dev_extra_task_entries, preview_task_entries
+        if entry in dev_extra_task_entries():
+            return True  # development switch for supervised device tests; never set by a release client
         try:
             return entry in preview_task_entries()
         except (OSError, ValueError, KeyError, TypeError):

@@ -19,6 +19,16 @@ CAPABILITIES = Capabilities("macos", foreground_input=True)
 PREVIEW_TASKS_FILE = ("agent", "host", "macos", "preview_tasks.json")
 
 
+# Development switch: comma-separated task entries allowed in supervised device tests on top of the
+# verified preview list. A release client removes it from the agent's environment.
+DEV_EXTRA_TASKS_ENV = "MAANIKKI_MACOS_EXTRA_TASKS"
+
+
+def dev_extra_task_entries() -> frozenset[str]:
+    import os
+    return frozenset(item.strip() for item in os.environ.get(DEV_EXTRA_TASKS_ENV, "").split(",") if item.strip())
+
+
 def preview_task_entries() -> frozenset[str]:
     from app_paths import RESOURCE_ROOT
     path = RESOURCE_ROOT.joinpath(*PREVIEW_TASKS_FILE)
