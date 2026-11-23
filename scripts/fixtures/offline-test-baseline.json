@@ -1,5 +1,5 @@
 {
- "source": "Seeded on macOS (arm64) with Win32 calls stubbed so modules import,. Replace with the first Windows CI run: download the offline-test-results artifact's baseline file and review it. test_agent_pause fails on macOS only on CREATE_NO_WINDOW and is expected to pass on Windows, so it lists no known failures.",
+ "source": "Windows CI run 45159836136 (phase 1 at 1039b44, PR merge commit b6e98fc): every suite present then produced exactly these outcomes on Windows. Added after 1039b44 and so far recorded on macOS only: test_app_paths.py, test_host.py, test_host_imports.py, test_game_target.cjs and the selector test in test_windows_contract.cjs; HostImportTests.test_win32_overlay_backend_imports is skipped off Windows. Refresh from the offline-test-results artifact when Windows outcomes change.",
  "suites": {
   "test_agent_pause.py": {
    "tests": [
