@@ -1,0 +1,87 @@
+name: Test Windows x64
+
+# Offline regression gate for pull requests. Never publishes, never touches the game.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-windows-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline-tests:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - name: Cache pinned runtime downloads
+        uses: actions/cache@v4
+        with:
+          path: .build/downloads
+          key: runtime-downloads-${{ hashFiles('build/runtime.lock.json') }}
+      - name: Verify source manifests
+        run: python scripts/release.py check
+      - name: Prepare and verify the pinned Windows runtime
+        # Includes the agent import/registration check and MaaFramework resource loading.
+        run: python scripts/release.py prepare --output .build/ci-runtime
+      - name: Compare the prepared runtime with the package inventory
+        run: python -B scripts/test_windows_contract.py --runtime .build/ci-runtime
+      - name: Place the runtime where the suites expect it
+        shell: pwsh
+        run: |
+          Move-Item -LiteralPath .build/ci-runtime/python -Destination python
+          Move-Item -LiteralPath .build/ci-runtime/maafw -Destination maafw
+      - name: Install client dependencies
+        shell: pwsh
+        run: |
+          $packageManager = (Get-Content -LiteralPath 'client/package.json' -Raw | ConvertFrom-Json).packageManager
+          if ($packageManager -notmatch '^pnpm@(\d+\.\d+\.\d+)') { throw 'client/package.json must pin pnpm' }
+          npm install --prefix .build/build-tools --no-save --no-package-lock --ignore-scripts --no-audit --no-fund "pnpm@$($Matches[1])"
+          if ($LASTEXITCODE -ne 0) { throw 'pnpm install failed' }
+          Push-Location client
+          try {
+            ../.build/build-tools/node_modules/.bin/pnpm.cmd install --frozen-lockfile
+            if ($LASTEXITCODE -ne 0) { throw 'client dependency install failed' }
+            ../.build/build-tools/node_modules/.bin/pnpm.cmd exec tsc --noEmit
+            if ($LASTEXITCODE -ne 0) { throw 'TypeScript check failed' }
+          } finally { Pop-Location }
+      - name: Run offline suites
+        env:
+          PYTHONUTF8: '1'
+        run: python scripts/run_offline_tests.py --python python/python.exe
+
+  client-check:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: rustup show
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            client/src-tauri/target
+          key: cargo-check-${{ hashFiles('rust-toolchain.toml', 'client/src-tauri/Cargo.lock') }}
+          restore-keys: cargo-check-
+      - name: Check the desktop client compiles
+        shell: pwsh
+        run: |
+          Push-Location client/src-tauri
+          try {
+            cargo check --locked
+            if ($LASTEXITCODE -ne 0) { throw 'cargo check failed' }
+          } finally { Pop-Location }

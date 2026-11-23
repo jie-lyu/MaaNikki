@@ -124,7 +124,7 @@ Release 公开后，服务器上的 QQ 机器人通过 GitHub Webhook 向交流�
 
 客户端根据当前项目版本匹配增量包，安装前核对本地基准、全部变更文件及删除清单，保留配置与账号数据。文件按原路径备份，应用失败时恢复，项目版本最后写入；增量包不适用时自动改下完整包。旧客户端继续识别原来的 Windows 完整运行包，新客户端首次安装后才会选择增量包。
 
-工作流仅通过每日定时任务或手动触发运行，普通推送和拉取请求均不触发软件构建。默认分支构建成功后发布新版本，同一版本已公开时保留原有标签和附件。
+工作流仅通过每日定时任务或手动触发运行，普通推送和拉取请求均不触发软件构建（拉取请求只运行上文的离线测试）。默认分支构建成功后发布新版本，同一版本已公开时保留原有标签和附件。
 
 ### 更新备用线路
 
@@ -150,6 +150,18 @@ Agent 导入与资源加载检查用于核对运行环境。程序启动、连�
 ## 开发与调试
 
 页面入口、导航、截图调度、路线工具和库存字段统一见[开发文档](docs/architecture.md)。游戏内任务由用户运行验收。
+
+### 离线测试与 Windows 契约快照
+
+拉取请求会触发「Test Windows x64」工作流，它只做检查、不打包也不发布：准备并校验锁定的运行环境，比对 Windows 契约快照，检查 TypeScript 与桌面客户端能否编译，然后运行全部离线测试。本地在已放好 `python/` 和 `maafw/` 的目录中运行：
+
+```powershell
+python scripts/run_offline_tests.py --python python/python.exe
+```
+
+`scripts/run_offline_tests.py` 列出每个 `scripts/test_*` 测试。标为阻断的测试失败会使工作流失败；暂未通过的测试照常运行，只给出警告，修好后改为阻断。新增测试必须加入该列表。
+
+`scripts/test_windows_contract.py` 用标准库运行，任何系统都可执行。它固定 Windows 用户实际得到的内容：合并导入并按 Windows 过滤后的接口定义（控制器、agent、前置任务、任务与选项的标识和默认值），以及 Windows 包的文件清单。快照位于 `scripts/fixtures/windows-contract.json` 和 `scripts/fixtures/windows-package-files.txt`。有意修改这些内容时运行 `python -B scripts/test_windows_contract.py --update`，并在评审中核对快照差异。
 
 ## 源码公开范围
 
