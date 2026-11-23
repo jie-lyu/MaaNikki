@@ -211,10 +211,10 @@ index 344f217..2744be9 100644
 +endif()
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.h b/source/MaaMacOSControlUnit/Input/HybridInput.h
 new file mode 100644
-index 0000000..05f86eb
+index 0000000..0724eb8
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.h
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,104 @@
 +#pragma once
 +
 +#include <map>
@@ -238,6 +238,8 @@ index 0000000..05f86eb
 +// - keys and text are posted to the window's process;
 +// - absolute mouse events go through the global HID stream (games ignore posted clicks), at the
 +//   desktop point that the last captured frame maps the pixel to, and never activate the window;
++//   a press first moves the cursor there and lets the hover settle (the game acts on the hovered
++//   control), then checks everything again;
 +// - relative mouse movement is a mouse-moved event with delta fields posted to the process.
 +//
 +// Foreground only: every press, text and relative move requires the target's process to be the
@@ -319,10 +321,10 @@ index 0000000..05f86eb
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
 new file mode 100644
-index 0000000..d01de0b
+index 0000000..3eb5f63
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
-@@ -0,0 +1,355 @@
+@@ -0,0 +1,373 @@
 +#include "HybridInput.h"
 +
 +#include "InputUtils.h"
@@ -336,6 +338,9 @@ index 0000000..d01de0b
 +
 +namespace
 +{
++
++// Hover before a press; the Windows path waits 0.3 s between TouchMove and Click.
++constexpr int kHoverSettleMs = 300;
 +
 +bool valid_key(int key)
 +{
@@ -484,10 +489,25 @@ index 0000000..d01de0b
 +    if (held_contacts_.empty()) {
 +        saved_cursor_ = platform_->cursor().value_or(CGPoint { NAN, NAN });
 +    }
-+    if (!platform_->post_mouse(info.event_type, *point, info.mouse_button)) {
++    // The game acts on the control under its hover position, not on the location carried by the
++    // press: move there and let the hover settle first, as the Windows path does (TouchMove, 0.3 s).
++    if (!platform_->post_mouse(kCGEventMouseMoved, *point, info.mouse_button)) {
 +        return false;
 +    }
-+    held_contacts_[contact] = { *point, info.mouse_button };
++    platform_->sleep_ms(kHoverSettleMs);
++    // Everything may have changed while settling: check again before pressing.
++    auto settled = checked_point(x, y, "touch_down");
++    if (!settled) {
++        if (held_contacts_.empty() && !std::isnan(saved_cursor_.x)) {
++            platform_->warp_cursor(saved_cursor_);
++            saved_cursor_ = { NAN, NAN };
++        }
++        return false;
++    }
++    if (!platform_->post_mouse(info.event_type, *settled, info.mouse_button)) {
++        return false;
++    }
++    held_contacts_[contact] = { *settled, info.mouse_button };
 +    return true;
 +}
 +
@@ -680,10 +700,10 @@ index 0000000..d01de0b
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/InputPlatform.h b/source/MaaMacOSControlUnit/Input/InputPlatform.h
 new file mode 100644
-index 0000000..c2fbecf
+index 0000000..56ef959
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/InputPlatform.h
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,42 @@
 +#pragma once
 +
 +#include <memory>
@@ -720,6 +740,7 @@ index 0000000..c2fbecf
 +    virtual bool post_relative_move(pid_t pid, int dx, int dy) = 0;
 +    virtual std::optional<CGPoint> cursor() = 0;
 +    virtual void warp_cursor(CGPoint point) = 0;
++    virtual void sleep_ms(int milliseconds) = 0;
 +};
 +
 +std::shared_ptr<InputPlatform> system_input_platform();
@@ -727,10 +748,10 @@ index 0000000..c2fbecf
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/InputPlatform.mm b/source/MaaMacOSControlUnit/Input/InputPlatform.mm
 new file mode 100644
-index 0000000..23af288
+index 0000000..dea3421
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/InputPlatform.mm
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,184 @@
 +#include "InputPlatform.h"
 +
 +#include "MaaUtils/Logger.h"
@@ -903,6 +924,8 @@ index 0000000..23af288
 +    }
 +
 +    void warp_cursor(CGPoint point) override { CGWarpMouseCursorPosition(point); }
++
++    void sleep_ms(int milliseconds) override { usleep(static_cast<useconds_t>(milliseconds) * 1000); }
 +};
 +
 +} // namespace
@@ -1338,10 +1361,10 @@ index 0000000..c17723a
 +MAA_CTRL_UNIT_NS_END
 diff --git a/test/maanikki/HybridInputTest.mm b/test/maanikki/HybridInputTest.mm
 new file mode 100644
-index 0000000..0995aa4
+index 0000000..78b10ac
 --- /dev/null
 +++ b/test/maanikki/HybridInputTest.mm
-@@ -0,0 +1,388 @@
+@@ -0,0 +1,412 @@
 +// Deterministic tests for HybridInput over a fake InputPlatform: orderings a real desktop cannot
 +// reproduce on demand (a stop racing a press), and every refusal path. Nothing reaches the system.
 +// Built only with -DMAANIKKI_UNIT_TESTS=ON; never part of the shipped unit.
@@ -1434,8 +1457,8 @@ index 0000000..0995aa4
 +            down_entered.set_value();
 +            release_down.wait();
 +        }
-+        record((is_down ? "down@" : type == kCGEventLeftMouseUp ? "up@" : "drag@") + std::to_string(int(location.x)) + ","
-+               + std::to_string(int(location.y)));
++        const char* kind = is_down ? "down@" : type == kCGEventLeftMouseUp ? "up@" : type == kCGEventMouseMoved ? "move@" : "drag@";
++        record(kind + std::to_string(int(location.x)) + "," + std::to_string(int(location.y)));
 +        return true;
 +    }
 +
@@ -1463,6 +1486,16 @@ index 0000000..0995aa4
 +    std::optional<CGPoint> cursor() override { return CGPointMake(7, 7); }
 +
 +    void warp_cursor(CGPoint point) override { record("warp@" + std::to_string(int(point.x)) + "," + std::to_string(int(point.y))); }
++
++    std::function<void()> on_sleep;
++    void sleep_ms(int milliseconds) override
++    {
++        slept += milliseconds;
++        if (on_sleep) {
++            on_sleep();
++        }
++    }
++    int slept = 0;
 +
 +    void record(std::string event)
 +    {
@@ -1514,7 +1547,7 @@ index 0000000..0995aa4
 +    Fixture t;
 +    CHECK(t.input->touch_down(0, 100, 200, 0));
 +    CHECK(t.input->touch_up(0));
-+    CHECK((t.platform->take() == Events { "down@50,100", "up@50,100", "warp@7,7" }));
++    CHECK((t.platform->take() == Events { "move@50,100", "down@50,100", "up@50,100", "warp@7,7" }));
 +}
 +
 +void refused_press_sends_no_release_or_drag()
@@ -1529,7 +1562,7 @@ index 0000000..0995aa4
 +    // The worker's own release after a refusal does not cancel the next press.
 +    CHECK(t.input->touch_down(0, 100, 200, 0));
 +    CHECK(t.input->touch_up(0));
-+    CHECK(t.platform->take().size() == 3);
++    CHECK(t.platform->take().size() == 4);
 +}
 +
 +void stop_before_press_cancels_it_however_late()
@@ -1554,7 +1587,7 @@ index 0000000..0995aa4
 +    t.input->inactive();
 +    CHECK(t.input->touch_down(0, 100, 200, 0));
 +    t.input->inactive();
-+    CHECK((t.platform->take() == Events { "down@50,100", "up@50,100", "warp@7,7" }));
++    CHECK((t.platform->take() == Events { "move@50,100", "down@50,100", "up@50,100", "warp@7,7" }));
 +}
 +
 +void stop_during_press_releases_after_it()
@@ -1577,7 +1610,7 @@ index 0000000..0995aa4
 +    release.set_value();
 +    worker.join();
 +    stopper.join();
-+    CHECK((t.platform->take() == Events { "down@50,100", "up@50,100", "warp@7,7" }));
++    CHECK((t.platform->take() == Events { "move@50,100", "down@50,100", "up@50,100", "warp@7,7" }));
 +}
 +
 +void key_release_goes_to_the_pressing_process()
@@ -1639,7 +1672,7 @@ index 0000000..0995aa4
 +    CHECK(!t.geometry->changed());
 +    CHECK(t.input->touch_down(0, 100, 200, 0));
 +    CHECK(t.input->touch_up(0));
-+    CHECK(t.platform->take().size() == 3);
++    CHECK(t.platform->take().size() == 4);
 +}
 +
 +void inactive_and_destruction_release_everything()
@@ -1648,7 +1681,7 @@ index 0000000..0995aa4
 +    CHECK(t.input->key_down(13));
 +    CHECK(t.input->touch_down(0, 100, 200, 0));
 +    CHECK(t.input->inactive());
-+    CHECK((t.platform->take() == Events { "key_down 13 pid=100", "down@50,100", "up@50,100", "warp@7,7", "key_up 13 pid=100" }));
++    CHECK((t.platform->take() == Events { "key_down 13 pid=100", "move@50,100", "down@50,100", "up@50,100", "warp@7,7", "key_up 13 pid=100" }));
 +    CHECK(t.input->key_down(1));
 +    t.input.reset();
 +    CHECK((t.platform->take() == Events { "key_down 1 pid=100", "key_up 1 pid=100" }));
@@ -1708,6 +1741,19 @@ index 0000000..0995aa4
 +    CHECK((t.platform->take() == Events { "key_down 13 pid=100", "key_up 13 pid=100" }));
 +}
 +
++void press_hovers_then_rechecks_before_pressing()
++{
++    Fixture t;
++    CHECK(t.input->touch_down(0, 100, 200, 0));
++    CHECK(t.platform->slept == 300);
++    CHECK(t.input->touch_up(0));
++    CHECK((t.platform->take() == Events { "move@50,100", "down@50,100", "up@50,100", "warp@7,7" }));
++    // The user switches apps while the hover settles: no press, cursor put back.
++    t.platform->on_sleep = [&] { t.platform->front = 999; };
++    CHECK(!t.input->touch_down(0, 100, 200, 0));
++    CHECK((t.platform->take() == Events { "move@50,100", "warp@7,7" }));
++}
++
 +} // namespace
 +
 +int main()
@@ -1727,6 +1773,7 @@ index 0000000..0995aa4
 +    press_of_a_still_held_key_is_posted_again();
 +    stop_release_of_an_old_hold_still_cancels_the_pending_press();
 +    repeat_for_another_process_is_refused_and_the_owner_kept();
++    press_hovers_then_rechecks_before_pressing();
 +    std::printf(failures ? "HybridInputTest: %d failure(s)\n" : "HybridInputTest: all passed\n", failures);
 +    return failures ? 1 : 0;
 +}
