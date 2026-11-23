@@ -473,6 +473,10 @@ class TaskAllowlistTests(unittest.TestCase):
         message = context.run_task.call_args.args[1]["MaaNikki_Daily_Message"]["focus"]["Node.Action.Starting"]
         self.assertIn("MaaNikki_Fishing", message)
         self.assertIn("暂不支持当前系统", message)
+        argv = SimpleNamespace(task_detail=SimpleNamespace(task_id=7, entry=None), node_name="X")
+        with backend("macos"):
+            self.assertFalse(Probe().run(context, argv))
+        self.assertEqual(ran, [])
 
 
 class SelectionTests(unittest.TestCase):

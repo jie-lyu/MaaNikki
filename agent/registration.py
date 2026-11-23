@@ -60,8 +60,11 @@ def agent_action(name, *, stop_on_failure=False):
         @wraps(run)
         def guarded(self, context, argv):
             task_id = getattr(getattr(argv, "task_detail", None), "task_id", 0)
-            entry = getattr(getattr(argv, "task_detail", None), "entry", None)
-            if not task_entry_supported(entry):
+            detail = getattr(argv, "task_detail", None)
+            entry = getattr(detail, "entry", None)
+            # MaaFramework always passes the task detail; only hand-built arguments (offline tests)
+            # lack it. With a detail, an unknown or missing entry is refused.
+            if detail is not None and not task_entry_supported(entry):
                 # Before any task code, input or capture: a saved preset, a schedule or a feature
                 # entry may ask for a task this desktop's backend does not support yet.
                 try:
