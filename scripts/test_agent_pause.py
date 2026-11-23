@@ -98,7 +98,10 @@ def server(identifier, directory):
     # the real reverse IPC call, including its native controller identifier.
     def window_info(controller):
         return {**native_info.fget(controller), "type": "win32", "hwnd": 1}
+    # The WinDLL patch also answers kernel32, so a real HUD window would get Mock handles.
+    # This headless probe covers pause/resume, not the overlay.
     with patch("navigation.controller.ctypes.WinDLL", return_value=user32), \
+            patch("game_hud.acquire_game_hud", return_value=None), \
             patch.object(Controller, "info", property(window_info)):
         assert AgentServer.start_up(identifier)
         AgentServer.join()
