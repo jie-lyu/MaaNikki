@@ -13,16 +13,16 @@ from uuid import uuid4
 import cv2
 import numpy as np
 
+from app_paths import DATA_ROOT, RESOURCE_ROOT
 from file_io import write_json
 from message_log import write_message
 
 
-ROOT = Path(__file__).resolve().parents[1]
 
 
 @lru_cache(maxsize=1)
 def image_policy():
-    return json.loads((ROOT / "resource/data/diagnostic_images.json").read_text(encoding="utf-8"))
+    return json.loads((RESOURCE_ROOT / "resource/data/diagnostic_images.json").read_text(encoding="utf-8"))
 
 
 def diagnostic_image(frame, *, roi=None, full_frame=True):
@@ -126,7 +126,7 @@ class FailureEvidence:
             now = datetime.now().astimezone()
             label = re.sub(r"[^a-zA-Z0-9_-]", "_", stage)[:72]
             stem = now.strftime("%Y%m%d-%H%M%S-%f")+"-"+label+"-"+uuid4().hex[:8]
-            folder = ROOT / "debug/on_error"
+            folder = DATA_ROOT / "debug/on_error"
             folder.mkdir(parents=True, exist_ok=True)
             record = {"time": now.isoformat(timespec="milliseconds"), "stage": stage,
                       "reason": str(reason)[:1200], "details": brief(details or {}),
@@ -158,14 +158,14 @@ class FailureEvidence:
 
     def republish(self, references):
         """Carry an earlier stage's evidence into the failing task's attachment window."""
-        folder = (ROOT / "debug/on_error").resolve()
+        folder = (DATA_ROOT / "debug/on_error").resolve()
         for reference in references:
             try:
-                path = (ROOT / "debug" / reference["record"]).resolve()
+                path = (DATA_ROOT / "debug" / reference["record"]).resolve()
                 if path.parent != folder or path.suffix != ".json":
                     continue
                 original = json.loads(path.read_text(encoding="utf-8"))
-                image = (ROOT / "debug" / original["image"]).resolve()
+                image = (DATA_ROOT / "debug" / original["image"]).resolve()
                 if image.parent != folder or image.suffix != ".jpg":
                     continue
                 frame = cv2.imdecode(np.frombuffer(image.read_bytes(), dtype=np.uint8),

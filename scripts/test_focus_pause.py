@@ -37,6 +37,13 @@ class PauseTests(unittest.TestCase):
             get_node_data=Mock(return_value={}))
         inputs = ForegroundInput.__new__(ForegroundInput)
         inputs.controller, inputs.hwnd, inputs.user32 = controller, 1, Mock()
+        # Focus queries go through the host target, which wraps the same user32.
+        from host.win32.target import Win32Target
+        inputs.target = Win32Target.__new__(Win32Target)
+        inputs.target.handle = inputs.target.hwnd = 1
+        inputs.target.user32 = inputs.user32
+        inputs.target.capture_requires_foreground = False
+        inputs.native = inputs.target.input()
         inputs.user32.IsWindow.return_value = True
         inputs.stopped = lambda: context.tasker.stopping
         inputs.foreground = lambda: state.focused

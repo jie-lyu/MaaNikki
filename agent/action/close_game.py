@@ -5,7 +5,8 @@ import os
 
 from client_config import parse_custom_param
 from daily.runtime import Runtime
-from game_close import (Win32Api, bound_game_hwnd, bring_maannikki_forward,
+from host import game_close_api
+from game_close import (bound_game_hwnd, bring_maannikki_forward,
                         close_connected_game, close_launcher, launcher_eligible,
                         resolve_official_launcher)
 from registration import agent_action
@@ -42,7 +43,7 @@ class CloseGameAction(CustomAction):
             return False
         force = options.get("force_on_timeout") is True
         close_launcher_too = options.get("close_launcher") is True
-        api = Win32Api()
+        api = game_close_api()
         result = close_connected_game(
             api, bound_game_hwnd(runtime.controller),
             force_on_timeout=force,

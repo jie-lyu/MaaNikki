@@ -3,7 +3,7 @@ from datetime import datetime
 
 import cv2
 
-from daily.settings import ROOT
+from app_paths import DATA_ROOT
 from file_io import write_json
 from task_control import TaskStopped
 from .organization import BlessingOrganizer
@@ -13,13 +13,13 @@ from .storage import InventoryStore
 
 def organize_inventory(rt, catalog, *, allow_unlock=False, read_only=False):
     """Return whether a complete baseline was published; only a stop raises."""
-    folder = ROOT / "logs/blessing-lock" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    folder = DATA_ROOT / "logs/blessing-lock" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     folder.mkdir(parents=True, exist_ok=True)
     locker = None
     store = None
     inventory_saved = False
     try:
-        store = InventoryStore(ROOT, catalog, rt)
+        store = InventoryStore(DATA_ROOT, catalog, rt)
         locker = BlessingOrganizer(rt, catalog, folder, allow_unlock=allow_unlock, read_only=read_only)
         locker.baseline_store = store
         locker.run()

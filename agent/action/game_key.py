@@ -30,7 +30,7 @@ class GameKeysReadAction(CustomAction):
     """Read the in-game key settings page for the client to review and apply."""
 
     def run(self, context, argv: CustomAction.RunArg) -> bool:
-        from daily.settings import ROOT
+        from app_paths import DATA_ROOT
         from file_io import write_json
         from game_keys_reader import GameKeysReader
         from task_control import TaskStopped
@@ -42,7 +42,7 @@ class GameKeysReadAction(CustomAction):
             runtime.log("开始读取游戏键位。")
             complete = reader.open() and reader.scan()
             report = reader.report(complete)
-            write_json(ROOT / RESULT_FILE, report)
+            write_json(DATA_ROOT / RESULT_FILE, report)
             written = True
             runtime.log(f"游戏键位读取{'完成' if complete else '结束'}：识别 {len(report['values'])} 项，"
                         f"{len(report['warnings'])} 条提示。")
@@ -55,7 +55,7 @@ class GameKeysReadAction(CustomAction):
                 runtime.log(f"游戏键位读取未完成：{error}。")
             if not written and reader.found:
                 try:
-                    write_json(ROOT / RESULT_FILE, reader.report(False))
+                    write_json(DATA_ROOT / RESULT_FILE, reader.report(False))
                 except (OSError, ValueError):
                     pass
             return False

@@ -4,7 +4,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from account_state import AccountState, game_day
-from .settings import ROOT
+from app_paths import DATA_ROOT
 from adventure_report import try_record_adventure_entry
 
 
@@ -15,7 +15,7 @@ class Home:
     def run(self):
         if not self.rt.main() or self.rt.stopped:
             return False
-        self.account = AccountState.for_runtime(ROOT, self.rt)
+        self.account = AccountState.for_runtime(DATA_ROOT, self.rt)
         card = SimpleNamespace(rule=SimpleNamespace(executor="home"), remaining=None)
         result = self.rt.navigate("home_daily", "home", card)
         if self.rt.stopped:
@@ -72,7 +72,7 @@ class Home:
             else "巨陨星待确认"
         )
         try_record_adventure_entry(
-            ROOT,
+            DATA_ROOT,
             self.rt,
             category="daily",
             task="home",

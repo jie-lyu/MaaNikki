@@ -11,7 +11,7 @@ import numpy as np
 
 from account_state import AccountState
 from collection.scanner import InventoryScanner, RescanSlot
-from daily.settings import ROOT
+from app_paths import DATA_ROOT
 from file_io import write_json
 from tall_window import clamp_capture_park_point, safe_capture_y_range, tall_window
 from task_control import TaskStopped, task_time as time
@@ -62,7 +62,7 @@ class WardrobeScanner(InventoryScanner):
         from data_paths import data_path
         self.rt, self.folder = runtime, folder
         self.model = WardrobeCatalog(data_path("resource/model/wardrobe"), data_path("resource/data/wardrobe_scoring.json"))
-        self.account = AccountState.for_runtime(ROOT, runtime)
+        self.account = AccountState.for_runtime(DATA_ROOT, runtime)
         self.layout = {
             "grid": [265, 130, 950, 505],
             "card_size": [101, 100],

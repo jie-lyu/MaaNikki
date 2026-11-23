@@ -112,7 +112,7 @@ class RouteTestChecks(unittest.TestCase):
                 def sleep(seconds):
                     ticks[0] += seconds
                 with patch.dict(os.environ, {"PI_MAANIKKI_DEV_MODE": "1"}), \
-                        patch("daily.route_test.ROOT", Path(directory)), \
+                        patch("daily.route_test.DATA_ROOT", Path(directory)), \
                         patch("daily.route_test.inputs_allowed", return_value=True), \
                         patch("daily.route_test.Locator"), \
                         patch("daily.route_test.TestInputs", return_value=inputs) as bind, \

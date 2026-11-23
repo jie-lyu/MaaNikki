@@ -13,7 +13,8 @@ from .startup import focus_game
 from .gameplay import Gameplay
 from .planner import Card, XINGHAI, ZHAOXI
 from .route_test import TestInputs
-from .settings import ROOT, foreground_inputs as inputs_allowed
+from app_paths import DATA_ROOT
+from .settings import foreground_inputs as inputs_allowed
 from navigation.models import NavigationError
 
 
@@ -71,7 +72,7 @@ class SubtaskTest(DailyRun):
                 raise NavigationError("请开启客户端设置中的开发模式后再测试子任务。")
             rule = test_rule(self.mode, key)
             result["label"] = rule.label
-            self.test_directory = ROOT / "logs/daily-tests" / (
+            self.test_directory = DATA_ROOT / "logs/daily-tests" / (
                 datetime.now().strftime("%Y%m%d-%H%M%S-%f")+f"-{self.mode}-{key}")
             self.test_directory.mkdir(parents=True)
             reason = unsupported_reason(rule)

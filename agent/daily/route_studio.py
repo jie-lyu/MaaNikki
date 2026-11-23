@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-import ctypes
 from datetime import datetime
 import json
 import math
@@ -14,19 +13,20 @@ from file_io import write_json
 
 from .route_test import RouteTest
 from .runtime import RESOURCE, Runtime
-from .settings import ROOT
+from app_paths import DATA_ROOT
 from .startup import focus_game
 from map_mask.matching import BigMapMatcher, MinimapMatcher, bigmap_pose
 from map_mask.service import BIGMAP_SCALES
 from navigation.controller import ForegroundInput
 from navigation.matching import luma, match_map
 from navigation.models import GameWindowClosed, NavigationError, maps
-from navigation.overlay import RouteMinimapOverlay, resolve_route_overlay_mode
+from host import overlay_backend
+from navigation.overlay import resolve_route_overlay_mode
 from navigation.vision import Locator, Pose
 from task_control import TaskStopped, active_session
 
 
-RECORDING_FILE = ROOT / "config/route_recording.json"
+RECORDING_FILE = DATA_ROOT / "config/route_recording.json"
 MAX_SAMPLES = 20000
 # Sampling only has to outline the route; the editor simplifies it afterwards.
 SAMPLE_INTERVAL = .2
@@ -54,9 +54,7 @@ class KeyWatcher(threading.Thread):
     def __init__(self, inputs, watched):
         super().__init__(daemon=True)
         self.inputs, self.watched = inputs, watched
-        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
-        self.user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
-        self.user32.GetAsyncKeyState.restype = ctypes.c_short
+        self.keys = inputs.native.physical_keys()
         self.finished = threading.Event()
         self.lock = threading.Lock()
         self.events = []
@@ -68,7 +66,7 @@ class KeyWatcher(threading.Thread):
             focused = self.inputs.foreground()
             now = wall_time.monotonic()
             for code, kind in self.watched.items():
-                down = focused and bool(self.user32.GetAsyncKeyState(code) & 0x8000)
+                down = focused and self.keys.down(code)
                 if down and code not in held:
                     held[code] = now
                     # Game keys are kept on release, once their hold time is known.
@@ -156,8 +154,9 @@ class RouteRecorder(Runtime):
                 if session is not None
                 else should_exclude_from_capture(self.controller)
             )
+            overlays = overlay_backend() if getattr(inputs, "hwnd", 0) else None
             overlay = (
-                RouteMinimapOverlay(
+                overlays.RouteMinimapOverlay(
                     inputs.hwnd,
                     spec,
                     exclude_from_capture=True if exclude_capture is None else bool(exclude_capture),
@@ -166,7 +165,7 @@ class RouteRecorder(Runtime):
                     hud_sink=hud,
                     allow_background=bool(session is not None and session._background_mode()),
                 )
-                if getattr(inputs, "hwnd", 0) else None
+                if overlays is not None else None
             )
             watched = {virtual_key(self.game_keys.get("jump")): "jump",
                        virtual_key(self.game_keys.get("interact")): "interact", **HOTKEYS}

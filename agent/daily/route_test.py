@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from file_io import write_json
 
-import ctypes
 from copy import deepcopy
 from datetime import datetime
 import json
@@ -17,7 +16,8 @@ from task_control import task_time as time
 import cv2
 
 from .runtime import Runtime, RESOURCE
-from .settings import ROOT, foreground_inputs as inputs_allowed
+from app_paths import DATA_ROOT, RESOURCE_ROOT
+from .settings import foreground_inputs as inputs_allowed
 from .startup import focus_game
 from navigation.controller import BackgroundInput, ForegroundInput
 from navigation.session import create_navigator
@@ -32,7 +32,7 @@ NAVIGATION_ACTIONS = {"", "teleport", "wait"}
 # Actions a user route may run. Others need task-specific setup from their daily task.
 USER_ACTIONS = NAVIGATION_ACTIONS | {"collect", "insect", "fishing", "bottle", "macro", "key"}
 USER_MACROS = {"starsea_fall", "zhaoxi_attack"}
-TRIAL_FILE = ROOT / "config/route_trial.json"
+TRIAL_FILE = DATA_ROOT / "config/route_trial.json"
 TRIAL_PUBLISH_INTERVAL = 0.35
 
 
@@ -106,10 +106,14 @@ def read_test_document(resource: Path, settings: dict):
             raise NavigationError("路线文件路径无效。")
         path = Path(filename).expanduser()
         if not path.is_absolute():
-            path = ROOT / path
+            relative = path
+            # User routes live in the data root; bundled routes may be named relative to the resources.
+            path = DATA_ROOT / relative
+            if not path.is_file() and (RESOURCE_ROOT / relative).is_file():
+                path = RESOURCE_ROOT / relative
         if not path.is_file() and path.suffix.lower() == ".json":
             for candidate in (
-                ROOT / "config/routes" / path.name,
+                DATA_ROOT / "config/routes" / path.name,
                 resource / "routes/collections" / path.name,
                 resource / "routes/gingerbread" / path.name,
                 resource / "routes/daily" / path.name,
@@ -126,7 +130,7 @@ def read_test_document(resource: Path, settings: dict):
         if not path.is_file():
             path = resource / "routes" / "gingerbread" / (name+".json")
         if not path.is_file():
-            path = ROOT / "config/routes" / (name+".json")
+            path = DATA_ROOT / "config/routes" / (name+".json")
     if path.suffix.lower() != ".json" or not path.is_file() or path.stat().st_size > 1024*1024:
         raise NavigationError("路线文件不存在、不是 JSON 或超过 1 MB。")
     return json.loads(path.read_text(encoding="utf-8-sig"))
@@ -284,12 +288,7 @@ def navigation_route(model):
 
 
 class TestInputs(ForegroundInput):
-    def focus_details(self):
-        hwnd = self.user32.GetForegroundWindow()
-        text = ctypes.create_unicode_buffer(1024)
-        if hwnd:
-            self.user32.GetWindowTextW(hwnd, text, len(text))
-        return {"game_hwnd": self.hwnd, "foreground_hwnd": int(hwnd or 0), "foreground_title": text.value}
+    """Foreground input for route tests; focus details come from the host target."""
 
 
 class TestTeleporter(Teleporter):
@@ -467,7 +466,7 @@ class RouteTest(Runtime):
                 raise NavigationError("路线合集中存在重复路线："+name)
             entry_file = entry.get("file", "")
             if not entry_file and not self.dev_only:
-                user_candidate = ROOT / "config/routes" / f"{name}.json"
+                user_candidate = DATA_ROOT / "config/routes" / f"{name}.json"
                 if user_candidate.is_file():
                     entry_file = str(user_candidate)
             child_settings = {"file": entry_file, "mode": mode} if entry_file else {"route": name, "mode": mode}
@@ -483,7 +482,7 @@ class RouteTest(Runtime):
             prepared.append((model, spec, title))
             names.add(name)
 
-        directory = ROOT / "logs/navigation" / (datetime.now().strftime("%Y%m%d-%H%M%S-%f")+"-route-collection")
+        directory = DATA_ROOT / "logs/navigation" / (datetime.now().strftime("%Y%m%d-%H%M%S-%f")+"-route-collection")
         directory.mkdir(parents=True)
         write_json(directory / "collection.json", source)
         summary = {"collection": source["id"], "success": False, "planned": len(prepared),
@@ -708,7 +707,7 @@ class RouteTest(Runtime):
             bg = self.background_mode()
             if not bg and not inputs_allowed():
                 raise NavigationError(f"{self.label}需要当前连接使用前台鼠标和键盘（Seize）。")
-            self.directory = directory or ROOT / "logs" / "navigation" / (datetime.now().strftime("%Y%m%d-%H%M%S-%f")+"-route-test")
+            self.directory = directory or DATA_ROOT / "logs" / "navigation" / (datetime.now().strftime("%Y%m%d-%H%M%S-%f")+"-route-test")
             self.directory.mkdir(parents=True)
             write_json(self.directory / "route.json", source_document)
             write_json(self.directory / "execution.json", model.document)
@@ -808,7 +807,7 @@ class RouteTest(Runtime):
                 gb_summary = actions.gingerbread_summary()
                 if gb_summary and gb_summary.get("waypoints_analyzed", 0) > 0:
                     from navigation.gingerbread_pickup import save_gingerbread_telemetry
-                    save_gingerbread_telemetry(ROOT, gb_summary, self.directory)
+                    save_gingerbread_telemetry(DATA_ROOT, gb_summary, self.directory)
                     result["gingerbread"] = gb_summary
                     self.log(f"【姜饼人实测推断】{gb_summary['overall_diagnosis']}")
             if not self.dev_only:
@@ -816,7 +815,7 @@ class RouteTest(Runtime):
                 gb = result.get("gingerbread")
                 if isinstance(gb, dict) and gb.get("picked_by_name") and int(gb.get("total_picked", 0)) > 0:
                     try_record_adventure_entry(
-                        ROOT,
+                        DATA_ROOT,
                         self,
                         category="open_world",
                         task=self.telemetry_mode(mode),
@@ -828,7 +827,7 @@ class RouteTest(Runtime):
                     )
                 elif result.get("success") and actions is not None and getattr(actions, "count", 0) > 0:
                     try_record_adventure_entry(
-                        ROOT,
+                        DATA_ROOT,
                         self,
                         category="open_world",
                         task=self.telemetry_mode(mode),
@@ -838,7 +837,7 @@ class RouteTest(Runtime):
                     )
             if active_route is not None and not self.stopped:
                 telemetry = record_route_telemetry(
-                    ROOT, active_route, self.telemetry_events,
+                    DATA_ROOT, active_route, self.telemetry_events,
                     executor=actions.executor if actions else mode,
                     mode=self.telemetry_mode(mode), success=bool(result.get("success")), stage=self.stage)
                 result["telemetry"] = telemetry

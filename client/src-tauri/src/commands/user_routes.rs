@@ -139,6 +139,7 @@ pub async fn generate_gingerbread_routes(params: Value) -> Result<Value, String>
 
         let mut cmd = std::process::Command::new(python);
         cmd.current_dir(&exe_dir).args(["-c", code, &req_str]);
+        super::utils::apply_agent_root_env(&mut cmd);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

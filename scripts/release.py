@@ -31,6 +31,12 @@ SOURCE_FILES = ("interface.json", ".gitignore", ".gitattributes", ".node-version
                 "docs/architecture.md",
                 "THIRD_PARTY_NOTICES.md", "LICENSE", "LICENSE.md")
 RUNTIME_DIRS = ("agent", "ai", "resource", "tasks", "options")
+# Documents copied beside the runtime when they exist.
+PACKAGED_DOCS = ("README.md", "CHANGELOG.md", "BUILDING.md", "docs/manual.md", "docs/architecture.md",
+                 "THIRD_PARTY_NOTICES.md", "LICENSE", "LICENSE.md")
+# Top-level runtime folders created by verification runs; never shipped.
+UNSHIPPED_RUNTIME_DIRS = ("debug", "cache", "config")
+BINARY_ZIP_NAME = "MaaNikki-v{version}-win-x86_64.zip"
 GENERATED_DIRS = {"node_modules", "target", "dist", "__pycache__", ".git", "schemas", ".cloudflare", ".wrangler"}
 GENERATED_SUFFIXES = {".pyc", ".pyo", ".pdb"}
 LOCAL_HELPER_PATTERNS = (
@@ -287,8 +293,7 @@ def prepare(output: Path, *, verify: bool = True) -> Path:
     if (ROOT / "licenses").is_dir():
         shutil.copytree(ROOT / "licenses", output / "licenses", dirs_exist_ok=True)
     shutil.copytree(ROOT / "docs/images", output / "docs/images", dirs_exist_ok=True)
-    for name in ("README.md", "CHANGELOG.md", "BUILDING.md", "docs/manual.md", "docs/architecture.md",
-                 "THIRD_PARTY_NOTICES.md", "LICENSE", "LICENSE.md"):
+    for name in PACKAGED_DOCS:
         if (ROOT / name).is_file():
             (output / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / name, output / name)
@@ -406,6 +411,13 @@ def collect_dependency_licenses(output: Path):
     print(f"Preserved license files for {len(index)} installed JS/Rust dependencies.", flush=True)
 
 
+def release_files(stage: Path) -> list[Path]:
+    """Files of a staged runtime that enter the binary archive."""
+    return [path for path in stage.rglob("*") if path.is_file()
+            and path.relative_to(stage).parts[0] not in UNSHIPPED_RUNTIME_DIRS
+            and "__pycache__" not in path.parts and path.suffix not in GENERATED_SUFFIXES]
+
+
 def package(executable: Path):
     if not executable.is_file():
         raise FileNotFoundError(f"Build the desktop client first: {executable}")
@@ -415,13 +427,11 @@ def package(executable: Path):
     shutil.copy2(executable, stage / "MaaNikki.exe")
     collect_dependency_licenses(stage)
     # Runtime checks produce logs; only selected release files enter the archive.
-    release_files = [path for path in stage.rglob("*") if path.is_file()
-                     and path.relative_to(stage).parts[0] not in ("debug", "cache", "config")
-                     and "__pycache__" not in path.parts and path.suffix not in GENERATED_SUFFIXES]
+    shipped = release_files(stage)
     out = ROOT / "artifacts"
-    binary_zip = out / f"MaaNikki-v{version}-win-x86_64.zip"
+    binary_zip = out / BINARY_ZIP_NAME.format(version=version)
     source_zip = out / f"MaaNikki-v{version}-source.zip"
-    write_zip(binary_zip, release_files, stage)
+    write_zip(binary_zip, shipped, stage)
     write_zip(source_zip, files, ROOT)
     checksum_path = out / f"MaaNikki-v{version}-SHA256SUMS.txt"
     checksum_path.write_text("".join(f"{sha256(path)}  {path.name}\n" for path in (binary_zip, source_zip)), encoding="utf-8")

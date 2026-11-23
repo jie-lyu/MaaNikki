@@ -416,56 +416,7 @@ class ForegroundSession:
 
     @staticmethod
     def _bring_to_foreground(adapter):
-        if adapter.foreground():
-            return True
-        user32 = adapter.user32
-        hwnd = adapter.hwnd
-        try:
-            if user32.IsIconic(hwnd):
-                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-        except Exception:
-            pass
-        try:
-            adapter.controller.post_key_up(18).wait()
-        except Exception:
-            pass
-        if adapter.foreground():
-            return True
-        # Fall back to thread-queue attach + Win32 activation if focus lock blocks Seize key-up.
-        try:
-            import ctypes
-            from ctypes import wintypes
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=False)
-            kernel32.GetCurrentThreadId.argtypes = []
-            kernel32.GetCurrentThreadId.restype = wintypes.DWORD
-            user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-            user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-            user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
-            user32.AttachThreadInput.restype = wintypes.BOOL
-            user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-            user32.ShowWindow.restype = wintypes.BOOL
-            user32.BringWindowToTop.argtypes = [wintypes.HWND]
-            user32.BringWindowToTop.restype = wintypes.BOOL
-            user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-            user32.SetForegroundWindow.restype = wintypes.BOOL
-            current_thread = kernel32.GetCurrentThreadId()
-            fg_thread = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
-            target_thread = user32.GetWindowThreadProcessId(hwnd, None)
-            attached = []
-            try:
-                for thread in dict.fromkeys((fg_thread, target_thread)):
-                    if thread and thread != current_thread and user32.AttachThreadInput(current_thread, thread, True):
-                        attached.append(thread)
-                if user32.IsIconic(hwnd):
-                    user32.ShowWindow(hwnd, 9)
-                user32.BringWindowToTop(hwnd)
-                user32.SetForegroundWindow(hwnd)
-            finally:
-                for thread in reversed(attached):
-                    user32.AttachThreadInput(current_thread, thread, False)
-        except Exception:
-            pass
-        return adapter.foreground()
+        return adapter.target.bring_to_foreground(adapter.controller)
 
     def _wait_until(self, adapter, ready, pause_message, resume_message, *, check_hung, bring_back):
         if self.stopped():
@@ -482,7 +433,7 @@ class ForegroundSession:
             while True:
                 if self.stopped() or adapter.stopped():
                     raise TaskStopped("任务已停止。")
-                if not adapter.user32.IsWindow(adapter.hwnd):
+                if not adapter.target.exists():
                     self.window_closed()
                 now = wall_time.monotonic()
                 if check_hung and adapter.hung():
@@ -527,7 +478,7 @@ class ForegroundSession:
         hud = self.ensure_hud(getattr(adapter, "hwnd", 0))
         if hud is not None and manage_hud:
             hud.set_context(control_mode=self._control_mode())
-        if not adapter.user32.IsWindow(adapter.hwnd):
+        if not adapter.target.exists():
             self.window_closed()
         if not self.started:
             if self.stopped():
@@ -546,7 +497,7 @@ class ForegroundSession:
                 while adapter.hung():
                     if self.stopped() or adapter.stopped():
                         raise TaskStopped("任务已停止。")
-                    if not adapter.user32.IsWindow(adapter.hwnd):
+                    if not adapter.target.exists():
                         self.window_closed()
                     if wall_time.monotonic()-hung_begin >= HUNG_WINDOW_TIMEOUT:
                         self.window_hung()
@@ -576,14 +527,14 @@ class ForegroundSession:
                 return
             pause_message = (
                 "游戏窗口已最小化，任务暂停；恢复窗口后自动继续。"
-                if adapter.user32.IsIconic(adapter.hwnd)
+                if adapter.target.minimized()
                 else "游戏已离开前台且当前截图方式需要前台画面，任务暂停；切回无限暖暖后自动继续。"
             )
             if hud is not None:
                 hud.set_paused(
                     True,
                     reason=("游戏窗口已最小化，请恢复窗口后继续"
-                            if adapter.user32.IsIconic(adapter.hwnd)
+                            if adapter.target.minimized()
                             else "当前截图方式需要前台画面，切回无限暖暖后继续"),
                 )
             self._wait_until(

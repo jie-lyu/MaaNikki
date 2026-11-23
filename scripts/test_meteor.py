@@ -168,7 +168,7 @@ class MeteorTests(unittest.TestCase):
         rt.routes.return_value = self.routes["xinghai_meteor2"].document
         rt.game_keys, rt.navigation_inputs = Mock(), None
         with tempfile.TemporaryDirectory(dir=ROOT / ".build") as folder, \
-                patch("daily.runtime.ROOT", Path(folder)), \
+                patch("daily.runtime.DATA_ROOT", Path(folder)), \
                 patch("daily.runtime.foreground_inputs", return_value=True), \
                 patch("navigation.controller.ForegroundInput") as inputs, \
                 patch("navigation.vision.Locator"), \

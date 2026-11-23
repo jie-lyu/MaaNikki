@@ -442,6 +442,8 @@ async fn start_single_agent(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        super::utils::apply_agent_root_env(&mut cmd);
+
         if let Some(overlay_dir) = super::data_update::active_slot_dir() {
             cmd.env("PI_MAANIKKI_DATA_OVERLAY", overlay_dir);
         }

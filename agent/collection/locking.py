@@ -10,7 +10,7 @@ import numpy as np
 
 from task_control import ForegroundChanged, TaskStopped
 from daily.runtime import parameters
-from daily.settings import ROOT
+from app_paths import RESOURCE_ROOT
 from tall_window import clamp_capture_park_point, is_capture_point_safe, safe_capture_y_range
 from .card_models import CardModels, badge_roi as classifier_roi
 from .blessing import SLOTS
@@ -45,7 +45,7 @@ class BlessingLocker(InventoryScanner):
         self.lock_templates = {}
         references = {}
         for state in ("locked", "unlocked"):
-            reference = ROOT / f"resource/image/blessing_lock/{state}.png"
+            reference = RESOURCE_ROOT / f"resource/image/blessing_lock/{state}.png"
             image = cv2.imdecode(np.fromfile(str(reference), np.uint8), cv2.IMREAD_COLOR)
             if image is None or image.shape[:2] != tuple(reversed(self.layout["lock_icon"][2:])):
                 raise ValueError(f"锁按钮图像资源缺失或尺寸不符：{state}")
@@ -78,7 +78,7 @@ class BlessingLocker(InventoryScanner):
         if white_floor <= open_ceiling:
             raise ValueError("锁扣缺口素材无法区分白色与非白色")
         self.lock_white_cutoff = (white_floor + open_ceiling) / 2
-        reference = ROOT / "resource/image/blessing_lock/locked_background.png"
+        reference = RESOURCE_ROOT / "resource/image/blessing_lock/locked_background.png"
         background = cv2.imdecode(np.fromfile(str(reference), np.uint8), cv2.IMREAD_UNCHANGED)
         if (background is None or background.ndim != 3 or background.shape[2] != 4
                 or background.shape[:2] != tuple(reversed(self.layout["lock_background"][2:]))):
@@ -841,7 +841,7 @@ class BlessingLocker(InventoryScanner):
         template = getattr(self, "_acquired_desc_template", None)
         if template is not None:
             return template
-        reference = ROOT / "resource/image/blessing_lock/acquired_desc.png"
+        reference = RESOURCE_ROOT / "resource/image/blessing_lock/acquired_desc.png"
         template = cv2.imdecode(np.fromfile(str(reference), np.uint8), cv2.IMREAD_GRAYSCALE)
         if template is None:
             raise RuntimeError("获得时间排序方向资源缺失")

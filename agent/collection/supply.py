@@ -3,7 +3,7 @@ import re
 
 from daily.gameplay import Gameplay
 from daily.runtime import Executors
-from daily.settings import ROOT
+from app_paths import DATA_ROOT
 from adventure_report import try_record_adventure_entry
 
 
@@ -101,7 +101,7 @@ class CollectionSupply:
                 self.journal.save()
                 spent_energy = max(0, energy - remaining)
                 try_record_adventure_entry(
-                    ROOT,
+                    DATA_ROOT,
                     self.rt,
                     category="realm",
                     task="bless",
@@ -151,7 +151,7 @@ class CollectionSupply:
             quote = getattr(child_game, "_last_jihua_quote", None)
             bling_gain = quote[2] if (quote and quote[0] == "噗灵" and quote[2] > 0) else 0
             try_record_adventure_entry(
-                ROOT,
+                DATA_ROOT,
                 self.rt,
                 category="realm",
                 task="jihua",

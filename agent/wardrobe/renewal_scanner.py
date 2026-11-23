@@ -15,7 +15,7 @@ import numpy as np
 from account_state import AccountState
 from collection.backpack import wardrobe_snapshot, wardrobe_snapshot_key
 from collection.material_pursuit import load_catalogs, record_material_history
-from daily.settings import ROOT
+from app_paths import DATA_ROOT
 from tall_window import clamp_capture_park_point, safe_capture_y_range, tall_window, window_hwnd
 from .model import WardrobeCatalog
 from .scanner import MAKEUP_PARTS, PEAR_PAL_NEXT_PAGE, PEAR_PAL_PREV_PAGE
@@ -670,7 +670,7 @@ class RenewalScanner:
 
     def __init__(self, rt, account: AccountState | None = None, *, mode: str = "full"):
         self.rt = rt
-        self.account = account or AccountState.for_runtime(ROOT, rt)
+        self.account = account or AccountState.for_runtime(DATA_ROOT, rt)
         self.mode = "incremental" if mode == "incremental" else "full"
         from data_paths import data_path
         self.crafting, self.scoring = load_catalogs()

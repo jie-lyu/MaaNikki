@@ -1263,8 +1263,8 @@ class GameUI:
 
     def report_entry(self, source, destination, events):
         try:
-            from .settings import ROOT
-            directory = ROOT / "logs/navigation"
+            from app_paths import DATA_ROOT
+            directory = DATA_ROOT / "logs/navigation"
             directory.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now()
             record = {"time": stamp.isoformat(timespec="seconds"), "operation": "page_entry",

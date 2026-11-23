@@ -1,7 +1,6 @@
 """UID-scoped local adventure daily report ledger (4:00 AM UTC+8 game day)."""
 from __future__ import annotations
 
-from contextlib import contextmanager
 from datetime import datetime
 import json
 import os
@@ -11,7 +10,7 @@ from uuid import uuid4
 
 from account_state import game_day, read_json
 from data_paths import data_path
-from file_io import write_json
+from file_io import exclusive_file_lock, write_json
 
 MAX_DAYS = 400
 MAX_ENTRIES_PER_DAY = 200
@@ -70,32 +69,9 @@ def report_path(root: Path, account_key: str) -> Path:
     return base / "default.json"
 
 
-@contextmanager
 def _report_lock(root: Path):
-    path = Path(root) / "config/adventure_reports/store.lock"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+b") as handle:
-        handle.seek(0, 2)
-        if handle.tell() == 0:
-            handle.write(b"0")
-            handle.flush()
-        handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            handle.seek(0)
-            if os.name == "nt":
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    """root is the data root."""
+    return exclusive_file_lock(Path(root) / "config/adventure_reports/store.lock")
 
 
 def _blank_report(account_key: str, uid: str | None) -> dict:
@@ -201,7 +177,7 @@ def lookup_monster_drop(root: Path, level_name: str) -> tuple[str, str, int] | N
     if not level:
         return None
     try:
-        catalog_path = data_path("resource/data/crafting_catalog.json", Path(root))
+        catalog_path = data_path("resource/data/crafting_catalog.json", data_root=Path(root))
         if not catalog_path.is_file():
             return None
         mtime = catalog_path.stat().st_mtime

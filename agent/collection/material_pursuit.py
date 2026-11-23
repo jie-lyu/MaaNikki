@@ -10,7 +10,7 @@ from account_state import AccountState, game_day
 from adventure_report import try_record_adventure_entry
 from daily.gameplay import Gameplay
 from daily.runtime import Executors, parameters
-from daily.settings import ROOT
+from app_paths import DATA_ROOT
 from task_control import TaskStopped
 from .realm_goals import GOAL_LABELS
 from .backpack import (
@@ -801,7 +801,7 @@ def run_material_goals(rt, goals: list[str], glow_shortfall) -> tuple[str, str |
     farmed. ``glow_shortfall(role)`` reports whether the blessing goal still has
     colours to chase; a pending glow goal hands off to the blessing workflow.
     """
-    account = AccountState.for_runtime(ROOT, rt)
+    account = AccountState.for_runtime(DATA_ROOT, rt)
     crafting, scoring = load_catalogs()
     inventory = None
     energy = None
@@ -906,7 +906,7 @@ def run_material_goals(rt, goals: list[str], glow_shortfall) -> tuple[str, str |
         if actual_runs > 0 or spent > 0:
             realm_label = "素材激化" if kind == "jihua" else "魔物试炼"
             try_record_adventure_entry(
-                ROOT,
+                DATA_ROOT,
                 rt,
                 category="realm",
                 task="realm_material",

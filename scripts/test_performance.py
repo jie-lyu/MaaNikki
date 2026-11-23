@@ -178,7 +178,7 @@ for name in assets:
         scene = np.zeros((30, 40, 3), np.uint8)
         scene[5:17, 8:22] = self.image[:, :, :3]
         param = {"template": "template.png", "gray_limit": [210, 255], "threshold": .99}
-        with patch("recognition.ui_template.ROOT", Path(self.directory.name)), \
+        with patch("recognition.ui_template.RESOURCE_ROOT", Path(self.directory.name)), \
                 patch("recognition.ui_template.prepared_template", side_effect=lambda *args, **kwargs:
                     prepared_template(self.path, **kwargs)):
             result = UITemplateRecognition().analyze(None, SimpleNamespace(

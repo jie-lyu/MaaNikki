@@ -6,7 +6,8 @@ import os
 from pathlib import Path
 import re
 
-ROOT = Path(__file__).resolve().parents[1]
+from app_paths import DATA_ROOT, RESOURCE_ROOT
+
 _SLOT_RE = re.compile(r"^[A-Za-z0-9._-]{1,40}$")
 
 _REQUIRED_OVERLAY_FILES = (
@@ -37,14 +38,24 @@ def _slot_complete(slot_dir: Path) -> bool:
     return slot_dir.is_dir() and all((slot_dir / rel).is_file() for rel in _REQUIRED_OVERLAY_FILES)
 
 
-def active_overlay_dir(root: Path = ROOT) -> Path | None:
+def _roots(root, data_root, resource_root) -> tuple[Path, Path]:
+    # A single positional root keeps the old meaning: both overlay and built-in files live there.
+    data_root = data_root if data_root is not None else (root if root is not None else DATA_ROOT)
+    resource_root = resource_root if resource_root is not None else (root if root is not None else RESOURCE_ROOT)
+    return Path(data_root), Path(resource_root)
+
+
+def active_overlay_dir(root: Path | None = None, *, data_root: Path | None = None,
+                       resource_root: Path | None = None) -> Path | None:
+    """The hot-update slot under the data root, if complete and not older than the built-in data."""
+    data_root, resource_root = _roots(root, data_root, resource_root)
     env_slot = os.environ.get("PI_MAANIKKI_DATA_OVERLAY", "").strip()
     if env_slot:
         candidate = Path(env_slot)
         if _slot_complete(candidate):
             return candidate
 
-    active_file = root / "data_overlay" / "active.json"
+    active_file = data_root / "data_overlay" / "active.json"
     if not active_file.is_file():
         return None
     try:
@@ -54,11 +65,11 @@ def active_overlay_dir(root: Path = ROOT) -> Path | None:
     slot = str(record.get("slot") or "")
     if record.get("schema_version") != 1 or not _SLOT_RE.fullmatch(slot) or ".." in slot:
         return None
-    candidate = root / "data_overlay" / "slots" / slot
+    candidate = data_root / "data_overlay" / "slots" / slot
     if not _slot_complete(candidate):
         return None
 
-    builtin_ws = root / "resource/data/wardrobe_scoring.json"
+    builtin_ws = resource_root / "resource/data/wardrobe_scoring.json"
     if builtin_ws.is_file():
         try:
             ws = json.loads(builtin_ws.read_text(encoding="utf-8-sig"))
@@ -73,11 +84,14 @@ def active_overlay_dir(root: Path = ROOT) -> Path | None:
     return candidate
 
 
-def data_path(rel_path: str, root: Path = ROOT) -> Path:
+def data_path(rel_path: str, root: Path | None = None, *, data_root: Path | None = None,
+              resource_root: Path | None = None) -> Path:
+    """rel_path from the active overlay when present there, otherwise from the resource root."""
+    data_root, resource_root = _roots(root, data_root, resource_root)
     clean = rel_path.replace("\\", "/").lstrip("./")
-    overlay = active_overlay_dir(root)
+    overlay = active_overlay_dir(data_root=data_root, resource_root=resource_root)
     if overlay is not None:
         candidate = overlay / clean
         if candidate.exists():
             return candidate
-    return root / clean
+    return resource_root / clean

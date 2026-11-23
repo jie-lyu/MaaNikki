@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import configparser
 from contextlib import contextmanager
-import ctypes
-from ctypes import wintypes
 from datetime import datetime
 import json
 import math
@@ -16,22 +14,19 @@ import time
 from threading import Timer
 
 
-ROOT = Path(__file__).resolve().parents[1]
-REPORT = ROOT / "logs/startup" / (datetime.now().strftime("%Y%m%d-%H%M%S-%f")+"-launch.json")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runtime_threads import configure_worker_threads
+from app_paths import DATA_ROOT, RESOURCE_ROOT
+
+REPORT = DATA_ROOT / "logs/startup" / (datetime.now().strftime("%Y%m%d-%H%M%S-%f")+"-launch.json")
+from runtime_threads import configure_utf8_streams, configure_worker_threads
 
 configure_worker_threads(2)
 from file_io import write_json
 from client_config import mxu_config
+from host.win32.launch import (LauncherWindows, ensure_unminimized, focus_window, game_window, initialize_winrt,
+                               window_exists_check)
 
-for _stream in (sys.stdout, sys.stderr):
-    _reconfigure = getattr(_stream, "reconfigure", None)
-    if callable(_reconfigure):
-        try:
-            _reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+configure_utf8_streams()
 
 PROGRAMS = ("InfinityNikki.exe", "X6Game.exe", "X6Game-Win64-Shipping.exe")
 
@@ -41,7 +36,7 @@ def resolve_focus_lost_mode(options=None) -> str:
     mapping = {"Pause": "pause", "Return": "return", "Background": "background"}
     sources = [options] if isinstance(options, dict) else []
     try:
-        cfg = mxu_config(ROOT) or {}
+        cfg = mxu_config(DATA_ROOT) or {}
         if isinstance(cfg.get("globalOptionValues"), dict):
             sources.append(cfg["globalOptionValues"])
     except Exception:
@@ -65,7 +60,7 @@ def resolve_task_hud_mode(options=None) -> str:
     mapping = {"Adaptive": "adaptive", "Always": "always", "ReasonOnly": "reason_only"}
     sources = [options] if isinstance(options, dict) else []
     try:
-        cfg = mxu_config(ROOT) or {}
+        cfg = mxu_config(DATA_ROOT) or {}
         if isinstance(cfg.get("globalOptionValues"), dict):
             sources.append(cfg["globalOptionValues"])
     except Exception:
@@ -82,25 +77,6 @@ def resolve_task_hud_mode(options=None) -> str:
             if case_name in mapping:
                 return mapping[case_name]
     return "adaptive"
-
-
-def ensure_unminimized(hwnd) -> bool:
-    """Ensure a window is not minimized without stealing foreground focus."""
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    user32.IsWindow.argtypes = [wintypes.HWND]
-    user32.IsWindow.restype = wintypes.BOOL
-    user32.IsIconic.argtypes = [wintypes.HWND]
-    user32.IsIconic.restype = wintypes.BOOL
-    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-    if not user32.IsWindow(hwnd):
-        return False
-    if user32.IsIconic(hwnd):
-        user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
-        time.sleep(0.15)
-        if user32.IsIconic(hwnd):
-            user32.ShowWindow(hwnd, 9)  # SW_RESTORE fallback
-            time.sleep(0.15)
-    return bool(user32.IsWindow(hwnd) and not user32.IsIconic(hwnd))
 
 
 def save_record(record):
@@ -137,112 +113,6 @@ def startup_step(record, stage):
         timer.cancel()
 
 
-def focus_window(hwnd):
-    """Activate once at startup, then verify without repeatedly stealing focus."""
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    user32.IsWindow.argtypes = [wintypes.HWND]
-    user32.IsWindow.restype = wintypes.BOOL
-    user32.IsIconic.argtypes = [wintypes.HWND]
-    user32.IsIconic.restype = wintypes.BOOL
-    user32.GetForegroundWindow.argtypes = []
-    user32.GetForegroundWindow.restype = wintypes.HWND
-    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-    user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
-    user32.AttachThreadInput.restype = wintypes.BOOL
-    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-    user32.BringWindowToTop.argtypes = [wintypes.HWND]
-    user32.BringWindowToTop.restype = wintypes.BOOL
-    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-    user32.SetForegroundWindow.restype = wintypes.BOOL
-    kernel32.GetCurrentThreadId.argtypes = []
-    kernel32.GetCurrentThreadId.restype = wintypes.DWORD
-    if not user32.IsWindow(hwnd):
-        return False
-    if user32.GetForegroundWindow() == hwnd and not user32.IsIconic(hwnd):
-        return True
-
-    current_thread = kernel32.GetCurrentThreadId()
-
-    def activate():
-        foreground_thread = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
-        target_thread = user32.GetWindowThreadProcessId(hwnd, None)
-        attached = []
-        try:
-            # The helper is launched in the background. Share the foreground input
-            # queue during activation so Windows can grant it foreground access.
-            for thread in dict.fromkeys((foreground_thread, target_thread)):
-                if thread and thread != current_thread and user32.AttachThreadInput(current_thread, thread, True):
-                    attached.append(thread)
-            if user32.IsIconic(hwnd):
-                user32.ShowWindow(hwnd, 9)  # SW_RESTORE; preserve maximized windows.
-            user32.BringWindowToTop(hwnd)
-            user32.SetForegroundWindow(hwnd)
-        finally:
-            for thread in reversed(attached):
-                user32.AttachThreadInput(current_thread, thread, False)
-
-    activate()
-    deadline, stable_since, last_attempt = time.monotonic()+3, None, time.monotonic()
-    while time.monotonic() < deadline:
-        if not user32.IsWindow(hwnd):
-            return False
-        now = time.monotonic()
-        if user32.GetForegroundWindow() == hwnd and not user32.IsIconic(hwnd):
-            stable_since = now if stable_since is None else stable_since
-            if now-stable_since >= .15:
-                return True
-        else:
-            stable_since = None
-            if now-last_attempt >= .5:
-                activate()
-                last_attempt = now
-        time.sleep(.05)
-    return False
-
-
-def game_window():
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-    user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
-    user32.EnumWindows.restype = wintypes.BOOL
-    user32.IsWindowVisible.argtypes = [wintypes.HWND]
-    user32.IsWindowVisible.restype = wintypes.BOOL
-    user32.IsIconic.argtypes = [wintypes.HWND]
-    user32.IsIconic.restype = wintypes.BOOL
-    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-    user32.GetWindowTextW.restype = ctypes.c_int
-    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-    user32.GetClassNameW.restype = ctypes.c_int
-    user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-    user32.GetClientRect.restype = wintypes.BOOL
-    found = []
-
-    @callback_type
-    def visit(hwnd, _):
-        title = ctypes.create_unicode_buffer(257)
-        class_name = ctypes.create_unicode_buffer(257)
-        if (user32.IsWindowVisible(hwnd)
-                and user32.GetClassNameW(hwnd, class_name, len(class_name))
-                and class_name.value == "UnrealWindow"
-                and user32.GetWindowTextW(hwnd, title, len(title))
-                and re.fullmatch(r"\s*(Infinity\s*Nikki|无限暖暖|無限暖暖)\s*", title.value)):
-            rect = wintypes.RECT()
-            if user32.IsIconic(hwnd):
-                # Minimized Unreal windows may report an empty client area.
-                found.append(int(hwnd))
-            elif user32.GetClientRect(hwnd, ctypes.byref(rect)):
-                width, height = rect.right-rect.left, rect.bottom-rect.top
-                if width >= 640 and height >= 360:
-                    found.append(int(hwnd))
-        return True
-
-    if not user32.EnumWindows(visit, 0):
-        raise OSError("无法枚举游戏窗口。")
-    return found[0] if found else None
-
-
 def resolve_program(value):
     """Accept the official launcher, including migration from old client paths."""
     if value:
@@ -256,35 +126,20 @@ def resolve_program(value):
                     if candidate.is_file():
                         return candidate
         raise ValueError("请选择官方启动器 launcher.exe；不能直接运行游戏客户端。")
-    import winreg
-    launcher_names = (
-        "InfinityNikki Launcher",
-        "InfinityNikkiBili Launcher",
-        "InfinityNikkiGlobal Launcher",
-    )
-    for launcher_name in launcher_names:
-        reg_key = rf"Software\{launcher_name}"
+    # The first valid installation wins: registry first, then the launcher's config.ini.
+    from host.win32.launcher import config_game_dirs, registry_install_dirs
+    for folder in registry_install_dirs():
         try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_key) as key:
-                folder = Path(winreg.QueryValueEx(key, "")[0])
-                candidate = folder / "launcher.exe"
-                if candidate.is_file():
-                    return candidate.resolve()
+            candidate = folder / "launcher.exe"
+            if candidate.is_file():
+                return candidate.resolve()
         except OSError:
             pass
-    local_app_data = Path(os.environ.get("LOCALAPPDATA", ""))
-    for launcher_dir in launcher_names:
-        config_path = local_app_data / launcher_dir / "config.ini"
-        config = configparser.ConfigParser(interpolation=None)
-        if config_path.is_file():
-            config.read(config_path, encoding="utf-8-sig")
-            directory = config.get("Download", "gameDir", fallback="").strip().strip('"')
-            if directory:
-                folder = Path(directory)
-                for base in (folder, folder.parent):
-                    candidate = base / "launcher.exe"
-                    if candidate.is_file():
-                        return candidate.resolve()
+    for folder in config_game_dirs():
+        for base in (folder, folder.parent):
+            candidate = base / "launcher.exe"
+            if candidate.is_file():
+                return candidate.resolve()
     raise ValueError("未找到官方启动器，请在启动游戏任务中选择 launcher.exe。")
 
 
@@ -404,74 +259,6 @@ def classify_launcher_modal(items, *, min_score: float = 0.6):
     return None
 
 
-class LauncherWindows:
-    def __init__(self, folder):
-        self.folder = folder.resolve()
-        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
-        self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        self.callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-        self.user32.EnumWindows.argtypes = [self.callback_type, wintypes.LPARAM]
-        self.user32.EnumWindows.restype = wintypes.BOOL
-        self.user32.IsWindow.argtypes = [wintypes.HWND]
-        self.user32.IsWindow.restype = wintypes.BOOL
-        self.user32.IsWindowVisible.argtypes = [wintypes.HWND]
-        self.user32.IsWindowVisible.restype = wintypes.BOOL
-        self.user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-        self.user32.GetClientRect.restype = wintypes.BOOL
-        self.user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-        self.user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-        self.user32.GetForegroundWindow.restype = wintypes.HWND
-        self.user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-        self.user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-        self.user32.SetForegroundWindow.restype = wintypes.BOOL
-        self.user32.IsIconic.argtypes = [wintypes.HWND]
-        self.user32.IsIconic.restype = wintypes.BOOL
-        self.kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        self.kernel32.OpenProcess.restype = wintypes.HANDLE
-        self.kernel32.QueryFullProcessImageNameW.argtypes = [
-            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
-        self.kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
-        self.kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        self.kernel32.CloseHandle.restype = wintypes.BOOL
-
-    def find(self):
-        found = []
-
-        @self.callback_type
-        def visit(hwnd, _):
-            rect = wintypes.RECT()
-            if not (self.user32.IsWindowVisible(hwnd) and self.user32.GetClientRect(hwnd, ctypes.byref(rect))):
-                return True
-            width, height = rect.right-rect.left, rect.bottom-rect.top
-            if width < 640 or height < 360:
-                return True
-            pid = wintypes.DWORD()
-            self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            process = self.kernel32.OpenProcess(0x1000, False, pid.value)
-            if process:
-                try:
-                    name, length = ctypes.create_unicode_buffer(32768), wintypes.DWORD(32768)
-                    if self.kernel32.QueryFullProcessImageNameW(process, 0, name, ctypes.byref(length)):
-                        path = Path(name.value)
-                        if (path.name.lower() in {"xstarter.exe", "launcher.exe"}
-                                and path.is_relative_to(self.folder)):
-                            found.append((width*height, int(hwnd)))
-                finally:
-                    self.kernel32.CloseHandle(process)
-            return True
-
-        if not self.user32.EnumWindows(visit, 0):
-            raise OSError("无法查找官方启动器窗口。")
-        return max(found)[1] if found else None
-
-    def foreground(self, hwnd):
-        return self.user32.GetForegroundWindow() == hwnd and not self.user32.IsIconic(hwnd)
-
-    def focus(self, hwnd):
-        if not focus_window(hwnd):
-            raise RuntimeError("未能自动将官方启动器切到前台，请检查窗口状态和权限后重试。")
-
-
 class LauncherRuntime:
     """A separate Maa session because the game controller does not exist yet."""
 
@@ -486,7 +273,7 @@ class LauncherRuntime:
         # DirectML OCR can initialize in a corrupted state during launcher startup and
         # emit "_ _" for every detected box; CPU inference is fast and deterministic.
         self.resource.use_cpu()
-        if not self.resource.post_bundle(ROOT / "resource").wait().succeeded:
+        if not self.resource.post_bundle(RESOURCE_ROOT / "resource").wait().succeeded:
             raise RuntimeError("无法加载启动器识别所需的项目资源。")
         self.controller = Win32Controller(
             hwnd, MaaWin32ScreencapMethodEnum.PrintWindow,
@@ -527,7 +314,7 @@ class LauncherRuntime:
         if require_foreground and not self.windows.foreground(self.hwnd):
             return None
         if not require_foreground and (
-            not self.windows.user32.IsWindow(self.hwnd) or self.windows.user32.IsIconic(self.hwnd)
+            not self.windows.exists(self.hwnd) or self.windows.minimized(self.hwnd)
         ):
             return None
         captured = self.controller.post_screencap().wait()
@@ -560,54 +347,9 @@ class LauncherRuntime:
         return state, recognition.box
 
     def _background_click(self, box) -> bool:
-        if self.image is None or not self.windows.user32.IsWindow(self.hwnd) or self.windows.user32.IsIconic(self.hwnd):
+        if self.image is None:
             return False
-        cap_h, cap_w = self.image.shape[:2]
-        if cap_w <= 0 or cap_h <= 0:
-            return False
-        u32 = self.windows.user32
-        u32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
-        u32.ClientToScreen.restype = wintypes.BOOL
-        u32.SendMessageTimeoutW.argtypes = [
-            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
-            wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t),
-        ]
-        u32.SendMessageTimeoutW.restype = ctypes.c_ssize_t
-        rect = wintypes.RECT()
-        if not u32.GetClientRect(self.hwnd, ctypes.byref(rect)):
-            return False
-        cw, ch = rect.right - rect.left, rect.bottom - rect.top
-        if cw <= 0 or ch <= 0:
-            return False
-        cx = max(0, min(cw - 1, round((box[0] + box[2] / 2) * cw / cap_w)))
-        cy = max(0, min(ch - 1, round((box[1] + box[3] / 2) * ch / cap_h)))
-        pt = wintypes.POINT(cx, cy)
-        if not u32.ClientToScreen(self.hwnd, ctypes.byref(pt)):
-            return False
-        lparam = ((cy & 0xFFFF) << 16) | (cx & 0xFFFF)
-        res_out = ctypes.c_size_t(0)
-        u32.SendMessageTimeoutW(self.hwnd, 0x0006, 1, 0, 0x0002, 500, ctypes.byref(res_out))
-
-        from mouse_guard import guarded_borrowed_cursor
-
-        sx, sy = int(pt.x), int(pt.y)
-        with guarded_borrowed_cursor(
-            sx,
-            sy,
-            enabled=True,
-            ready=lambda: bool(u32.IsWindow(self.hwnd) and not u32.IsIconic(self.hwnd)),
-            lease_ms=450,
-            clip_rect=(sx, sy, sx + 1, sy + 1),
-        ) as lease:
-            if not lease:
-                return False
-            time.sleep(0.01)
-            u32.SendMessageTimeoutW(self.hwnd, 0x0200, 0, lparam, 0x0002, 500, ctypes.byref(res_out))
-            time.sleep(0.02)
-            ok = u32.SendMessageTimeoutW(self.hwnd, 0x0201, 0x0001, lparam, 0x0002, 500, ctypes.byref(res_out)) != 0
-            time.sleep(0.05)
-            u32.SendMessageTimeoutW(self.hwnd, 0x0202, 0, lparam, 0x0002, 500, ctypes.byref(res_out))
-            return ok
+        return self.windows.background_click(self.hwnd, self.image.shape, box)
 
     def action(self, state, box, *, background=False):
         from maa.pipeline import JClick
@@ -635,11 +377,11 @@ class LauncherRuntime:
 
 
 def launch_game(program, timeout, record, *, background=False):
-    os.environ["MAAFW_BINARY_PATH"] = str(ROOT / "maafw")
+    os.environ["MAAFW_BINARY_PATH"] = str(RESOURCE_ROOT / "maafw")
     from maa.library import Library
     from maa.tasker import Tasker
-    Library.open(ROOT / "maafw")
-    Tasker.set_log_dir(str(ROOT / "logs/startup/framework"))
+    Library.open(RESOURCE_ROOT / "maafw")
+    Tasker.set_log_dir(str(DATA_ROOT / "logs/startup/framework"))
     Tasker.set_save_on_error(False)
     windows = LauncherWindows(program.parent)
     hwnd = windows.find()
@@ -702,13 +444,13 @@ def launch_game(program, timeout, record, *, background=False):
                 return
             hwnd = windows.find()
             if runtime is not None and (
-                not hwnd or hwnd != runtime.hwnd or not windows.user32.IsWindow(runtime.hwnd)
+                not hwnd or hwnd != runtime.hwnd or not windows.exists(runtime.hwnd)
             ):
                 # Old launcher window closed or switched (e.g. self-update restart);
                 # drop the session immediately so even a recycled HWND reattaches cleanly.
                 drop_runtime()
             if restarting_from_hwnd is not None and (
-                not hwnd or not windows.user32.IsWindow(restarting_from_hwnd)
+                not hwnd or not windows.exists(restarting_from_hwnd)
             ):
                 restart_window_disappeared = True
                 set_stage("launcher_restarting")
@@ -718,7 +460,7 @@ def launch_game(program, timeout, record, *, background=False):
             if hwnd and runtime is None:
                 ready_win = ensure_unminimized(hwnd) if background else focus_window(hwnd)
                 if not ready_win:
-                    if not windows.user32.IsWindow(hwnd):
+                    if not windows.exists(hwnd):
                         drop_runtime()
                         consume_elapsed(True)
                         time.sleep(.25)
@@ -732,7 +474,7 @@ def launch_game(program, timeout, record, *, background=False):
                         runtime = LauncherRuntime(windows, hwnd)
                     connect_failures = 0
                 except RuntimeError:
-                    if not windows.user32.IsWindow(hwnd):
+                    if not windows.exists(hwnd):
                         drop_runtime()
                         consume_elapsed(True)
                         time.sleep(.25)
@@ -767,7 +509,7 @@ def launch_game(program, timeout, record, *, background=False):
                 )
                 save_record(record)
             active_ok = (
-                bool(hwnd and windows.user32.IsWindow(hwnd) and not windows.user32.IsIconic(hwnd))
+                bool(hwnd and windows.exists(hwnd) and not windows.minimized(hwnd))
                 if background
                 else bool(hwnd and windows.foreground(hwnd))
             )
@@ -818,7 +560,7 @@ def launch_game(program, timeout, record, *, background=False):
                             clicked = runtime.action(state, box, background=use_bg)
                             if clicked or (
                                 state == "launcher_update_restart"
-                                and not windows.user32.IsWindow(hwnd)
+                                and not windows.exists(hwnd)
                             ):
                                 clicks[state] += 1
                                 attempt_clicks[state] += 1
@@ -826,7 +568,7 @@ def launch_game(program, timeout, record, *, background=False):
                                 if state == "launcher_update_restart":
                                     restarting_from_hwnd = hwnd
                                     restart_clicked_at = now
-                                    restart_window_disappeared = not windows.user32.IsWindow(hwnd)
+                                    restart_window_disappeared = not windows.exists(hwnd)
                                     set_stage("launcher_restarting")
             time.sleep(.25)
     finally:
@@ -835,7 +577,7 @@ def launch_game(program, timeout, record, *, background=False):
     record["launcher_restarts"] = launcher_restarts
     if last_image is not None:
         from diagnostics import save_image
-        folder = ROOT / "logs/startup"
+        folder = DATA_ROOT / "logs/startup"
         folder.mkdir(parents=True, exist_ok=True)
         name = datetime.now().strftime("%Y%m%d-%H%M%S-%f")+"-launcher.png"
         save_image(folder / name, last_image, full_frame=False)
@@ -849,10 +591,7 @@ def _connect_game_controller(hwnd, background: bool):
     from maa.controller import Win32Controller
     from maa.define import MaaWin32InputMethodEnum, MaaWin32ScreencapMethodEnum
     if background:
-        try:
-            ctypes.WinDLL("combase").RoInitialize(1)
-        except Exception:
-            pass
+        initialize_winrt()
         methods = (
             ("FramePool", MaaWin32ScreencapMethodEnum.FramePool),
             ("PrintWindow", MaaWin32ScreencapMethodEnum.PrintWindow),
@@ -873,14 +612,14 @@ def _connect_game_controller(hwnd, background: bool):
 
 def prepare_game(timeout, record, options=None):
     """Keep the batch disconnected until hot updates and restarts are complete."""
-    os.environ["MAAFW_BINARY_PATH"] = str(ROOT / "maafw")
+    os.environ["MAAFW_BINARY_PATH"] = str(RESOURCE_ROOT / "maafw")
     from maa.library import Library
     from maa.resource import Resource
     from maa.tasker import Tasker
     from registration import local_registration
 
-    Library.open(ROOT / "maafw")
-    Tasker.set_log_dir(str(ROOT / "logs/startup/framework"))
+    Library.open(RESOURCE_ROOT / "maafw")
+    Tasker.set_log_dir(str(DATA_ROOT / "logs/startup/framework"))
     Tasker.set_save_on_error(False)
     focus_mode = resolve_focus_lost_mode(options)
     hud_mode = resolve_task_hud_mode(options)
@@ -903,7 +642,7 @@ def prepare_game(timeout, record, options=None):
         with startup_step(record, "load_game_resource"):
             resource = Resource()
             resource.use_cpu()
-            if not resource.post_bundle(ROOT / "resource").wait().succeeded:
+            if not resource.post_bundle(RESOURCE_ROOT / "resource").wait().succeeded:
                 raise RuntimeError("无法加载进入游戏所需的资源。")
             with local_registration(resource) as handlers:
                 from action import start_game as _start_game
@@ -987,14 +726,12 @@ def prepare_game(timeout, record, options=None):
         # The old task has ended. Dispose its controller and rebuild the whole
         # local session on the new HWND; queued daily tasks do not exist yet.
         del result, tasker, controller, resource, handlers, action
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        user32.IsWindow.argtypes = [wintypes.HWND]
-        user32.IsWindow.restype = wintypes.BOOL
+        is_window = window_exists_check()
         previous_hwnd, disappeared = hwnd, False
         waiting_at = time.monotonic()
         deadline = waiting_at+remaining
         while time.monotonic() < deadline:
-            disappeared = disappeared or not user32.IsWindow(previous_hwnd)
+            disappeared = disappeared or not is_window(previous_hwnd)
             candidate = game_window()
             if candidate and (candidate != previous_hwnd or disappeared):
                 hwnd = candidate

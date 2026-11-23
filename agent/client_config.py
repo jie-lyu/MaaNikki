@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 
+from app_paths import RESOURCE_ROOT
+
 
 def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8-sig"))
@@ -27,6 +29,7 @@ def node_action_params(context, name: str) -> dict:
 
 
 def mxu_config(root: Path) -> dict | None:
+    """root is the data root."""
     path = root / "config" / "mxu-MaaNikki.json"
     return read_json(path) if path.is_file() else None
 
@@ -52,7 +55,7 @@ def active_controller(root: Path) -> dict | None:
     saved = active_instance(root)
     if saved is None:
         return None
-    return next((item for item in read_json(root / "interface.json").get("controller", [])
+    return next((item for item in read_json(RESOURCE_ROOT / "interface.json").get("controller", [])
                  if item.get("name") == saved[1].get("controllerName")), None)
 
 

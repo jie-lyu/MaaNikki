@@ -4,15 +4,21 @@ from pathlib import Path
 
 # Embedded Python uses an isolated path list instead of the script directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-os.environ["MAAFW_BINARY_PATH"] = str(Path(__file__).resolve().parents[1] / "maafw")
+
+from app_paths import DATA_ROOT, RESOURCE_ROOT
+
+os.environ["MAAFW_BINARY_PATH"] = str(RESOURCE_ROOT / "maafw")
 
 from runtime_threads import (
     cap_loaded_maafw_opencv,
+    configure_utf8_streams,
     configure_worker_threads,
     start_parent_exit_watchdog,
 )
 
 configure_worker_threads(2)
+# The agent used to get this from importing start_game through tall_window; keep it explicit.
+configure_utf8_streams()
 
 from maa.agent.agent_server import AgentServer
 from maa.tasker import Tasker
@@ -40,8 +46,7 @@ from game_hud import close_all_huds
 
 
 def main() -> None:
-    project_root = Path(__file__).resolve().parents[1]
-    Tasker.set_log_dir(str(project_root / "debug"))
+    Tasker.set_log_dir(str(DATA_ROOT / "debug"))
 
     if len(sys.argv) < 2:
         print("Usage: python main.py <socket_id>")

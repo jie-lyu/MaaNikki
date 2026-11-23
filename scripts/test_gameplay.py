@@ -34,7 +34,7 @@ class GameplayTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory(dir=ROOT / ".build")
         self.addCleanup(directory.cleanup)
-        root = patch("action.daily_tasks.ROOT", Path(directory.name))
+        root = patch("action.daily_tasks.DATA_ROOT", Path(directory.name))
         root.start()
         self.addCleanup(root.stop)
 
@@ -317,7 +317,7 @@ class RealmTests(unittest.TestCase):
             "recognition": "OCR", "roi": Gameplay.REALM_LEVEL_ROI, "expected": "冲撞"}
         rt.capture.return_value = np.full((720, 1280, 3), 255, dtype=np.uint8)
         with tempfile.TemporaryDirectory(dir=ROOT / ".build") as directory, \
-                patch("daily.gameplay.ROOT", Path(directory)):
+                patch("daily.gameplay.DATA_ROOT", Path(directory)):
             def returned():
                 import cv2
                 folder = Path(directory) / "logs/realm"
@@ -378,7 +378,7 @@ class MonthlyTests(unittest.TestCase):
     def test_paradise_only_claims_task_and_keeps_after_claim_snapshot(self):
         rt, _ = self.runtime("paradise")
         with tempfile.TemporaryDirectory(dir=ROOT / ".build") as directory, \
-                patch("daily.gameplay.ROOT", Path(directory)):
+                patch("daily.gameplay.DATA_ROOT", Path(directory)):
             self.assertTrue(Gameplay(rt).monthly_rewards("paradise"))
             records = list((Path(directory) / "logs/monthly").glob("*.json"))
             self.assertEqual(len(records), 1)
@@ -417,7 +417,7 @@ class MonthlyTests(unittest.TestCase):
         rt.hit.side_effect = None
         rt.hit.return_value = False
         with tempfile.TemporaryDirectory(dir=ROOT / ".build") as directory, \
-                patch("daily.gameplay.ROOT", Path(directory)), \
+                patch("daily.gameplay.DATA_ROOT", Path(directory)), \
                 patch("daily.gameplay.time.monotonic", side_effect=lambda: clock.now):
             self.assertFalse(game.paradise_reward_return())
             self.assertEqual(len(list((Path(directory) / "logs/monthly").glob("*-return_unconfirmed.png"))), 1)
@@ -429,7 +429,7 @@ class MonthlyTests(unittest.TestCase):
         rt.hit.side_effect = None
         rt.hit.return_value = False
         with tempfile.TemporaryDirectory(dir=ROOT / ".build") as directory, \
-                patch("daily.gameplay.ROOT", Path(directory)):
+                patch("daily.gameplay.DATA_ROOT", Path(directory)):
             self.assertFalse(Gameplay(rt).monthly())
             self.assertEqual(len(list((Path(directory) / "logs/monthly").glob("*-exit_unconfirmed.png"))), 1)
 
@@ -447,7 +447,7 @@ class MonthlyTests(unittest.TestCase):
                 ("travel", travel+["MaaNikki_Monthly_ToParadise"]+paradise),
                 ("paradise", paradise+["MaaNikki_Monthly_ToTravel"]+travel)):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory(dir=ROOT / ".build") as directory, \
-                    patch("daily.gameplay.ROOT", Path(directory)):
+                    patch("daily.gameplay.DATA_ROOT", Path(directory)):
                 rt, _ = self.runtime(kind)
                 self.assertTrue(Gameplay(rt).monthly())
                 self.assertEqual([call.args[0] for call in rt.click_template.call_args_list], expected)
@@ -458,7 +458,7 @@ class MonthlyTests(unittest.TestCase):
         rt, _ = self.runtime()
         rt.click_template.side_effect = lambda node, **kwargs: node != "MaaNikki_Monthly_ToParadise"
         with tempfile.TemporaryDirectory(dir=ROOT / ".build") as directory, \
-                patch("daily.gameplay.ROOT", Path(directory)):
+                patch("daily.gameplay.DATA_ROOT", Path(directory)):
             self.assertFalse(Gameplay(rt).monthly())
             self.assertEqual(len(list((Path(directory) / "logs/monthly").glob("*-switch_unconfirmed.png"))), 1)
         self.assertEqual([call.args[0] for call in rt.click_template.call_args_list].count(
@@ -470,7 +470,7 @@ class MonthlyTests(unittest.TestCase):
         rt.click_template.side_effect = None
         rt.click_template.return_value = True
         with tempfile.TemporaryDirectory(dir=ROOT / ".build") as directory, \
-                patch("daily.gameplay.ROOT", Path(directory)):
+                patch("daily.gameplay.DATA_ROOT", Path(directory)):
             self.assertFalse(Gameplay(rt).monthly())
             self.assertEqual(len(list((Path(directory) / "logs/monthly").glob("*-switch_unconfirmed.json"))), 1)
         self.assertEqual([call.args[0] for call in rt.click_template.call_args_list].count(

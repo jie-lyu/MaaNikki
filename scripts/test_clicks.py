@@ -39,7 +39,7 @@ class ClickTests(unittest.TestCase):
             actions.fishing.configure.side_effect = checked
             card = SimpleNamespace(rule=SimpleNamespace(executor=executor))
             with tempfile.TemporaryDirectory() as directory, \
-                    patch("daily.runtime.ROOT", Path(directory)), \
+                    patch("daily.runtime.DATA_ROOT", Path(directory)), \
                     patch("daily.runtime.foreground_inputs", return_value=True), \
                     patch("navigation.models.maps", return_value={"home": Mock()}), \
                     patch("navigation.vision.Locator"), \
@@ -66,7 +66,7 @@ class ClickTests(unittest.TestCase):
         rt.routes = Mock(return_value={"schema_version": 2, "id": "test", "map": "home",
                                       "points": [{"x": 1, "y": 2}]})
         with tempfile.TemporaryDirectory() as directory, \
-                patch("daily.runtime.ROOT", Path(directory)), \
+                patch("daily.runtime.DATA_ROOT", Path(directory)), \
                 patch("daily.runtime.foreground_inputs", return_value=True), \
                 patch("navigation.models.maps", return_value={"home": Mock()}), \
                 patch("navigation.vision.Locator"), \
@@ -453,7 +453,7 @@ class ClickTests(unittest.TestCase):
         frame = np.zeros((720, 1280, 3), dtype=np.uint8)
         frame[680:] = 255
         rt.capture = Mock(return_value=frame)
-        with tempfile.TemporaryDirectory() as directory, patch("daily.settings.ROOT", Path(directory)):
+        with tempfile.TemporaryDirectory() as directory, patch("app_paths.DATA_ROOT", Path(directory)):
             snapshot = GameUI.entry_failure_frame(rt.ui, 1)
             folder = Path(directory) / "logs/navigation"
             decoded = cv2.imdecode(np.frombuffer((folder / snapshot["image"]).read_bytes(), dtype=np.uint8),

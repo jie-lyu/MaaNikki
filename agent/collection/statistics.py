@@ -15,6 +15,7 @@ import threading
 from urllib import error as url_error, request
 from uuid import uuid4
 
+from app_paths import RESOURCE_ROOT
 from client_config import active_instance, mxu_config
 
 
@@ -50,7 +51,7 @@ def is_task_stats_enabled(root):
 
 def endpoint(root):
     try:
-        data = json.loads((Path(root) / "interface.json").read_text(encoding="utf-8-sig"))
+        data = json.loads((RESOURCE_ROOT / "interface.json").read_text(encoding="utf-8-sig"))
         value = data.get("statistics", {}).get("endpoint", "")
     except (OSError, ValueError, AttributeError):
         return ""

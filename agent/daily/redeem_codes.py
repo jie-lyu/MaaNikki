@@ -1,8 +1,6 @@
 """Automatically sync and redeem Infinity Nikki gift codes in 设置 -> 其他 -> 兑换码."""
 from __future__ import annotations
 
-import ctypes
-from ctypes import wintypes
 from datetime import datetime, timedelta, timezone
 import json
 import re
@@ -15,7 +13,7 @@ import numpy as np
 
 from account_state import AccountState, GAME_TIMEZONE
 from adventure_report import try_record_adventure_entry
-from daily.settings import ROOT
+from app_paths import DATA_ROOT
 from data_paths import data_path
 
 
@@ -35,8 +33,6 @@ ERROR_OCR_ROI = [405, 356, 470, 92]
 TOAST_OCR_ROI = [340, 55, 600, 175]
 USE_COOLDOWN_SECONDS = 3.2
 
-_CF_UNICODETEXT = 13
-_GMEM_MOVEABLE = 0x0002
 _CODE_TOKEN_RE = re.compile(r"^[A-Za-z0-9\u4e00-\u9fff.]{3,32}$")
 _SUBOBJECT_RE = re.compile(r"\{\{#subobject:[^|}]*\|([^}]+)\}\}")
 
@@ -139,7 +135,7 @@ def _fetch_qqbot_codes(now: datetime, known_expired: set[str]) -> list[str]:
 
 
 def _load_local_catalog_codes(now: datetime, known_expired: set[str]) -> list[str]:
-    path = data_path("resource/data/redeem_codes.json", ROOT)
+    path = data_path("resource/data/redeem_codes.json")
     if not path.is_file():
         return []
     try:
@@ -224,88 +220,14 @@ def collect_candidate_codes(
     return ordered
 
 
-def _setup_win32_clipboard():
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
-    user32.OpenClipboard.argtypes = [wintypes.HWND]
-    user32.OpenClipboard.restype = wintypes.BOOL
-    user32.CloseClipboard.argtypes = []
-    user32.CloseClipboard.restype = wintypes.BOOL
-    user32.EmptyClipboard.argtypes = []
-    user32.EmptyClipboard.restype = wintypes.BOOL
-    user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
-    user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
-    user32.GetClipboardData.argtypes = [wintypes.UINT]
-    user32.GetClipboardData.restype = ctypes.c_void_p
-    user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
-    user32.SetClipboardData.restype = ctypes.c_void_p
-
-    kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
-    kernel32.GlobalAlloc.restype = ctypes.c_void_p
-    kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
-    kernel32.GlobalFree.restype = ctypes.c_void_p
-    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
-    kernel32.GlobalLock.restype = ctypes.c_void_p
-    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
-    kernel32.GlobalUnlock.restype = wintypes.BOOL
-    return user32, kernel32
-
-
-def _open_clipboard(user32) -> bool:
-    for _ in range(5):
-        if user32.OpenClipboard(None):
-            return True
-        time.sleep(0.02)
-    return False
-
-
 def get_clipboard_text() -> tuple[bool, str]:
-    user32, kernel32 = _setup_win32_clipboard()
-    if not user32.IsClipboardFormatAvailable(_CF_UNICODETEXT):
-        return False, ""
-    if not _open_clipboard(user32):
-        return False, ""
-    try:
-        handle = user32.GetClipboardData(_CF_UNICODETEXT)
-        if not handle:
-            return False, ""
-        ptr = kernel32.GlobalLock(handle)
-        if not ptr:
-            return False, ""
-        try:
-            return True, ctypes.wstring_at(ptr)
-        finally:
-            kernel32.GlobalUnlock(handle)
-    finally:
-        user32.CloseClipboard()
+    from host import clipboard
+    return clipboard().get_clipboard_text()
 
 
 def set_clipboard_text(text: str) -> bool:
-    user32, kernel32 = _setup_win32_clipboard()
-    encoded = (str(text) + "\0").encode("utf-16-le")
-    hmem = kernel32.GlobalAlloc(_GMEM_MOVEABLE, len(encoded))
-    if not hmem:
-        return False
-    ptr = kernel32.GlobalLock(hmem)
-    if not ptr:
-        kernel32.GlobalFree(hmem)
-        return False
-    try:
-        ctypes.memmove(ptr, encoded, len(encoded))
-    finally:
-        kernel32.GlobalUnlock(hmem)
-    if not _open_clipboard(user32):
-        kernel32.GlobalFree(hmem)
-        return False
-    try:
-        user32.EmptyClipboard()
-        if not user32.SetClipboardData(_CF_UNICODETEXT, hmem):
-            kernel32.GlobalFree(hmem)
-            return False
-        return True
-    finally:
-        user32.CloseClipboard()
+    from host import clipboard
+    return clipboard().set_clipboard_text(text)
 
 
 def _error_band_stats(frame) -> tuple[int, int]:
@@ -340,7 +262,7 @@ class RedeemCodes:
 
     def __init__(self, runtime):
         self.rt, self.ui = runtime, runtime.ui
-        self.account = AccountState.for_runtime(ROOT, runtime)
+        self.account = AccountState.for_runtime(DATA_ROOT, runtime)
         self.last_use_at = 0.0
 
     def fail(self, reason: str) -> bool:
@@ -605,7 +527,7 @@ class RedeemCodes:
 
             if redeemed_count > 0:
                 try_record_adventure_entry(
-                    ROOT,
+                    DATA_ROOT,
                     self.rt,
                     category="daily",
                     task="redeem_codes",

@@ -9,7 +9,7 @@ from task_control import TaskStopped, active_session
 from maa.custom_action import CustomAction
 from daily.runtime import Executors
 from daily.gameplay import Gameplay
-from daily.settings import ROOT
+from app_paths import DATA_ROOT
 
 TARGETS = (("MaaNikki_Weekly_Level_Qiggeda", "奇格格达"), ("MaaNikki_Weekly_Level_Juan", "卷卷"))
 
@@ -21,7 +21,7 @@ def _record_weekly_state(rt, finished: int, total: int, completed_targets: list[
     if not uid:
         return
     try:
-        account = AccountState(ROOT, uid, rt)
+        account = AccountState(DATA_ROOT, uid, rt)
         period = period_key("weekly_free_gifts")
         now = datetime.now(timezone.utc).isoformat()
 

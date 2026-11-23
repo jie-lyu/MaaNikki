@@ -1,4 +1,4 @@
-"""Native mouse-input interception and pre-borrow user-activity yielding for background mode."""
+"""Native mouse-input interception and pre-borrow user-activity yielding for background mode (moved from agent/mouse_guard.py)."""
 from __future__ import annotations
 
 import atexit
@@ -11,6 +11,8 @@ import subprocess
 import threading
 import time as wall_time
 import uuid
+
+from app_paths import RESOURCE_ROOT
 
 
 _CAPABILITY_MARKER = b"MAANIKKI_MOUSE_GUARD_NATIVE_V1\0"
@@ -357,7 +359,7 @@ class _NativeMouseGuard:
         return True
 
     def _spawn_standalone(self, k32) -> bool:
-        exe_path = Path(__file__).resolve().parents[1] / "MaaNikki.exe"
+        exe_path = RESOURCE_ROOT / "MaaNikki.exe"
         if not exe_path.is_file() or not _exe_supports_mouse_guard(exe_path):
             return False
 

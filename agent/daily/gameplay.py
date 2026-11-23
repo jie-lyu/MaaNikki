@@ -8,7 +8,7 @@ import numpy as np
 from task_control import task_time as time
 
 from .ui import catalog, expected_text, fields
-from .settings import ROOT
+from app_paths import DATA_ROOT
 from adventure_report import lookup_monster_drop, normalize_item_name, try_record_adventure_entry
 
 
@@ -210,7 +210,7 @@ class Gameplay:
                 return False
             self.rt.log("已收取奖励并再次挖掘。" if repeat else "已收取挖掘奖励。")
             try_record_adventure_entry(
-                ROOT,
+                DATA_ROOT,
                 self.rt,
                 category="dig",
                 task="dig",
@@ -242,7 +242,7 @@ class Gameplay:
                 or self.rt.read_account_uid(self.rt.frame())
             )
             if not uid:
-                index_path = ROOT / "config/accounts/index.json"
+                index_path = DATA_ROOT / "config/accounts/index.json"
                 if index_path.is_file():
                     index = json.loads(index_path.read_text(encoding="utf-8-sig"))
                     active = index.get("active_game_account") if isinstance(index, dict) else None
@@ -251,7 +251,7 @@ class Gameplay:
                         if re.fullmatch(r"[0-9]{1,32}", candidate):
                             uid = candidate
             if isinstance(uid, str) and re.fullmatch(r"[0-9]{1,32}", uid):
-                return AccountState(ROOT, uid)
+                return AccountState(DATA_ROOT, uid)
         except Exception:
             pass
         return None
@@ -278,15 +278,15 @@ class Gameplay:
     def observe_dig_targets(self, found=None):
         try:
             from collection import statistics
-            if not statistics.is_task_stats_enabled(ROOT):
+            if not statistics.is_task_stats_enabled(DATA_ROOT):
                 return
             account = self._stats_account()
             if account is None:
                 return
             if found is None:
                 found = self._read_dig_target_names()
-            statistics.sync_task_stats(account, ROOT, extra_dig_targets=found)
-            statistics.upload(account, ROOT)
+            statistics.sync_task_stats(account, DATA_ROOT, extra_dig_targets=found)
+            statistics.upload(account, DATA_ROOT)
         except Exception:
             pass
 
@@ -441,7 +441,7 @@ class Gameplay:
         from collection.storage import InventoryStore
         from data_paths import data_path
         catalog = json.loads(data_path("resource/data/blessing_catalog.json").read_text(encoding="utf-8"))
-        InventoryStore(ROOT, catalog, self.rt).invalidate(reason, source="realm_bless")
+        InventoryStore(DATA_ROOT, catalog, self.rt).invalidate(reason, source="realm_bless")
 
     @staticmethod
     def _realm_chevron_state(frame, y0, y1):
@@ -675,13 +675,13 @@ class Gameplay:
                 runs = 1
             energy_spent = runs * per_run
             if kind == "monster":
-                drop_info = lookup_monster_drop(ROOT, level_label)
+                drop_info = lookup_monster_drop(DATA_ROOT, level_label)
                 if drop_info is not None:
                     _, mat_name, drop_qty = drop_info
                     items = {mat_name: runs * drop_qty}
             title = f"{prefix_text}{realm_title} · {level_label}"
         try_record_adventure_entry(
-            ROOT,
+            DATA_ROOT,
             self.rt,
             category="realm",
             task=task_name,
@@ -729,13 +729,13 @@ class Gameplay:
     def _record_jihua_bling_stats(self, energy: int, gain: int):
         try:
             from collection import statistics
-            if not statistics.is_enabled(ROOT):
+            if not statistics.is_enabled(DATA_ROOT):
                 return
             account = self._stats_account()
             if account is None:
                 return
             account.update(lambda data: statistics.queue_change(data, bling=(energy, gain)))
-            statistics.upload(account, ROOT)
+            statistics.upload(account, DATA_ROOT)
         except Exception:
             pass
 

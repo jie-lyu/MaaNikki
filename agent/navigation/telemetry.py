@@ -9,12 +9,13 @@ import os
 from pathlib import Path
 from threading import Lock
 
+from app_paths import DATA_ROOT
 from client_config import mxu_config
 from .geometry import project_segment, segment_distance
 from .models import Point, Route
 
 _LOCK = Lock()
-_DIRECTORY = Path(__file__).resolve().parents[2] / "debug/route_telemetry"
+_DIRECTORY = DATA_ROOT / "debug/route_telemetry"
 OCTANTS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
 
 

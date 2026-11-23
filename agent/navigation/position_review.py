@@ -15,11 +15,11 @@ from .models import NavigationError
 
 def compare_map_positions(runtime, teleporter, point, event):
     """Record both map estimates without changing coordinates or locator history."""
-    from daily.settings import ROOT
+    from app_paths import DATA_ROOT
 
     label = str(point.params.get("sample", "point"))
     name = re.sub(r"[^a-zA-Z0-9_-]", "_", label)[:40] or "point"
-    root = getattr(runtime, "directory", None) or ROOT / "logs" / "navigation"
+    root = getattr(runtime, "directory", None) or DATA_ROOT / "logs" / "navigation"
     folder = Path(root) / (datetime.now().strftime("%Y%m%d-%H%M%S-%f")+"-map-compare-"+name)
     report = {"sample": label, "target": [point.x, point.y],
               "coordinate_system": "navigation_map_pixels", "completed": False,

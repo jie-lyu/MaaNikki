@@ -124,7 +124,13 @@ Release 公开后，服务器上的 QQ 机器人通过 GitHub Webhook 向交流�
 
 客户端根据当前项目版本匹配增量包，安装前核对本地基准、全部变更文件及删除清单，保留配置与账号数据。文件按原路径备份，应用失败时恢复，项目版本最后写入；增量包不适用时自动改下完整包。旧客户端继续识别原来的 Windows 完整运行包，新客户端首次安装后才会选择增量包。
 
-工作流仅通过每日定时任务或手动触发运行，普通推送和拉取请求均不触发软件构建。默认分支构建成功后发布新版本，同一版本已公开时保留原有标签和附件。
+工作流仅通过每日定时任务或手动触发运行，普通推送和拉取请求均不触发软件构建（拉取请求只运行上文的离线测试）。默认分支构建成功后发布新版本，同一版本已公开时保留原有标签和附件。
+
+### 测试包
+
+「Test build Windows x64」工作流只构建、不发布：与 `scripts/build.ps1 -Action Package` 产出相同的运行包、源码包和校验文件，作为工作流附件 `MaaNikki-Windows-x64-test-<提交>` 保留 14 天。它不改版本号、不提交、不打标签、不创建 Release，也不触发 MirrorChyan 或更新线路同步。给拉取请求加上 `test-build` 标签即开始构建，之后向该拉取请求推送会重新构建；工作流文件进入默认分支后，也可以在 Actions 页面手动运行。
+
+测试包的项目版本取自当前的 `interface.json`，与同版本号的正式包同名，但内容不同，不能用作增量更新的基准。客户端仍会检查正式更新，发现更新的正式版本时会自动下载并在空闲时自动安装，覆盖测试包；测试包也会以同一版本号向项目的正式诊断与统计端点上报，正式构建只能通过设置中「帮助改进软件」的四个开关关闭。两者的处理方法见 [macOS 支持计划的阶段 2 实机验收](docs/macos-support-plan.md#阶段-2-实机验收)。
 
 ### 更新备用线路
 
@@ -150,6 +156,22 @@ Agent 导入与资源加载检查用于核对运行环境。程序启动、连�
 ## 开发与调试
 
 页面入口、导航、截图调度、路线工具和库存字段统一见[开发文档](docs/architecture.md)。游戏内任务由用户运行验收。
+
+### 离线测试与 Windows 契约快照
+
+拉取请求会触发「Test Windows x64」工作流，它只做检查、不打包也不发布：准备并校验锁定的运行环境，比对 Windows 契约快照，检查 TypeScript 与桌面客户端能否编译，然后运行全部离线测试。本地在已放好 `python/` 和 `maafw/` 的目录中运行：
+
+```powershell
+python scripts/run_offline_tests.py --python python/python.exe
+```
+
+`scripts/run_offline_tests.py` 运行每个 `scripts/test_*` 测试，并把每条测试的结果与 `scripts/fixtures/offline-test-baseline.json` 比对：出现基线之外的失败、基线中的测试没有运行或新被跳过、测试文件无法导入，或测试进程超时、无法启动、异常退出时，工作流失败；基线中的已知失败开始通过时给出提示，修好后从基线中删除。新增测试文件和测试用例都必须加入基线。现有基线是在 macOS 上屏蔽 Win32 调用后生成的，Windows 首次运行后，应以工作流附件 `offline-test-results` 中的 `offline-test-baseline.json` 为准，核对后提交。
+
+`scripts/test_windows_contract.py` 用标准库运行，任何系统都可执行。它固定 Windows 用户实际得到的内容：合并导入并按 Windows 过滤后的接口定义（控制器、agent、前置任务、任务与选项的标识和默认值），以及 Windows 包的文件清单。快照位于 `scripts/fixtures/windows-contract.json` 和 `scripts/fixtures/windows-package-files.txt`。有意修改这些内容时运行 `python -B scripts/test_windows_contract.py --update`，并在评审中核对快照差异。`scripts/test_windows_contract.cjs` 以 Windows 后端运行客户端实际的接口加载代码，确认结果与上述快照一致，并固定 Win32 控制器的截图与输入配置（`scripts/fixtures/windows-controller-config.json`）。
+
+工作流还会把准备好的运行环境中由下载生成的文件（`python/`、`maafw/` 等）写入附件中的 `windows-runtime-generated.txt`。该清单已提交为 `scripts/fixtures/windows-runtime-generated.txt`，这些文件按清单逐一比对，缺少清单文件也会使检查失败；锁定的下载变化后，以工作流附件中的新清单核对后更新。运行环境比对失败时，工作流仍会继续运行离线测试并上传附件，最后再判定失败。`MaaNikki.exe` 与依赖许可证只在发布构建中生成，不在此工作流的比对范围内。
+
+拉取请求同时触发「Test macOS agent imports」工作流：在 macOS 上安装锁定的 Python 依赖，确认 agent 导入并注册全部动作与识别时不会加载 Windows 后端（`agent/host/win32`），并运行 `scripts/test_host.py` 与 `scripts/test_app_paths.py`。
 
 ## 源码公开范围
 

@@ -527,14 +527,34 @@ fn collect_recent_collection_files(data_dir: &Path) -> Result<Vec<ExportEntry>, 
     Ok(files)
 }
 
+/// agent 写入的可写数据目录，与 agent 的 `DATA_ROOT` 一致。
+const DATA_ROOT_DIRS: &[&str] = &["config", "logs", "debug", "cache", "data_overlay"];
+
+/// 相对路径的首个目录是否属于可写数据（位于数据目录而非程序目录）。
+fn is_data_relative(filename: &str) -> bool {
+    Path::new(filename)
+        .components()
+        .find_map(|component| match component {
+            std::path::Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| DATA_ROOT_DIRS.contains(&name))
+}
+
 pub fn resolve_local_file_path(filename: &str) -> Result<PathBuf, String> {
     if let Some(overlay) = super::data_update::resolve_overlay_file(filename) {
         return Ok(overlay);
     }
-    let exe_dir = get_exe_directory()?;
-    let file_path = normalize_path(&exe_dir.join(filename).to_string_lossy());
-    // 防止路径穿越，确保仍在 exe 目录下
-    if !file_path.starts_with(&exe_dir) {
+    // 可写数据从数据目录读取，其余从程序目录读取；Windows 上两者是同一目录。
+    let root = if is_data_relative(filename) {
+        get_app_data_dir()?
+    } else {
+        get_exe_directory()?
+    };
+    let file_path = normalize_path(&root.join(filename).to_string_lossy());
+    // 防止路径穿越，确保仍在所选目录下
+    if !file_path.starts_with(&root) {
         return Err(format!("非法文件路径: {}", filename));
     }
     Ok(file_path)
@@ -1123,4 +1143,21 @@ fn parse_export_timestamp(dir_name: &str) -> Option<String> {
     }
     // 形状校验通过 ⇒ 全是 ASCII，from_utf8 必然成功
     Some(std::str::from_utf8(tail).ok()?.to_string())
+}
+
+#[cfg(test)]
+mod data_root_tests {
+    use super::is_data_relative;
+
+    #[test]
+    fn writable_state_resolves_under_the_data_root() {
+        for path in ["config/game_keys_read.json", "./config/route_trial.json", "logs/x.json", "debug/a.log",
+            "cache/map-mask/state.json", "data_overlay/active.json"] {
+            assert!(is_data_relative(path), "{path}");
+        }
+        for path in ["interface.json", "resource/navigation/maps.json", "tasks/Dig.json", "configx/a.json",
+            "resource/config/a.json", ""] {
+            assert!(!is_data_relative(path), "{path}");
+        }
+    }
 }

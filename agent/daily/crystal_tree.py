@@ -10,7 +10,8 @@ from navigation.session import create_navigator
 from navigation.teleport import Teleporter
 from navigation.vision import Locator
 from task_control import TaskStopped, task_time as time
-from .settings import ROOT, foreground_inputs
+from app_paths import DATA_ROOT
+from .settings import foreground_inputs
 from .starsea import HUB, Starsea
 from adventure_report import try_record_adventure_entry
 
@@ -273,7 +274,7 @@ class CrystalTree(Starsea):
                 collected = max(collected_total, max(0, initial_total - sum(latest_state.values())))
                 if collected > 0:
                     try_record_adventure_entry(
-                        ROOT,
+                        DATA_ROOT,
                         self.rt,
                         category="starsea",
                         task="crystal_tree",

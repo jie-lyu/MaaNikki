@@ -4,14 +4,15 @@ from contextvars import ContextVar
 from datetime import datetime
 import json
 import os
-from pathlib import Path
 from threading import Lock
+
+from app_paths import DATA_ROOT
 
 
 _ACTION = ContextVar("maanikki_message_action", default=None)
 _LOCK = Lock()
 # The client exports and clears .log files recursively under debug/.
-_DIRECTORY = Path(__file__).resolve().parents[1] / "debug/messages"
+_DIRECTORY = DATA_ROOT / "debug/messages"
 
 
 @contextmanager

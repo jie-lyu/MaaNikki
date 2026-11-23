@@ -35,6 +35,13 @@ def server(identifier, directory):
     marker = directory / "stage"
     user32 = Mock()
     user32.IsWindow.return_value = True
+    # Mock attributes are truthy by default; the window is neither minimized nor hung.
+    user32.IsIconic.return_value = False
+    user32.IsHungAppWindow.return_value = False
+    def class_name(hwnd, buffer, length):
+        buffer.value = "UnrealWindow"
+        return len(buffer.value)
+    user32.GetClassNameW.side_effect = class_name
     user32.GetWindowTextLengthW.return_value = 4
     def title(hwnd, buffer, length):
         buffer.value = "Infinity Nikki"
@@ -91,7 +98,10 @@ def server(identifier, directory):
     # the real reverse IPC call, including its native controller identifier.
     def window_info(controller):
         return {**native_info.fget(controller), "type": "win32", "hwnd": 1}
-    with patch("navigation.controller.ctypes.WinDLL", return_value=user32), \
+    # The WinDLL patch also answers kernel32, so a real HUD window would get Mock handles.
+    # This headless probe covers pause/resume, not the overlay.
+    with patch("host.win32.target.ctypes.WinDLL", return_value=user32), \
+            patch("game_hud.acquire_game_hud", return_value=None), \
             patch.object(Controller, "info", property(window_info)):
         assert AgentServer.start_up(identifier)
         AgentServer.join()

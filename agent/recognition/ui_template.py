@@ -7,7 +7,7 @@ from client_config import parse_custom_param
 from registration import agent_recognition
 from maa.custom_recognition import CustomRecognition
 
-from daily.settings import ROOT
+from app_paths import RESOURCE_ROOT
 from vision import prepared_template
 
 
@@ -91,7 +91,7 @@ class UITemplateRecognition(CustomRecognition):
                     not isinstance(fallback_all, list) or not fallback_all
                     or any(not isinstance(spec, dict) for spec in fallback_all)):
                 raise ValueError("页面兜底模板参数无效。")
-            image_root = (ROOT / "resource" / "image").resolve()
+            image_root = (RESOURCE_ROOT / "resource" / "image").resolve()
             box, detail = self._match_spec(image, param, image_root)
             if box is not None or not fallback_all:
                 return CustomRecognition.AnalyzeResult(box=box, detail=detail)
