@@ -44,7 +44,7 @@ Mac 版使用基于 MaaFramework 源码打补丁、自行编译的 `libMaaMacOSC
 
 Intel 上的持续集成：GitHub 一直没有给这个仓库分配 Apple silicon runner，CI 改在 Intel（`macos-15-intel`）上分两步跑，各自只证明它名字里写的那件事：`build.py --unit-only` 交叉编译 arm64 单元，检查加载命令和架构（`lipo -archs` 必须只有 arm64），不执行；`build.py --tests-only --test-arch x86_64` 在独立的源码目录、构建目录和 MaaDeps（锁文件里的 `maadeps_x64_tests`）中，用同一份源码和补丁构建并运行 x86_64 的输入逻辑测试，它不是发布出去的二进制。CI 上传交叉编译出的单元和它的清单；如果发布的就是 CI 产出的这一份，必须先在 Apple silicon 上用同一 SHA-256 的文件对官方主库跑生命周期探针。本机默认的 `build.py`（不带这两个参数）不变：构建 arm64 单元并在本机运行测试。
 
-补丁同时带了 `HybridInput` 的确定性测试（`test/maanikki/HybridInputTest.mm`，CMake 选项 `MAANIKKI_UNIT_TESTS`）：用假的平台层驱动停止与按下的各种先后顺序和全部拒绝路径，不截图、不发送任何事件。`build.py` 编译补丁版时总会编译并运行它，失败即中止；测试程序不进入产物。
+补丁同时带了 `HybridInput` 的确定性测试（`test/maanikki/HybridInputTest.mm`，CMake 选项 `MAANIKKI_UNIT_TESTS`）：用假的平台层驱动停止与按下的各种先后顺序和全部拒绝路径，不截图、不发送任何事件。`build.py` 默认构建补丁版时会编译并运行它（`--unit-only` 跳过，`--tests-only` 只跑它），失败即中止；测试程序不进入产物。
 
 已知限制（主库行为，控制模块看不到）：停止如果发生在主库登记这次按下之前（例如还在换算点击坐标），主库没有可松开的东西，控制模块也收不到取消，之后这次点击仍可能发出；主库在任务结束时只在没有待执行任务时才调用 `inactive()`，并且先公布任务结果、再清理，也不检查清理结果，停止时这次投递还可能被拒绝。因此要由持有控制器的 Rust 客户端在停止后自行确认控制模块已松开全部输入（带期限，对端不回应也要能结束），未确认前不复用这个连接（第 4 步处理）。
 
