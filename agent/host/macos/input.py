@@ -2,13 +2,17 @@
 
 Keys arrive as the agent's Win32 virtual-key ids and are translated once, in host.macos.keys.
 Releases are posted straight to the game process, so they work without the agent channel and
-never touch the user's front application. The preview has no scene mouse buttons, window-message
-keys, raw relative moves or route recording on macOS: those primitives refuse.
+never touch the user's front application. Scene mouse buttons (left, right, middle) are pressed by
+the control unit where the cursor already is (patch level 3), which also tracks and releases them;
+the extra buttons, window-message keys, raw relative moves and route recording refuse on macOS.
 """
 from __future__ import annotations
 
 from host.macos.keys import UnmappedKey, translate
+from host.macos.target import SCENE_BUTTONS_PATCH_LEVEL, SCENE_PRESS_PRESSURE
 from navigation.models import NavigationError
+
+SCENE_BUTTONS = (0, 1, 2)  # left, right, middle: the unit's contacts
 
 
 class MacOSInput:
@@ -25,12 +29,25 @@ class MacOSInput:
             pass  # never pressed through this backend either
 
     def force_mouse_up(self, button: int) -> None:
-        # press_mouse never presses on macOS, so there is nothing to release here; clicks the
-        # control unit pressed are released by the unit itself.
+        # Cleanup only: the unit holds the press and releases it on its own at the end of the task
+        # and when the controller goes away, so a failed request here leaves nothing pressed for long.
+        controller = self.target.controller
+        if controller is None or button not in SCENE_BUTTONS:
+            return None
+        try:
+            controller.post_touch_up(button).wait()
+        except Exception:
+            pass
         return None
 
     def press_mouse(self, button: int) -> bool:
-        return False
+        # A press only, where the cursor already is: the unit refuses unless the game is in front
+        # and the cursor is over the connected window. Released through post_touch_up(button).
+        controller = self.target.controller
+        if (controller is None or button not in SCENE_BUTTONS
+                or self.target.patch_level < SCENE_BUTTONS_PATCH_LEVEL):
+            return False
+        return bool(controller.post_touch_down(button, 0, 0, SCENE_PRESS_PRESSURE).wait().succeeded)
 
     def post_window_key(self, key: int, *, down: bool) -> bool:
         return False

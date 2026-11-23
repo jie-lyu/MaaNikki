@@ -19,6 +19,10 @@ GAME_TITLE = re.compile(r"\s*(Infinity\s*Nikki|无限暖暖|無限暖暖)\s*")
 SCREENCAP_DISPLAY_WINDOW = 1 << 1
 INPUT_HYBRID = (1 << 0) | (1 << 1)  # GlobalEvent | PostToPid
 MIN_PATCH_LEVEL = 2  # 2: Controller.info carries the geometry_changed latch
+SCENE_BUTTONS_PATCH_LEVEL = 3  # 3: scroll and scene mouse buttons
+# touch_down pressure that asks the unit for a scene button press where the cursor already is
+# (HybridInput::kScenePressPressure): no hover move, which would turn the camera in the scene.
+SCENE_PRESS_PRESSURE = 0x4D4E5343
 
 
 def check_controller_info(info) -> int:
@@ -48,8 +52,11 @@ class MacOSTarget:
     # tracks what it pressed: releasing around it would leave it believing a key is still down.
     release_ignores_focus = True
 
-    def __init__(self, info: dict):
+    def __init__(self, info: dict, controller=None):
         self.handle = self.window_id = check_controller_info(info)
+        self.patch_level = info["maanikki_patch"]
+        # Scene mouse buttons go through the control unit, which tracks and releases them.
+        self.controller = controller
         from host.macos import quartz
         self.quartz = quartz
         window = quartz.window(self.window_id)

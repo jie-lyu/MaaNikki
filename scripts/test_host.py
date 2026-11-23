@@ -212,10 +212,10 @@ class FakeQuartz:
 
 
 class MacOSBackendTests(unittest.TestCase):
-    def mac_target(self, quartz, info=GOOD_MAC_INFO):
+    def mac_target(self, quartz, info=GOOD_MAC_INFO, controller=None):
         from host.macos import target as module
         with patch.dict(sys.modules, {"host.macos.quartz": quartz}), patch("host.macos.quartz", quartz, create=True):
-            return module.MacOSTarget(info)
+            return module.MacOSTarget(info, controller)
 
     def test_key_table_keeps_unmapped_apart_from_key_code_zero(self):
         from host.macos.keys import UnmappedKey, VK_TO_MACOS, translate
@@ -322,6 +322,20 @@ class MacOSBackendTests(unittest.TestCase):
         with self.assertRaisesRegex(NavigationError, "路线录制"):
             native.physical_keys()
 
+    def test_scene_buttons_go_through_the_unit_from_patch_level_3(self):
+        from host.macos.target import SCENE_PRESS_PRESSURE
+        controller = Mock()
+        controller.post_touch_down.return_value.wait.return_value.succeeded = True
+        native = self.mac_target(FakeQuartz(), {**GOOD_MAC_INFO, "maanikki_patch": 3}, controller).input()
+        self.assertTrue(native.press_mouse(1))  # the ability button: right
+        controller.post_touch_down.assert_called_once_with(1, 0, 0, SCENE_PRESS_PRESSURE)
+        self.assertFalse(native.press_mouse(3))  # the extra buttons have no unit contact
+        native.force_mouse_up(1)
+        controller.post_touch_up.assert_called_once_with(1)
+        older = self.mac_target(FakeQuartz(), GOOD_MAC_INFO, controller).input()
+        self.assertFalse(older.press_mouse(1))  # a patch-2 unit would hover-move and turn the camera
+        self.assertEqual(controller.post_touch_down.call_count, 1)
+
     def test_macos_capabilities_and_saved_controller_rule(self):
         capabilities = host.capabilities("macos")
         self.assertEqual(capabilities.backend, "macos")
@@ -372,6 +386,19 @@ class MacOSPreviewPathTests(unittest.TestCase):
 
     def test_mailbox_claim_on_macos_sends_one_centred_click_without_hover(self):
         self.assertEqual(self.claim_click("macos"), [{"action": "Click", "target": [364, 682]}])
+
+    def scrolled(self, name):
+        rt = self.runtime()
+        with backend(name):
+            self.assertTrue(rt.ui.scroll([100, 100, 200, 200], -480))
+        return self.dispatched(rt)
+
+    def test_scroll_on_macos_leaves_the_hover_to_the_control_unit(self):
+        self.assertEqual(self.scrolled("macos"), [{"action": "Scroll", "target": [292, 292], "dx": 0, "dy": -480}])
+
+    def test_scroll_on_windows_still_moves_into_the_list_first(self):
+        self.assertEqual(self.scrolled("win32"), [{"action": "TouchMove", "target": [292, 292]},
+                                                  {"action": "Scroll", "target": [292, 292], "dx": 0, "dy": -480}])
 
     def test_mailbox_claim_on_windows_still_hovers_first(self):
         actions = self.claim_click("win32")

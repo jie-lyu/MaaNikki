@@ -169,7 +169,7 @@ def connect_target(controller) -> Target:
         raise NavigationError("无法读取当前连接的游戏窗口，请重新连接后再试。") from error
     if backend == "macos":
         from host.macos.target import MacOSTarget
-        return MacOSTarget(info)
+        return MacOSTarget(info, controller)
     from host.win32.target import Win32Target
     return Win32Target(info)
 
