@@ -14,6 +14,9 @@ library only.
                       with --runtime, write the runtime's generated files
                       (python/, maafw/, ...) so they can be committed as
                       scripts/fixtures/windows-runtime-generated.txt
+    --bootstrap-runtime-recording
+                      with --runtime, tolerate a missing recording (only
+                      until the first Windows recording is committed)
 """
 from __future__ import annotations
 
@@ -231,6 +234,7 @@ def runtime_generated(runtime: Path, files: list[str]) -> list[str]:
 
 class WindowsContractTests(unittest.TestCase):
     runtime: Path | None = None
+    bootstrap_runtime_recording = False
 
     def test_effective_interface_matches_snapshot(self):
         self.assertTrue(CONTRACT_FILE.is_file(), f"missing {CONTRACT_FILE}; run with --update")
@@ -267,7 +271,9 @@ class WindowsContractTests(unittest.TestCase):
         if self.runtime is None:
             self.skipTest("pass --runtime DIR to compare a prepared runtime")
         if not RUNTIME_GENERATED_FILE.is_file():
-            self.skipTest(f"{RUNTIME_GENERATED_FILE.name} not recorded yet; use --record-runtime on Windows")
+            if self.bootstrap_runtime_recording:
+                self.skipTest(f"{RUNTIME_GENERATED_FILE.name} not recorded yet; use --record-runtime on Windows")
+            self.fail(f"missing {RUNTIME_GENERATED_FILE.name}; record it on Windows with --record-runtime")
         files, _ = parse_inventory(INVENTORY_FILE.read_text(encoding="utf-8"))
         recorded = [line for line in RUNTIME_GENERATED_FILE.read_text(encoding="utf-8").splitlines()
                     if line and not line.startswith("#")]
@@ -344,6 +350,7 @@ if __name__ == "__main__":
     parser.add_argument("--update", action="store_true")
     parser.add_argument("--runtime", type=Path)
     parser.add_argument("--record-runtime", type=Path)
+    parser.add_argument("--bootstrap-runtime-recording", action="store_true")
     args, rest = parser.parse_known_args()
     if args.update:
         update()
@@ -357,4 +364,5 @@ if __name__ == "__main__":
             "# Generated files of the prepared Windows runtime. Record on Windows CI with --record-runtime.\n"
             + "\n".join(runtime_generated(args.runtime, inventory)) + "\n", encoding="utf-8")
     WindowsContractTests.runtime = args.runtime
+    WindowsContractTests.bootstrap_runtime_recording = args.bootstrap_runtime_recording
     unittest.main(argv=[sys.argv[0], *rest])

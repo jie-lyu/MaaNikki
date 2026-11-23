@@ -3,9 +3,10 @@
 Every scripts/test_*.py and scripts/test_*.cjs runs, and each test's outcome
 is compared with scripts/fixtures/offline-test-baseline.json. The run fails
 when a test fails that the baseline does not list as a known failure, when a
-suite stops importing, or when a suite runs fewer tests than the baseline
-records. Known failures that start passing are reported so the baseline can
-be tightened. New suites must be added to the baseline.
+recorded test is missing or newly skipped, when a suite stops importing, and
+when a suite times out, cannot start or exits abnormally. Known failures that
+start passing are reported so the baseline can be tightened. New suites and
+new tests must be added to the baseline.
 
 Python suites run under --python (the packaged runtime on Windows, so they
 see the pinned dependencies and ./maafw), one subprocess per suite. Their
@@ -93,9 +94,15 @@ class _RecordingResult(unittest.TextTestResult):
             self._mark(subtest, "fail" if issubclass(err[0], test.failureException) else "error")
 
 
+def _report() -> dict:
+    # import_error: the suite module could not be imported (may be a known failure).
+    # run_error: timeout, start failure or abnormal exit (never accepted by the baseline).
+    return {"import_error": None, "run_error": None, "outcomes": {}}
+
+
 def child(suite: Path, output: Path) -> int:
     """Run one Python suite in this process and write its outcomes."""
-    report = {"import_error": None, "outcomes": {}}
+    report = _report()
     try:
         spec = importlib.util.spec_from_file_location("offline_suite", suite)
         module = importlib.util.module_from_spec(spec)
@@ -128,29 +135,34 @@ def parse_tap(text: str) -> dict[str, str]:
 
 def run_suite(name: str, python: str, timeout: float) -> dict:
     print(f"::group::{name}" if GITHUB else f"===== {name}", flush=True)
-    report = {"import_error": None, "outcomes": {}}
+    report = _report()
     try:
         if name.endswith(".cjs"):
             completed = subprocess.run(["node", "--test-reporter=tap", f"scripts/{name}"], cwd=ROOT,
                                        timeout=timeout, stdout=subprocess.PIPE, text=True, encoding="utf-8")
             print(completed.stdout, flush=True)
             report["outcomes"] = parse_tap(completed.stdout)
+            failed = any(outcome == "fail" for outcome in report["outcomes"].values())
             if not report["outcomes"]:
                 report["import_error"] = f"no TAP results (exit {completed.returncode})"
+            elif completed.returncode != 0 and not failed:
+                report["run_error"] = f"node exited {completed.returncode} without a failing test"
         else:
             output = ROOT / ".build" / f"offline-{name}.json"
             output.parent.mkdir(parents=True, exist_ok=True)
             output.unlink(missing_ok=True)
-            subprocess.run([python, "-B", str(Path(__file__).resolve()), "--child", f"scripts/{name}", str(output)],
-                           cwd=ROOT, timeout=timeout)
+            completed = subprocess.run([python, "-B", str(Path(__file__).resolve()), "--child",
+                                        f"scripts/{name}", str(output)], cwd=ROOT, timeout=timeout)
             if output.is_file():
-                report = json.loads(output.read_text(encoding="utf-8"))
+                report.update(json.loads(output.read_text(encoding="utf-8")))
+                if completed.returncode != 0:
+                    report["run_error"] = f"suite process exited {completed.returncode}"
             else:
-                report["import_error"] = "suite process ended without a report"
+                report["run_error"] = f"suite process exited {completed.returncode} without a report"
     except subprocess.TimeoutExpired:
-        report["import_error"] = f"timed out after {timeout:.0f}s"
+        report["run_error"] = f"timed out after {timeout:.0f}s"
     except OSError as error:
-        report["import_error"] = f"could not start: {error}"
+        report["run_error"] = f"could not start: {error}"
     finally:
         if GITHUB:
             print("::endgroup::", flush=True)
@@ -163,6 +175,8 @@ def compare(name: str, report: dict, expected: dict | None) -> tuple[list[str], 
         return [f"{name}: not in the baseline; add it"], []
     problems, notices = [], []
     known = set(expected.get("known_failures", []))
+    if report.get("run_error"):
+        return [f"{name}: {report['run_error']}"], notices
     if report["import_error"]:
         if IMPORT_FAILURE not in known:
             problems.append(f"{name}: suite did not run ({report['import_error']})")
@@ -170,27 +184,35 @@ def compare(name: str, report: dict, expected: dict | None) -> tuple[list[str], 
     if IMPORT_FAILURE in known:
         notices.append(f"{name}: suite imports again; record its tests in the baseline")
     outcomes = report["outcomes"]
+    recorded = set(expected.get("tests", []))
+    skips = set(expected.get("skips", []))
+    for test in sorted(recorded - set(outcomes)):
+        problems.append(f"{name}: {test} did not run")
     for test, outcome in sorted(outcomes.items()):
-        if outcome in ("fail", "error") and test not in known:
+        if test not in recorded:
+            problems.append(f"{name}: {test} is not in the baseline; add it")
+        elif outcome in ("fail", "error") and test not in known:
             problems.append(f"{name}: {test} {outcome}ed")
+        elif outcome == "skip" and test not in skips:
+            problems.append(f"{name}: {test} was skipped")
         elif outcome == "pass" and test in known:
             notices.append(f"{name}: {test} now passes; remove it from known_failures")
-    minimum = expected.get("tests", 0)
-    if len(outcomes) < minimum:
-        problems.append(f"{name}: ran {len(outcomes)} tests, baseline has {minimum}")
     return problems, notices
 
 
 def baseline_from(results: dict, source: str) -> dict:
     suites = {}
     for name, report in sorted(results.items()):
+        if report.get("run_error"):
+            continue  # never record a broken run as expected
         if report["import_error"]:
-            suites[name] = {"tests": 0, "known_failures": [IMPORT_FAILURE]}
+            suites[name] = {"tests": [], "known_failures": [IMPORT_FAILURE], "skips": []}
         else:
             outcomes = report["outcomes"]
-            suites[name] = {"tests": len(outcomes),
+            suites[name] = {"tests": sorted(outcomes),
                             "known_failures": sorted(test for test, outcome in outcomes.items()
-                                                     if outcome in ("fail", "error"))}
+                                                     if outcome in ("fail", "error")),
+                            "skips": sorted(test for test, outcome in outcomes.items() if outcome == "skip")}
     return {"source": source, "suites": suites}
 
 
@@ -240,7 +262,7 @@ def main() -> int:
         counts = {}
         for outcome in report["outcomes"].values():
             counts[outcome] = counts.get(outcome, 0) + 1
-        detail = report["import_error"] or ", ".join(f"{key} {value}" for key, value in sorted(counts.items()))
+        detail = report.get("run_error") or report["import_error"] or ", ".join(f"{key} {value}" for key, value in sorted(counts.items()))
         print(f"  {'FAIL' if problems else 'ok':4} {timings[name]:6.1f}s  {name}: {detail}", flush=True)
         for notice in notices:
             print(f"        note: {notice}", flush=True)

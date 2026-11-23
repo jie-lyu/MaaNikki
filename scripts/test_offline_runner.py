@@ -12,40 +12,60 @@ runner = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(runner)
 
 
+def report(outcomes=None, import_error=None, run_error=None):
+    return {"import_error": import_error, "run_error": run_error, "outcomes": outcomes or {}}
+
+
 class CompareTests(unittest.TestCase):
-    expected = {"tests": 3, "known_failures": ["A.test_old"]}
+    expected = {"tests": ["A.test_old", "A.test_ok", "A.test_skip"], "known_failures": ["A.test_old"],
+                "skips": ["A.test_skip"]}
+
+    def test_matching_run_passes(self):
+        problems, _ = runner.compare("s", report({"A.test_old": "fail", "A.test_ok": "pass", "A.test_skip": "skip"}),
+                                     self.expected)
+        self.assertEqual(problems, [])
 
     def test_new_failure_fails_the_run(self):
-        problems, _ = runner.compare("s", {"import_error": None, "outcomes": {
-            "A.test_old": "fail", "A.test_new": "error", "A.test_ok": "pass"}}, self.expected)
-        self.assertEqual(problems, ["s: A.test_new errored"])
+        problems, _ = runner.compare("s", report({"A.test_old": "fail", "A.test_ok": "error", "A.test_skip": "skip"}),
+                                     self.expected)
+        self.assertEqual(problems, ["s: A.test_ok errored"])
+
+    def test_newly_skipped_test_fails(self):
+        problems, _ = runner.compare("s", report({"A.test_old": "fail", "A.test_ok": "skip", "A.test_skip": "skip"}),
+                                     self.expected)
+        self.assertEqual(problems, ["s: A.test_ok was skipped"])
+
+    def test_replaced_test_fails_even_with_same_count(self):
+        problems, _ = runner.compare("s", report({"A.test_old": "fail", "A.test_new": "pass", "A.test_skip": "skip"}),
+                                     self.expected)
+        self.assertEqual(problems, ["s: A.test_ok did not run", "s: A.test_new is not in the baseline; add it"])
 
     def test_known_failure_passing_is_a_notice(self):
-        problems, notices = runner.compare("s", {"import_error": None, "outcomes": {
-            "A.test_old": "pass", "A.test_b": "pass", "A.test_c": "skip"}}, self.expected)
+        problems, notices = runner.compare("s", report({"A.test_old": "pass", "A.test_ok": "pass",
+                                                        "A.test_skip": "skip"}), self.expected)
         self.assertEqual(problems, [])
         self.assertEqual(len(notices), 1)
 
-    def test_lost_tests_and_import_failure_fail(self):
-        problems, _ = runner.compare("s", {"import_error": None, "outcomes": {"A.test_ok": "pass"}}, self.expected)
-        self.assertEqual(problems, ["s: ran 1 tests, baseline has 3"])
-        problems, _ = runner.compare("s", {"import_error": "ImportError: x", "outcomes": {}}, self.expected)
+    def test_import_failure_and_run_errors(self):
+        problems, _ = runner.compare("s", report(import_error="ImportError: x"), self.expected)
         self.assertEqual(len(problems), 1)
-
-    def test_expected_import_failure_and_unlisted_suite(self):
-        problems, _ = runner.compare("s", {"import_error": "boom", "outcomes": {}},
-                                     {"tests": 0, "known_failures": [runner.IMPORT_FAILURE]})
-        self.assertEqual(problems, [])
-        problems, _ = runner.compare("s", {"import_error": None, "outcomes": {}}, None)
-        self.assertEqual(problems, ["s: not in the baseline; add it"])
+        quarantined = {"tests": [], "known_failures": [runner.IMPORT_FAILURE], "skips": []}
+        self.assertEqual(runner.compare("s", report(import_error="boom"), quarantined)[0], [])
+        # A quarantined import failure that turns into a timeout or crash still fails.
+        self.assertEqual(runner.compare("s", report(run_error="timed out after 9s"), quarantined)[0],
+                         ["s: timed out after 9s"])
+        self.assertEqual(runner.compare("s", report(), None)[0], ["s: not in the baseline; add it"])
 
     def test_baseline_round_trip(self):
-        results = {"a.py": {"import_error": None, "outcomes": {"T.x": "pass", "T.y": "fail"}},
-                   "b.py": {"import_error": "boom", "outcomes": {}}}
+        results = {"a.py": report({"T.x": "pass", "T.y": "fail", "T.z": "skip"}),
+                   "b.py": report(import_error="boom"),
+                   "c.py": report(run_error="crashed")}
         baseline = runner.baseline_from(results, "here")["suites"]
-        self.assertEqual(baseline["a.py"], {"tests": 2, "known_failures": ["T.y"]})
-        for name, report in results.items():
-            self.assertEqual(runner.compare(name, report, baseline[name])[0], [])
+        self.assertEqual(baseline["a.py"], {"tests": ["T.x", "T.y", "T.z"], "known_failures": ["T.y"],
+                                            "skips": ["T.z"]})
+        self.assertNotIn("c.py", baseline)
+        for name in ("a.py", "b.py"):
+            self.assertEqual(runner.compare(name, results[name], baseline[name])[0], [])
 
 
 class RecordingTests(unittest.TestCase):

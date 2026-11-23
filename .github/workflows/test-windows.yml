@@ -36,7 +36,8 @@ jobs:
         run: python scripts/release.py prepare --output .build/ci-runtime
       - name: Compare the prepared runtime with the package inventory
         # Also records the generated runtime files for scripts/fixtures/windows-runtime-generated.txt.
-        run: python -B scripts/test_windows_contract.py --runtime .build/ci-runtime --record-runtime .build/ci-results/windows-runtime-generated.txt
+        # Remove --bootstrap-runtime-recording once that recording is reviewed and committed.
+        run: python -B scripts/test_windows_contract.py --runtime .build/ci-runtime --record-runtime .build/ci-results/windows-runtime-generated.txt --bootstrap-runtime-recording
       - name: Place the runtime where the suites expect it
         shell: pwsh
         run: |
