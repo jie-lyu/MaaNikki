@@ -69,11 +69,21 @@ class HostImportTests(unittest.TestCase):
         # packaged runtime ships no maa/bin). Backend modules are imported by tests and tools that
         # do not set it, and the Win32 ones can only be imported on Windows, so check the source.
         import ast
+
+        def import_time_nodes(nodes):
+            # Everything that runs on import, including under if/try/with and class bodies;
+            # function bodies run later, when maa is loaded.
+            for node in nodes:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    continue
+                yield node
+                yield from import_time_nodes(ast.iter_child_nodes(node))
+
         offenders = []
         for path in sorted((ROOT / "agent/host").rglob("*.py")):
-            for node in ast.parse(path.read_text(encoding="utf-8")).body:
+            for node in import_time_nodes(ast.parse(path.read_text(encoding="utf-8")).body):
                 names = ([alias.name for alias in node.names] if isinstance(node, ast.Import)
-                         else [node.module or ""] if isinstance(node, ast.ImportFrom) else [])
+                         else [node.module or ""] if isinstance(node, ast.ImportFrom) and not node.level else [])
                 if any(name == "maa" or name.startswith("maa.") for name in names):
                     offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
         self.assertEqual(offenders, [])
