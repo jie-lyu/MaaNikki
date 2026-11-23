@@ -137,7 +137,7 @@ pub fn handle_task_callback(
             if instance.stop_in_progress
                 || instance.task_run_state.overall_status.as_deref() != Some("Running")
             {
-                false
+                (false, None)
             } else {
                 let state = &mut instance.task_run_state;
                 for status in state.statuses.values_mut() {
@@ -147,17 +147,15 @@ pub fn handle_task_callback(
                 }
                 state.overall_status = Some("Failed".to_string());
                 instance.task_ids.clear();
-                true
+                // Mac：在判定结束的同一个临界区里取走这次运行的 agent 和代数。
+                (true, super::maa_core::finish_macos_run(instance))
             }
         };
+        let (aborted_remaining, finished_macos) = aborted_remaining;
         if aborted_remaining {
             super::telemetry::on_run_finished(instance_id);
-            // Mac：先取走这次运行的 agent 和代数，再通知结束，之后的清理不会碰到紧接着开始的新运行。
-            if let Some(finished) = super::maa_core::finish_macos_run(maa_state, instance_id) {
-                emit_state_changed(app, instance_id, "task-progress");
-                emit_state_changed(app, instance_id, "tasks-completed");
-                super::maa_agent::stop_taken_agents(finished.clients, finished.children);
-                super::maa_core::schedule_release_for_generation(app, maa_state, instance_id, finished.generation);
+            if let Some(finished) = finished_macos {
+                super::maa_core::complete_macos_run(app, maa_state, instance_id, finished);
                 return;
             }
             emit_state_changed(app, instance_id, "task-progress");
@@ -173,7 +171,7 @@ pub fn handle_task_callback(
         return;
     }
 
-    let all_done = {
+    let (all_done, finished_macos) = {
         let mut instances = match maa_state.instances.lock() {
             Ok(g) => g,
             Err(_) => return,
@@ -192,7 +190,7 @@ pub fn handle_task_callback(
             if let Some(selected_id) = state.mappings.get(&task_id).cloned() {
                 state.statuses.insert(selected_id, "running".to_string());
             }
-            false // 未完成
+            (false, None) // 未完成
         } else {
             // 任务成功或失败
             let status_str = if is_succeeded { "succeeded" } else { "failed" };
@@ -210,14 +208,22 @@ pub fn handle_task_callback(
                     .unwrap_or(false)
             });
 
+            // 只有属于当前这一轮的回调才能结束这一轮（Mac 收尾据此取走 agent）。
+            let belongs_to_run = state.pending_task_ids.contains(&task_id);
             if all_completed {
                 let has_failed = state.statuses.values().any(|s| s == "failed");
                 state.overall_status =
                     Some(if has_failed { "Failed" } else { "Succeeded" }.to_string());
                 instance.task_ids.clear();
             }
+            // Mac：在判定结束的同一个临界区里取走这次运行的 agent 和代数。
+            let finished = if all_completed && belongs_to_run {
+                super::maa_core::finish_macos_run(instance)
+            } else {
+                None
+            };
 
-            all_completed
+            (all_completed, finished)
         }
     }; // 锁在此处释放
 
@@ -235,19 +241,12 @@ pub fn handle_task_callback(
     }
 
     // 通知前端刷新状态
-    // Mac：先取走这次运行的 agent 和代数（同时让连接不可用），再通知结束，之后的清理只针对这次运行。
-    let finished_macos = if all_done {
-        super::maa_core::finish_macos_run(maa_state, instance_id)
-    } else {
-        None
-    };
-    emit_state_changed(app, instance_id, "task-progress");
+    // Mac：先断开这次运行的 agent（反注册其动作），再通知结束，之后的清理只针对这次运行。
     if let Some(finished) = finished_macos {
-        emit_state_changed(app, instance_id, "tasks-completed");
-        super::maa_agent::stop_taken_agents(finished.clients, finished.children);
-        super::maa_core::schedule_release_for_generation(app, maa_state, instance_id, finished.generation);
+        super::maa_core::complete_macos_run(app, maa_state, instance_id, finished);
         return;
     }
+    emit_state_changed(app, instance_id, "task-progress");
     if all_done {
         emit_state_changed(app, instance_id, "tasks-completed");
 

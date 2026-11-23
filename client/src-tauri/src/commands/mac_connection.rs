@@ -32,7 +32,9 @@ pub(crate) fn finish_run<C, T, A, B>(
     slots: ConnectionSlots<'_, C, T>,
     clients: &mut Vec<A>,
     children: &mut Vec<B>,
+    cleanup_pending: &mut bool,
 ) -> FinishedRun<A, B> {
+    *cleanup_pending = true;
     *slots.stopped = true;
     *slots.generation = slots.generation.wrapping_add(1);
     FinishedRun {
@@ -108,7 +110,7 @@ mod tests {
     #[test]
     fn restart_while_release_waits_never_reuses_the_old_controller() {
         let mut inst = Instance::new(1);
-        finish_run(inst.slots(), &mut Vec::<u8>::new(), &mut Vec::<u8>::new());
+        finish_run(inst.slots(), &mut Vec::<u8>::new(), &mut Vec::<u8>::new(), &mut false);
         let scheduled = inst.generation; // release worker waits for the tasker here
         assert_eq!(inst.start_run(2), 2); // a quick restart gets a fresh connection
         assert!(take_for_release(inst.slots(), scheduled).is_none()); // the worker stands down
@@ -119,7 +121,7 @@ mod tests {
     #[test]
     fn release_first_then_restart_retires_once() {
         let mut inst = Instance::new(1);
-        finish_run(inst.slots(), &mut Vec::<u8>::new(), &mut Vec::<u8>::new());
+        finish_run(inst.slots(), &mut Vec::<u8>::new(), &mut Vec::<u8>::new(), &mut false);
         let scheduled = inst.generation;
         let (taken, tasker) = take_for_release(inst.slots(), scheduled).unwrap();
         inst.retired.extend(taken);
@@ -142,7 +144,9 @@ mod tests {
         let mut inst = Instance::new(1);
         let mut clients = vec![11];
         let mut children = vec![21];
-        let finished = finish_run(inst.slots(), &mut clients, &mut children);
+        let mut pending = false;
+        let finished = finish_run(inst.slots(), &mut clients, &mut children, &mut pending);
+        assert!(pending);
         // A new run starts before the old one's cleanup runs: fresh controller, fresh agents.
         assert_eq!(inst.start_run(2), 2);
         clients.push(12);
@@ -158,7 +162,7 @@ mod tests {
     #[test]
     fn without_a_new_run_the_release_takes_the_finished_connection() {
         let mut inst = Instance::new(1);
-        let finished = finish_run(inst.slots(), &mut Vec::<u8>::new(), &mut Vec::<u8>::new());
+        let finished = finish_run(inst.slots(), &mut Vec::<u8>::new(), &mut Vec::<u8>::new(), &mut false);
         let (taken, _) = take_for_release(inst.slots(), finished.generation).unwrap();
         assert_eq!(taken, Some(1));
     }

@@ -228,6 +228,8 @@ pub struct InstanceRuntime {
     pub stop_started_at: Option<Instant>,
     /// 任务运行状态（后端管理，单一真相来源）
     pub task_run_state: TaskRunState,
+    /// Mac：上一轮运行的 agent 已取走、尚未断开（反注册完成前不能开始新的运行）
+    pub macos_cleanup_pending: bool,
 }
 
 impl Drop for InstanceRuntime {

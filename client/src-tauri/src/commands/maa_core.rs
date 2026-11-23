@@ -1644,14 +1644,12 @@ fn retire_macos_handles_in_background(instance_id: &str, controller: Option<Cont
         });
 }
 
-/// Mac 运行结束（完成、失败或停止收尾）：标记连接不可用、取走这次运行的 agent 和释放应针对的代数。
-/// 必须在通知前端运行结束之前调用；返回 None 表示不是 Mac 连接，调用方走原来的流程。
+/// Mac 运行结束（完成、失败或停止收尾）：标记连接不可用、取走这次运行的 agent 和释放应针对的代数，
+/// 并标记收尾进行中。必须在判定运行结束的同一个临界区里调用（持有实例锁）；返回 None 表示不是
+/// Mac 连接，调用方走原来的流程。
 pub(crate) fn finish_macos_run(
-    state: &Arc<MaaState>,
-    instance_id: &str,
+    instance: &mut super::types::InstanceRuntime,
 ) -> Option<super::mac_connection::FinishedRun<maa_framework::agent_client::AgentClient, std::process::Child>> {
-    let mut instances = state.instances.lock().ok()?;
-    let instance = instances.get_mut(instance_id)?;
     if !matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. })) {
         return None;
     }
@@ -1664,7 +1662,27 @@ pub(crate) fn finish_macos_run(
         },
         &mut instance.agent_clients,
         &mut instance.agent_children,
+        &mut instance.macos_cleanup_pending,
     ))
+}
+
+/// Mac 上一轮运行的收尾：同步断开取走的 agent（反注册其动作），清除收尾标记，再通知前端运行结束，
+/// 并只释放那一代的连接。调用方已在判定运行结束的同一个临界区里取得 `finished`。
+pub(crate) fn complete_macos_run(
+    app: &tauri::AppHandle,
+    state: &Arc<MaaState>,
+    instance_id: &str,
+    finished: super::mac_connection::FinishedRun<maa_framework::agent_client::AgentClient, std::process::Child>,
+) {
+    super::maa_agent::stop_taken_agents(finished.clients, finished.children);
+    if let Ok(mut instances) = state.instances.lock() {
+        if let Some(instance) = instances.get_mut(instance_id) {
+            instance.macos_cleanup_pending = false;
+        }
+    }
+    super::utils::emit_state_changed(app, instance_id, "task-progress");
+    super::utils::emit_state_changed(app, instance_id, "tasks-completed");
+    schedule_release_for_generation(app, state, instance_id, finished.generation);
 }
 
 /// 在单独线程里丢弃句柄，最多等待 `deadline`；超过期限返回 false，丢弃在后台继续完成。

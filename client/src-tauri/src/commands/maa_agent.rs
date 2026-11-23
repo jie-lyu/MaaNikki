@@ -652,6 +652,24 @@ pub async fn start_tasks_impl(
     info!("agent_configs: {:?}", agent_configs);
     info!("cwd: {}, tcp_compat_mode: {}", cwd, tcp_compat_mode);
 
+    // Mac：上一轮的 agent 还在断开（反注册动作）时不能开始新的运行；最多等 3 秒。
+    let cleanup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let pending = maa_state
+            .instances
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get(&instance_id)
+            .is_some_and(|inst| inst.macos_cleanup_pending);
+        if !pending {
+            break;
+        }
+        if std::time::Instant::now() >= cleanup_deadline {
+            return Err("上一轮任务仍在收尾，请稍后再开始。".to_string());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
     let reconnect_config = {
         let mut instances = maa_state.instances.lock().map_err(|e| e.to_string())?;
         instances.get_mut(&instance_id).and_then(|inst| {
