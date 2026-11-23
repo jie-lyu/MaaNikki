@@ -73,17 +73,17 @@ class SelectionTests(unittest.TestCase):
             self.assertIsNone(host.overlay_backend())
 
     def test_optional_adapters_follow_capabilities(self):
-        with patch.object(host.os, "name", "posix"):
+        with patch.object(host, "platform_backend", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "不支持关闭游戏"):
                 host.game_close_api()
-        with patch.object(host.os, "name", "nt"), patch("host.win32.close.Win32Api") as binding:
+        with patch.object(host, "platform_backend", return_value="win32"), patch("host.win32.close.Win32Api") as binding:
             self.assertIs(host.game_close_api(), binding.return_value)
-        with patch.object(host.os, "name", "posix"):
+        with patch.object(host, "platform_backend", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "剪贴板"):
                 host.clipboard()
             with self.assertRaisesRegex(RuntimeError, "登录信息"):
                 host.credential_store()
-        with patch.object(host.os, "name", "nt"):
+        with patch.object(host, "platform_backend", return_value="win32"):
             self.assertTrue(callable(host.clipboard().get_clipboard_text))
             self.assertTrue(callable(host.clipboard().set_clipboard_text))
             self.assertTrue(callable(host.credential_store().credentials))
@@ -108,7 +108,7 @@ class SelectionTests(unittest.TestCase):
 
     def test_non_windows_host_rejects_with_the_previous_message(self):
         controller = Mock()
-        with patch.object(host.os, "name", "posix"):
+        with patch.object(host, "platform_backend", return_value=None):
             with self.assertRaisesRegex(NavigationError, "前台导航仅支持 Windows 游戏窗口。"):
                 host.connect_target(controller)
 
@@ -117,7 +117,7 @@ class SelectionTests(unittest.TestCase):
             @property
             def info(self):
                 raise RuntimeError("closed")
-        with patch.object(host.os, "name", "nt"):
+        with patch.object(host, "platform_backend", return_value="win32"):
             with self.assertRaisesRegex(NavigationError, "无法读取当前连接的游戏窗口"):
                 host.connect_target(Broken())
             for info in ({"type": "win32", "hwnd": 0}, {"type": "adb"}, {"type": "win32", "hwnd": "1"}, None):
@@ -216,11 +216,11 @@ class ForegroundInputDelegationTests(unittest.TestCase):
 
     def test_background_input_comes_from_the_host_backend(self):
         from navigation.controller import BackgroundInput
-        with patch.object(host.os, "name", "posix"):
+        with patch.object(host, "platform_backend", return_value=None):
             with self.assertRaisesRegex(NavigationError, "前台导航仅支持 Windows 游戏窗口。"):
                 BackgroundInput(Mock(), lambda: False)
         user32 = Mock(hwnd=0x10)
-        with patch.object(host.os, "name", "nt"), \
+        with patch.object(host, "platform_backend", return_value="win32"), \
                 patch("navigation.controller.connect_target", return_value=target(user32)):
             inputs = BackgroundInput(Mock(), lambda: False)
         from host.win32.background_input import BackgroundInput as Win32BackgroundInput

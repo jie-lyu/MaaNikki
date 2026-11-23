@@ -122,9 +122,8 @@ class GeometryTests(unittest.TestCase):
 
 class FacadeTests(unittest.TestCase):
     def test_without_the_backend_lifecycle_hooks_do_nothing_and_layout_calls_fail(self):
-        import host
         import tall_window
-        with patch.object(host.os, "name", "posix"), patch.object(layout, "restore_session_16_9_windows") as restore:
+        with patch.object(tall_window, "platform_backend", return_value=None), patch.object(layout, "restore_session_16_9_windows") as restore:
             self.assertIsNone(tall_window.adopt_session_16_9_handoff())
             self.assertIsNone(tall_window.persist_session_16_9_handoff())
             self.assertIsNone(tall_window.restore_session_16_9_windows())
@@ -133,9 +132,8 @@ class FacadeTests(unittest.TestCase):
                 tall_window.window_hwnd()
 
     def test_on_windows_calls_pass_through_unchanged(self):
-        import host
         import tall_window
-        with patch.object(host.os, "name", "nt"):
+        with patch.object(tall_window, "platform_backend", return_value="win32"):
             for name, args, kwargs in (
                 ("clamp_capture_park_point", (0x10, [5, 6]), {"capture_size": (1280, 720), "margin_px": 8}),
                 ("safe_capture_y_range", (0x10, 5120), {"capture_width": 1280}),
