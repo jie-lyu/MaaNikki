@@ -228,11 +228,10 @@ pub struct InstanceRuntime {
     pub stop_started_at: Option<Instant>,
     /// 任务运行状态（后端管理，单一真相来源）
     pub task_run_state: TaskRunState,
-    /// Mac：上一轮运行的 agent 已取走、尚未断开时记下那一代（反注册完成前不能开始新的运行，
-    /// 只有那次收尾能清除）
-    pub macos_cleanup: Option<u64>,
-    /// 当前 Tasker 的序号：新建 Tasker 时加一并交给它的回调；Mac 运行结束时也加一，
-    /// 让那次运行的迟到回调失效
+    /// Mac：这一轮运行的状态（启动中、运行中、收尾中），同时只有一轮
+    pub(crate) macos_run: Option<super::mac_connection::MacRun>,
+    /// 当前 Tasker 的序号：新建 Tasker 时加一并交给它的回调；Mac 运行结束或新的 Mac 启动取得
+    /// 这一轮时也加一，让之前那次运行的迟到回调失效
     pub tasker_serial: u64,
 }
 

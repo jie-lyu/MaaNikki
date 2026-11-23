@@ -1405,6 +1405,10 @@ pub fn maa_destroy_resource(
 // 任务命令
 // ============================================================================
 
+/// Mac 测试预览拒绝在运行中追加任务时的提示。
+pub(crate) const MACOS_APPEND_REFUSED: &str =
+    "Mac 测试预览暂不支持在运行中追加任务，请在本轮结束后重新开始。";
+
 /// 运行任务（异步，通过回调通知完成状态）
 /// 运行单个任务的内部实现（可从 Tauri 命令和 HTTP 处理器共享调用）
 pub fn run_task_impl(
@@ -1420,11 +1424,10 @@ pub fn run_task_impl(
     }
     let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
     let instance = instances.get_mut(instance_id).ok_or("Instance not found")?;
-    // 已停止的 Mac 连接正在退役，不再接收任务；拒绝时不改变代数，以免取消正在进行的释放。
-    if instance.controller_stopped
-        && matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. }))
-    {
-        return Err("Mac 控制器已停止，请重新连接后再运行。".to_string());
+    // Mac 测试预览不在运行中追加单个任务：Mac 上每一轮运行由 start_tasks 取得并独占（重连、新建
+    // Tasker、启动 agent），追加的任务不属于任何一轮。拒绝时不改变代数，以免取消正在进行的释放。
+    if matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. })) {
+        return Err(MACOS_APPEND_REFUSED.to_string());
     }
     instance.start_generation = instance.start_generation.wrapping_add(1);
 
@@ -1665,7 +1668,7 @@ pub(crate) fn finish_macos_run(
         },
         &mut instance.agent_clients,
         &mut instance.agent_children,
-        &mut instance.macos_cleanup,
+        &mut instance.macos_run,
         &mut instance.tasker_serial,
     ))
 }
@@ -1681,7 +1684,7 @@ pub(crate) fn complete_macos_run(
     super::maa_agent::stop_taken_agents(finished.clients, finished.children);
     if let Ok(mut instances) = state.instances.lock() {
         if let Some(instance) = instances.get_mut(instance_id) {
-            super::mac_connection::clear_cleanup(&mut instance.macos_cleanup, finished.generation);
+            super::mac_connection::clear_cleanup(&mut instance.macos_run, finished.generation);
         }
     }
     super::utils::emit_state_changed(app, instance_id, "task-progress");
