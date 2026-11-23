@@ -35,7 +35,7 @@ class MacOSInput:
         if controller is None or button not in SCENE_BUTTONS:
             return None
         try:
-            controller.post_touch_up(button).wait()
+            controller.post_touch_up(contact=button).wait()
         except Exception:
             pass
         return None
@@ -47,7 +47,9 @@ class MacOSInput:
         if (controller is None or button not in SCENE_BUTTONS
                 or self.target.patch_level < SCENE_BUTTONS_PATCH_LEVEL):
             return False
-        return bool(controller.post_touch_down(button, 0, 0, SCENE_PRESS_PRESSURE).wait().succeeded)
+        # The binding's order is (x, y, contact, pressure): name them, a positional slip presses another button.
+        return bool(controller.post_touch_down(x=0, y=0, contact=button,
+                                               pressure=SCENE_PRESS_PRESSURE).wait().succeeded)
 
     def post_window_key(self, key: int, *, down: bool) -> bool:
         return False

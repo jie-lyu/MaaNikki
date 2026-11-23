@@ -323,15 +323,39 @@ class MacOSBackendTests(unittest.TestCase):
             native.physical_keys()
 
     def test_scene_buttons_go_through_the_unit_from_patch_level_3(self):
+        import inspect
+        from unittest.mock import create_autospec
         from host.macos.target import SCENE_PRESS_PRESSURE
-        controller = Mock()
-        controller.post_touch_down.return_value.wait.return_value.succeeded = True
-        native = self.mac_target(FakeQuartz(), {**GOOD_MAC_INFO, "maanikki_patch": 3}, controller).input()
-        self.assertTrue(native.press_mouse(1))  # the ability button: right
-        controller.post_touch_down.assert_called_once_with(1, 0, 0, SCENE_PRESS_PRESSURE)
+
+        class Controller:
+            """The maafw 5.16.1 binding's signatures (checked against maa.controller where it imports)."""
+            def post_touch_down(self, x, y, contact=0, pressure=1): ...
+            def post_touch_up(self, contact=0): ...
+
+        try:
+            from maa.controller import Controller as Binding
+        except (ImportError, OSError):  # Windows CI's packaged runtime has no maa/bin
+            Binding = None
+        if Binding is not None:
+            for method in ("post_touch_down", "post_touch_up"):
+                self.assertEqual(list(inspect.signature(getattr(Binding, method)).parameters),
+                                 list(inspect.signature(getattr(Controller, method)).parameters))
+
+        def bound(method, call):
+            # Bind against the binding's signature: a positional slip would press another button.
+            return inspect.signature(getattr(Controller, method)).bind(None, *call.args, **call.kwargs).arguments
+
+        for button in (0, 1, 2):
+            with self.subTest(button=button):
+                controller = create_autospec(Controller, instance=True)
+                controller.post_touch_down.return_value.wait.return_value.succeeded = True
+                native = self.mac_target(FakeQuartz(), {**GOOD_MAC_INFO, "maanikki_patch": 3}, controller).input()
+                self.assertTrue(native.press_mouse(button))
+                down = bound("post_touch_down", controller.post_touch_down.call_args)
+                self.assertEqual((down["contact"], down["pressure"]), (button, SCENE_PRESS_PRESSURE))
+                native.force_mouse_up(button)
+                self.assertEqual(bound("post_touch_up", controller.post_touch_up.call_args)["contact"], button)
         self.assertFalse(native.press_mouse(3))  # the extra buttons have no unit contact
-        native.force_mouse_up(1)
-        controller.post_touch_up.assert_called_once_with(1)
         older = self.mac_target(FakeQuartz(), GOOD_MAC_INFO, controller).input()
         self.assertFalse(older.press_mouse(1))  # a patch-2 unit would hover-move and turn the camera
         self.assertEqual(controller.post_touch_down.call_count, 1)
