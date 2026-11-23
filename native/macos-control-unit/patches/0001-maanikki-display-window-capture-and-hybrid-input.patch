@@ -67,10 +67,10 @@ index 0000000..1e86efb
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Base/CaptureGeometry.h b/source/MaaMacOSControlUnit/Base/CaptureGeometry.h
 new file mode 100644
-index 0000000..fde08e8
+index 0000000..eb8247f
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Base/CaptureGeometry.h
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,115 @@
 +#pragma once
 +
 +#include <mutex>
@@ -159,6 +159,13 @@ index 0000000..fde08e8
 +    {
 +        std::lock_guard lock(mutex_);
 +        return frame_;
++    }
++
++    // Whether the latch is set: some published frame's geometry differed from an earlier one.
++    bool changed() const
++    {
++        std::lock_guard lock(mutex_);
++        return changed_;
 +    }
 +
 +private:
@@ -907,7 +914,7 @@ index 0000000..23af288
 +
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.cpp b/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.cpp
-index 1d30e69..3c0aeda 100644
+index 1d30e69..823eb4c 100644
 --- a/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.cpp
 +++ b/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.cpp
 @@ -4,8 +4,10 @@
@@ -981,11 +988,13 @@ index 1d30e69..3c0aeda 100644
  }
  
  json::object MacOSControlUnitMgr::get_info() const
-@@ -227,6 +252,7 @@ json::object MacOSControlUnitMgr::get_info() const
+@@ -227,6 +252,9 @@ json::object MacOSControlUnitMgr::get_info() const
      info["window_id"] = window_id_;
      info["screencap_method"] = static_cast<int64_t>(screencap_method_);
      info["input_method"] = static_cast<int64_t>(input_method_);
 +    info["maanikki_patch"] = kMaaNikkiPatchLevel;
++    // Read live by the core on every get_info: the agent stops and asks for a reconnect when set.
++    info["geometry_changed"] = geometry_->changed();
      return info;
  }
  
@@ -1329,10 +1338,10 @@ index 0000000..c17723a
 +MAA_CTRL_UNIT_NS_END
 diff --git a/test/maanikki/HybridInputTest.mm b/test/maanikki/HybridInputTest.mm
 new file mode 100644
-index 0000000..4073342
+index 0000000..0995aa4
 --- /dev/null
 +++ b/test/maanikki/HybridInputTest.mm
-@@ -0,0 +1,386 @@
+@@ -0,0 +1,388 @@
 +// Deterministic tests for HybridInput over a fake InputPlatform: orderings a real desktop cannot
 +// reproduce on demand (a stop racing a press), and every refusal path. Nothing reaches the system.
 +// Built only with -DMAANIKKI_UNIT_TESTS=ON; never part of the shipped unit.
@@ -1624,8 +1633,10 @@ index 0000000..4073342
 +    t.geometry->publish(frame(moved));
 +    t.geometry->publish(frame(moved));
 +    CHECK(!t.input->touch_down(0, 100, 200, 0)); // still refused after more frames at the new geometry
++    CHECK(t.geometry->changed());
 +    t.geometry->reset();                         // reconnect
 +    t.geometry->publish(frame(moved));
++    CHECK(!t.geometry->changed());
 +    CHECK(t.input->touch_down(0, 100, 200, 0));
 +    CHECK(t.input->touch_up(0));
 +    CHECK(t.platform->take().size() == 3);
