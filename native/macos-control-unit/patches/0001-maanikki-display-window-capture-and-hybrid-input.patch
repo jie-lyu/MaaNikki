@@ -204,10 +204,10 @@ index 344f217..2744be9 100644
 +endif()
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.h b/source/MaaMacOSControlUnit/Input/HybridInput.h
 new file mode 100644
-index 0000000..caed72d
+index 0000000..05f86eb
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.h
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,102 @@
 +#pragma once
 +
 +#include <map>
@@ -244,9 +244,10 @@ index 0000000..caed72d
 +// as down is posted again, so a release made behind the unit's back cannot swallow the next press.
 +//
 +// The core calls releases from its stopping thread while its worker may be inside a press, so all
-+// state is guarded by one mutex. A release that arrives from another thread for a press the unit
-+// has not accepted yet cancels that press whenever it arrives; inactive(), which the core queues
-+// behind any in-flight action once a task ends, clears cancellations that no press consumed.
++// state is guarded by one mutex. A release that arrives from another thread cancels the next press
++// of that key or contact whenever it arrives, even if an older press was still held (it may belong to
++// a press the core already registered); inactive(), which the core queues behind any in-flight
++// action once a task ends, clears cancellations that no press consumed.
 +class HybridInput : public InputBase
 +{
 +public:
@@ -291,8 +292,8 @@ index 0000000..caed72d
 +    bool touch_up_locked(int contact);
 +    bool key_up_locked(int key);
 +
-+    // A release from a foreign thread for something not held: remember it briefly.
-+    void note_unmatched_release(std::set<int>& cancels, int id);
++    // A release from the stopping thread: cancel the next press of that id until inactive().
++    void note_stop_release(std::set<int>& cancels, int id);
 +    bool release_all_locked();
 +
 +    uint32_t window_id_ = 0;
@@ -311,10 +312,10 @@ index 0000000..caed72d
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
 new file mode 100644
-index 0000000..8dff40d
+index 0000000..d01de0b
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
-@@ -0,0 +1,347 @@
+@@ -0,0 +1,355 @@
 +#include "HybridInput.h"
 +
 +#include "InputUtils.h"
@@ -426,11 +427,11 @@ index 0000000..8dff40d
 +    return point;
 +}
 +
-+void HybridInput::note_unmatched_release(std::set<int>& cancels, int id)
++void HybridInput::note_stop_release(std::set<int>& cancels, int id)
 +{
-+    // The core's own worker releases after a refused press; only a release racing in from the stopping
-+    // thread may belong to a press that is about to arrive. It stays until that press consumes it or
-+    // inactive() ends the task.
++    // The core's own worker releases after a refused press and in inactive(); only a release from
++    // another thread (the core's stop) may belong to a press that is about to arrive. It stays until
++    // that press consumes it or inactive() ends the task.
 +    if (std::this_thread::get_id() != worker_) {
 +        cancels.insert(id);
 +    }
@@ -518,10 +519,12 @@ index 0000000..8dff40d
 +
 +bool HybridInput::touch_up_locked(int contact)
 +{
++    // A release from the stopping thread may belong to a press still on its way, whether or not an
++    // older press of the same contact is held: cancel that next press either way.
++    note_stop_release(cancelled_contacts_, contact);
 +    auto held = held_contacts_.find(contact);
 +    if (held == held_contacts_.end()) {
 +        // Nothing was pressed (the press was refused, or has not arrived yet): send nothing.
-+        note_unmatched_release(cancelled_contacts_, contact);
 +        return true;
 +    }
 +    MouseEventInfo info;
@@ -576,13 +579,19 @@ index 0000000..8dff40d
 +    if (!pid) {
 +        return false;
 +    }
++    auto held = held_keys_.find(key);
++    if (held != held_keys_.end() && held->second != *pid) {
++        // The window now belongs to another process; keep the recorded owner for the release.
++        LogError << "key is still held for another process, not sending" << VAR(key) << VAR(held->second) << VAR(*pid);
++        return false;
++    }
 +    // A key this unit still counts as down may have been released behind its back (the agent posts
 +    // releases straight to the game when the controller channel fails). Post the press again rather
 +    // than report a press that sent nothing; a repeated key-down is harmless to the game.
 +    if (!platform_->post_key(*pid, static_cast<CGKeyCode>(key), true)) {
 +        return false;
 +    }
-+    held_keys_[key] = *pid;
++    held_keys_.emplace(key, *pid);
 +    return true;
 +}
 +
@@ -597,9 +606,9 @@ index 0000000..8dff40d
 +
 +bool HybridInput::key_up_locked(int key)
 +{
++    note_stop_release(cancelled_keys_, key);
 +    auto held = held_keys_.find(key);
 +    if (held == held_keys_.end()) {
-+        note_unmatched_release(cancelled_keys_, key);
 +        return true;
 +    }
 +    // To the process that got the press, even if the window has closed or its id was reused since.
@@ -1320,10 +1329,10 @@ index 0000000..c17723a
 +MAA_CTRL_UNIT_NS_END
 diff --git a/test/maanikki/HybridInputTest.mm b/test/maanikki/HybridInputTest.mm
 new file mode 100644
-index 0000000..e412ba0
+index 0000000..4073342
 --- /dev/null
 +++ b/test/maanikki/HybridInputTest.mm
-@@ -0,0 +1,356 @@
+@@ -0,0 +1,386 @@
 +// Deterministic tests for HybridInput over a fake InputPlatform: orderings a real desktop cannot
 +// reproduce on demand (a stop racing a press), and every refusal path. Nothing reaches the system.
 +// Built only with -DMAANIKKI_UNIT_TESTS=ON; never part of the shipped unit.
@@ -1660,6 +1669,34 @@ index 0000000..e412ba0
 +    CHECK(!t.input->key_down(13)); // still foreground-only
 +}
 +
++void stop_release_of_an_old_hold_still_cancels_the_pending_press()
++{
++    Fixture t;
++    CHECK(t.input->key_down(13));
++    CHECK(t.input->touch_down(0, 100, 200, 0));
++    t.platform->take();
++    // The core registered another press, then its stopping thread released before the unit saw it;
++    // that release matches the older hold.
++    std::thread([&] { t.input->key_up(13); t.input->touch_up(0); }).join();
++    CHECK((t.platform->take() == Events { "key_up 13 pid=100", "up@50,100", "warp@7,7" }));
++    CHECK(!t.input->key_down(13));
++    CHECK(!t.input->touch_down(0, 100, 200, 0));
++    CHECK(t.platform->take().empty());
++    t.input->inactive(); // the task ended; the next press is ordinary again
++    CHECK(t.input->key_down(13));
++}
++
++void repeat_for_another_process_is_refused_and_the_owner_kept()
++{
++    Fixture t;
++    CHECK(t.input->key_down(13));
++    t.platform->win.pid = 300; // window id reused by another process, now in front
++    t.platform->front = 300;
++    CHECK(!t.input->key_down(13));
++    CHECK(t.input->key_up(13));
++    CHECK((t.platform->take() == Events { "key_down 13 pid=100", "key_up 13 pid=100" }));
++}
++
 +} // namespace
 +
 +int main()
@@ -1677,6 +1714,8 @@ index 0000000..e412ba0
 +    inactive_and_destruction_release_everything();
 +    failed_release_stays_held_and_is_reported();
 +    press_of_a_still_held_key_is_posted_again();
++    stop_release_of_an_old_hold_still_cancels_the_pending_press();
++    repeat_for_another_process_is_refused_and_the_owner_kept();
 +    std::printf(failures ? "HybridInputTest: %d failure(s)\n" : "HybridInputTest: all passed\n", failures);
 +    return failures ? 1 : 0;
 +}
