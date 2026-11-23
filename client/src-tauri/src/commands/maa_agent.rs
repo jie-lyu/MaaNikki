@@ -1146,9 +1146,15 @@ pub fn stop_agent_impl(maa_state: &Arc<MaaState>, instance_id: &str) -> Result<(
         )
     };
 
+    stop_taken_agents(clients, children);
+    Ok(())
+}
+
+/// 停止已经从实例上取走的 agent：同步断开 client，后台等待子进程退出（超时强杀）。
+pub(crate) fn stop_taken_agents(clients: Vec<AgentClient>, children: Vec<std::process::Child>) {
     if clients.is_empty() && children.is_empty() {
         debug!("[stop_agent] No agents to stop");
-        return Ok(());
+        return;
     }
 
     info!(
@@ -1198,8 +1204,6 @@ pub fn stop_agent_impl(maa_state: &Arc<MaaState>, instance_id: &str) -> Result<(
             }
         }
     });
-
-    Ok(())
 }
 
 /// 停止所有 Agent 并断开连接 — Tauri invoke 入口，委托给 stop_agent_impl

@@ -1644,24 +1644,27 @@ fn retire_macos_handles_in_background(instance_id: &str, controller: Option<Cont
         });
 }
 
-/// 运行结束（完成、失败或停止收尾）时把 Mac 连接标记为不可用，下次运行一律重新连接。
-/// 必须在通知前端运行结束之前调用，避免紧接着的重新启动复用这个正在退役的控制器。
-pub fn mark_macos_connection_finished(state: &Arc<MaaState>, instance_id: &str) {
-    let Ok(mut instances) = state.instances.lock() else {
-        return;
-    };
-    let Some(instance) = instances.get_mut(instance_id) else {
-        return;
-    };
+/// Mac 运行结束（完成、失败或停止收尾）：标记连接不可用、取走这次运行的 agent 和释放应针对的代数。
+/// 必须在通知前端运行结束之前调用；返回 None 表示不是 Mac 连接，调用方走原来的流程。
+pub(crate) fn finish_macos_run(
+    state: &Arc<MaaState>,
+    instance_id: &str,
+) -> Option<super::mac_connection::FinishedRun<maa_framework::agent_client::AgentClient, std::process::Child>> {
+    let mut instances = state.instances.lock().ok()?;
+    let instance = instances.get_mut(instance_id)?;
     if !matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. })) {
-        return;
+        return None;
     }
-    super::mac_connection::mark_run_finished(super::mac_connection::ConnectionSlots {
-        controller: &mut instance.controller,
-        tasker: &mut instance.tasker,
-        stopped: &mut instance.controller_stopped,
-        generation: &mut instance.start_generation,
-    });
+    Some(super::mac_connection::finish_run(
+        super::mac_connection::ConnectionSlots {
+            controller: &mut instance.controller,
+            tasker: &mut instance.tasker,
+            stopped: &mut instance.controller_stopped,
+            generation: &mut instance.start_generation,
+        },
+        &mut instance.agent_clients,
+        &mut instance.agent_children,
+    ))
 }
 
 /// 在单独线程里丢弃句柄，最多等待 `deadline`；超过期限返回 false，丢弃在后台继续完成。
@@ -1725,9 +1728,28 @@ fn try_release_controller_handles(
             instance.start_generation = instance.start_generation.wrapping_add(1);
         }
 
-        let dropped_tasker = instance.tasker.take();
-        let dropped_controller = instance.controller.take();
-        instance.controller_stopped = true;
+        let (dropped_tasker, dropped_controller) =
+            if matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. })) {
+                // Mac：经归属规则取走，只取安排释放时的那一代（手动断开时为刚递增后的当前代）。
+                let generation = expected_generation.unwrap_or(instance.start_generation);
+                let Some((controller, tasker)) = super::mac_connection::take_for_release(
+                    super::mac_connection::ConnectionSlots {
+                        controller: &mut instance.controller,
+                        tasker: &mut instance.tasker,
+                        stopped: &mut instance.controller_stopped,
+                        generation: &mut instance.start_generation,
+                    },
+                    generation,
+                ) else {
+                    return Ok(DesktopReleaseOutcome::Aborted);
+                };
+                (tasker, controller)
+            } else {
+                let dropped_tasker = instance.tasker.take();
+                let dropped_controller = instance.controller.take();
+                instance.controller_stopped = true;
+                (dropped_tasker, dropped_controller)
+            };
         instance.stop_in_progress = false;
         instance.stop_started_at = None;
         let exact_key = instance
@@ -1817,6 +1839,25 @@ pub fn schedule_release_idle_desktop_controller(
     state: &Arc<MaaState>,
     instance_id: &str,
 ) {
+    schedule_release(app, state, instance_id, None);
+}
+
+/// 只释放某一代的 Mac 连接（运行结束时取得的代数）；之后开始的新运行不会被它释放。
+pub fn schedule_release_for_generation(
+    app: &tauri::AppHandle,
+    state: &Arc<MaaState>,
+    instance_id: &str,
+    generation: u64,
+) {
+    schedule_release(app, state, instance_id, Some(generation));
+}
+
+fn schedule_release(
+    app: &tauri::AppHandle,
+    state: &Arc<MaaState>,
+    instance_id: &str,
+    fixed_generation: Option<u64>,
+) {
     let (target_gen, is_macos) = {
         let Ok(instances) = state.instances.lock() else {
             return;
@@ -1835,7 +1876,7 @@ pub fn schedule_release_idle_desktop_controller(
             return;
         }
         (
-            instance.start_generation,
+            fixed_generation.unwrap_or(instance.start_generation),
             matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. })),
         )
     };

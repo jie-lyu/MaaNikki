@@ -152,7 +152,14 @@ pub fn handle_task_callback(
         };
         if aborted_remaining {
             super::telemetry::on_run_finished(instance_id);
-            super::maa_core::mark_macos_connection_finished(maa_state, instance_id);
+            // Mac：先取走这次运行的 agent 和代数，再通知结束，之后的清理不会碰到紧接着开始的新运行。
+            if let Some(finished) = super::maa_core::finish_macos_run(maa_state, instance_id) {
+                emit_state_changed(app, instance_id, "task-progress");
+                emit_state_changed(app, instance_id, "tasks-completed");
+                super::maa_agent::stop_taken_agents(finished.clients, finished.children);
+                super::maa_core::schedule_release_for_generation(app, maa_state, instance_id, finished.generation);
+                return;
+            }
             emit_state_changed(app, instance_id, "task-progress");
             emit_state_changed(app, instance_id, "tasks-completed");
             if let Err(e) = super::maa_agent::stop_agent_impl(maa_state, instance_id) {
@@ -228,11 +235,19 @@ pub fn handle_task_callback(
     }
 
     // 通知前端刷新状态
-    if all_done {
-        // 先让 Mac 连接不可用，再通知运行结束：紧接着的重新启动只能新建连接。
-        super::maa_core::mark_macos_connection_finished(maa_state, instance_id);
-    }
+    // Mac：先取走这次运行的 agent 和代数（同时让连接不可用），再通知结束，之后的清理只针对这次运行。
+    let finished_macos = if all_done {
+        super::maa_core::finish_macos_run(maa_state, instance_id)
+    } else {
+        None
+    };
     emit_state_changed(app, instance_id, "task-progress");
+    if let Some(finished) = finished_macos {
+        emit_state_changed(app, instance_id, "tasks-completed");
+        super::maa_agent::stop_taken_agents(finished.clients, finished.children);
+        super::maa_core::schedule_release_for_generation(app, maa_state, instance_id, finished.generation);
+        return;
+    }
     if all_done {
         emit_state_changed(app, instance_id, "tasks-completed");
 

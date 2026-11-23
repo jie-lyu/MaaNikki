@@ -19,9 +19,27 @@ pub(crate) struct ConnectionSlots<'a, C, T> {
     pub generation: &'a mut u64,
 }
 
-/// 运行结束（完成、失败或停止）时：连接不再可用，下次运行必须重新连接。
-pub(crate) fn mark_run_finished<C, T>(slots: ConnectionSlots<'_, C, T>) {
+/// 一次 Mac 运行结束时取走的东西：这次运行的 agent 和释放应针对的代数。
+pub(crate) struct FinishedRun<A, B> {
+    pub generation: u64,
+    pub clients: Vec<A>,
+    pub children: Vec<B>,
+}
+
+/// Mac 运行结束：在通知前端之前（持有实例锁时）标记连接不可用、代数加一（与停止 agent 时相同），
+/// 并取走这次运行的 agent。之后的清理只针对取走的这些和这一代，紧接着开始的新运行不受影响。
+pub(crate) fn finish_run<C, T, A, B>(
+    slots: ConnectionSlots<'_, C, T>,
+    clients: &mut Vec<A>,
+    children: &mut Vec<B>,
+) -> FinishedRun<A, B> {
     *slots.stopped = true;
+    *slots.generation = slots.generation.wrapping_add(1);
+    FinishedRun {
+        generation: *slots.generation,
+        clients: std::mem::take(clients),
+        children: std::mem::take(children),
+    }
 }
 
 /// 接上新的控制器：代数加一，交回旧的控制器与 Tasker，由调用方在锁外交给后台退役。
@@ -90,7 +108,7 @@ mod tests {
     #[test]
     fn restart_while_release_waits_never_reuses_the_old_controller() {
         let mut inst = Instance::new(1);
-        mark_run_finished(inst.slots());
+        finish_run(inst.slots(), &mut Vec::<u8>::new(), &mut Vec::<u8>::new());
         let scheduled = inst.generation; // release worker waits for the tasker here
         assert_eq!(inst.start_run(2), 2); // a quick restart gets a fresh connection
         assert!(take_for_release(inst.slots(), scheduled).is_none()); // the worker stands down
@@ -101,7 +119,7 @@ mod tests {
     #[test]
     fn release_first_then_restart_retires_once() {
         let mut inst = Instance::new(1);
-        mark_run_finished(inst.slots());
+        finish_run(inst.slots(), &mut Vec::<u8>::new(), &mut Vec::<u8>::new());
         let scheduled = inst.generation;
         let (taken, tasker) = take_for_release(inst.slots(), scheduled).unwrap();
         inst.retired.extend(taken);
@@ -117,6 +135,32 @@ mod tests {
         assert_eq!(old, None);
         let (old, tasker) = attach(inst.slots(), 3, |a, b| a == b);
         assert_eq!((old, tasker), (Some(1), None));
+    }
+
+    #[test]
+    fn cleanup_of_a_finished_run_never_touches_the_next_one() {
+        let mut inst = Instance::new(1);
+        let mut clients = vec![11];
+        let mut children = vec![21];
+        let finished = finish_run(inst.slots(), &mut clients, &mut children);
+        // A new run starts before the old one's cleanup runs: fresh controller, fresh agents.
+        assert_eq!(inst.start_run(2), 2);
+        clients.push(12);
+        children.push(22);
+        // The old cleanup only has what it took, and its release targets a generation that is gone.
+        assert_eq!((finished.clients, finished.children), (vec![11], vec![21]));
+        assert!(take_for_release(inst.slots(), finished.generation).is_none());
+        assert_eq!((clients, children), (vec![12], vec![22]));
+        assert_eq!(inst.controller, Some(2));
+        assert_eq!(inst.retired, vec![1]);
+    }
+
+    #[test]
+    fn without_a_new_run_the_release_takes_the_finished_connection() {
+        let mut inst = Instance::new(1);
+        let finished = finish_run(inst.slots(), &mut Vec::<u8>::new(), &mut Vec::<u8>::new());
+        let (taken, _) = take_for_release(inst.slots(), finished.generation).unwrap();
+        assert_eq!(taken, Some(1));
     }
 
     #[test]
