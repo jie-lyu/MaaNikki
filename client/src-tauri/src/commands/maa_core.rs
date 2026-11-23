@@ -937,8 +937,12 @@ pub async fn connect_controller_impl(
     super::maa_library::ensure_loaded(&state_arc)?;
     tokio::task::spawn_blocking(move || {
         let pool_key = (instance_id.clone(), config.clone());
+        // Mac 控制器从不进入连接池，也不从池中复用：每次连接都是新的，旧连接一律交给后台退役。
+        let use_pool = super::mac_connection::pool_reuse_allowed(&config);
         // ControllerPool: 检查该实例是否有可复用的已连接控制器
-        let pooled = {
+        let pooled = if !use_pool {
+            None
+        } else {
             let pool = state_arc
                 .controller_pool
                 .lock()
@@ -1195,7 +1199,7 @@ pub async fn connect_controller_impl(
         let conn_id = controller.post_connection().map_err(|e| e.to_string())?;
 
         // 存入 ControllerPool
-        {
+        if use_pool {
             let mut pool = state_arc
                 .controller_pool
                 .lock()
@@ -1640,30 +1644,24 @@ fn retire_macos_handles_in_background(instance_id: &str, controller: Option<Cont
         });
 }
 
-/// 运行结束（完成、失败或停止收尾）时把 Mac 连接标记为不可用并移出连接池，下次运行一律重新连接。
+/// 运行结束（完成、失败或停止收尾）时把 Mac 连接标记为不可用，下次运行一律重新连接。
 /// 必须在通知前端运行结束之前调用，避免紧接着的重新启动复用这个正在退役的控制器。
 pub fn mark_macos_connection_finished(state: &Arc<MaaState>, instance_id: &str) {
-    let key = {
-        let Ok(mut instances) = state.instances.lock() else {
-            return;
-        };
-        let Some(instance) = instances.get_mut(instance_id) else {
-            return;
-        };
-        let Some(config @ ControllerConfig::MacOS { .. }) = instance.controller_config.clone() else {
-            return;
-        };
-        super::mac_connection::mark_run_finished(super::mac_connection::ConnectionSlots {
-            controller: &mut instance.controller,
-            tasker: &mut instance.tasker,
-            stopped: &mut instance.controller_stopped,
-            generation: &mut instance.start_generation,
-        });
-        (instance_id.to_string(), config)
+    let Ok(mut instances) = state.instances.lock() else {
+        return;
     };
-    let evicted = state.controller_pool.lock().ok().and_then(|mut pool| pool.remove(&key));
-    // 池中的只是同一个控制器的另一份引用，实例仍持有它，这里丢弃不会触发原生析构。
-    drop(evicted);
+    let Some(instance) = instances.get_mut(instance_id) else {
+        return;
+    };
+    if !matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. })) {
+        return;
+    }
+    super::mac_connection::mark_run_finished(super::mac_connection::ConnectionSlots {
+        controller: &mut instance.controller,
+        tasker: &mut instance.tasker,
+        stopped: &mut instance.controller_stopped,
+        generation: &mut instance.start_generation,
+    });
 }
 
 /// 在单独线程里丢弃句柄，最多等待 `deadline`；超过期限返回 false，丢弃在后台继续完成。
@@ -1685,19 +1683,6 @@ fn try_release_controller_handles(
     only_if_desktop: bool,
     expected_generation: Option<u64>,
 ) -> Result<DesktopReleaseOutcome, String> {
-    // Mac：先移出连接池，再取走实例句柄，期间的重新连接只能新建连接。
-    let macos_key = state.instances.lock().ok().and_then(|instances| {
-        instances.get(instance_id).and_then(|instance| match &instance.controller_config {
-            Some(config @ ControllerConfig::MacOS { .. }) => Some((instance_id.to_string(), config.clone())),
-            _ => None,
-        })
-    });
-    let mut pre_evicted = Vec::new();
-    if let Some(key) = macos_key {
-        if let Ok(mut pool) = state.controller_pool.lock() {
-            pre_evicted.extend(pool.remove(&key));
-        }
-    }
     let (dropped_tasker, dropped_controller, exact_key, released_generation) = {
         let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
         let Some(instance) = instances.get_mut(instance_id) else {
@@ -1783,7 +1768,7 @@ fn try_release_controller_handles(
             .map_or(true, confirm_macos_release);
         // 原生析构会等待控制器自己的工作线程，没有期限；放到单独线程，调用方只等到期限为止。
         let disposed = dispose_with_deadline(
-            (dropped_tasker, dropped_controller, pooled_controllers, pre_evicted),
+            (dropped_tasker, dropped_controller, pooled_controllers),
             MACOS_RELEASE_CONFIRM_TIMEOUT,
         );
         if !confirmed || !disposed {

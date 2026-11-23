@@ -1,8 +1,15 @@
 //! macOS 连接在一次运行之后的归属规则。
 //!
 //! MaaNikki 的 Mac 控制模块记录自己按住的键和鼠标，旧连接必须先确认松开、再在后台丢弃，并且不能被
-//! 下一次运行复用。这里只有纯粹的状态转换（控制器和 Tasker 用泛型表示），实例代码在持有锁时调用，
-//! 测试用整数 ID 驱动各种先后顺序。
+//! 下一次运行复用。Mac 控制器因此不进连接池（`pool_reuse_allowed`）：每次连接都是新的原生控制器，
+//! 接上时由 `attach` 交回旧的交给后台退役。这里只有纯粹的状态转换（控制器和 Tasker 用泛型表示），
+//! 实例代码在持有锁时调用，测试用整数 ID 驱动各种先后顺序。
+
+/// 控制器能否进连接池、从池中复用。Mac 不能：池中复用会让刚结束或正在退役的连接被重新接上，
+/// 每次连接都新建，旧连接经 `attach` 交给后台退役。
+pub(crate) fn pool_reuse_allowed(config: &super::types::ControllerConfig) -> bool {
+    !matches!(config, super::types::ControllerConfig::MacOS { .. })
+}
 
 /// 一个实例上与连接归属有关的字段。
 pub(crate) struct ConnectionSlots<'a, C, T> {
@@ -110,6 +117,16 @@ mod tests {
         assert_eq!(old, None);
         let (old, tasker) = attach(inst.slots(), 3, |a, b| a == b);
         assert_eq!((old, tasker), (Some(1), None));
+    }
+
+    #[test]
+    fn mac_controllers_never_use_the_pool() {
+        use crate::commands::types::ControllerConfig;
+        let mac: ControllerConfig = serde_json::from_value(serde_json::json!({
+            "type": "MacOS", "handle": 1, "screencap_method": 2, "input_method": 3
+        }))
+        .unwrap();
+        assert!(!pool_reuse_allowed(&mac));
     }
 
     #[test]
