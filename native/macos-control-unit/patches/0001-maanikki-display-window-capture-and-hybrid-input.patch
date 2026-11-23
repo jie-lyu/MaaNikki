@@ -999,7 +999,7 @@ index 1d30e69..823eb4c 100644
  }
  
 diff --git a/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.h b/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.h
-index 4d8be65..22ddd7f 100644
+index 4d8be65..e4ce52b 100644
 --- a/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.h
 +++ b/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.h
 @@ -2,6 +2,7 @@
@@ -1026,7 +1026,7 @@ index 4d8be65..22ddd7f 100644
 +inline constexpr MaaMacOSInputMethod MaaMacOSInputMethod_Hybrid = MaaMacOSInputMethod_GlobalEvent | MaaMacOSInputMethod_PostToPid;
 +
 +// Reported in get_info() so the agent can tell this build from the official unit.
-+inline constexpr int kMaaNikkiPatchLevel = 1;
++inline constexpr int kMaaNikkiPatchLevel = 2; // 2: get_info() reports geometry_changed
 +
  MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Screencap/DisplayWindowScreencap.h b/source/MaaMacOSControlUnit/Screencap/DisplayWindowScreencap.h
