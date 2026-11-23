@@ -1,6 +1,8 @@
 """Build libMaaMacOSControlUnit.dylib from the pinned MaaFramework tag plus patches/.
 
     python3 -I native/macos-control-unit/build.py [--stock] [--work DIR] [--runtime-out DIR]
+    python3 -I native/macos-control-unit/build.py --unit-only [--work DIR]
+    python3 -I native/macos-control-unit/build.py --tests-only --test-arch x86_64 [--work DIR]
 
 Everything comes from upstream.lock.json: the MaaFramework tag and commit,
 the MaaUtils submodule commit, and the MaaDeps prebuilt dependencies by
@@ -16,6 +18,18 @@ development runs.
 
 The result keeps the official factory signature and version string, so the
 stock libMaaFramework.dylib loads it unchanged.
+
+The shipped unit is always arm64. By default (Apple silicon) the patched build
+also compiles and runs the fake-platform input tests natively. Intel CI runners
+cannot execute arm64, so they split the work, and each step proves only what it
+says:
+  --unit-only        the arm64 unit cross-compiles, has the expected load commands
+                     and architecture, and gets a manifest; no tests run.
+  --tests-only --test-arch x86_64
+                     the input logic tests pass on x86_64, compiled from the same
+                     sources and patches in a separate source tree, build directory
+                     and MaaDeps (maadeps_x64_tests in the lock). This is not the
+                     shipped binary: its behaviour is only verified on Apple silicon.
 """
 from __future__ import annotations
 
@@ -76,9 +90,9 @@ def tools(work: Path) -> Path:
     return venv / "bin"
 
 
-def source(work: Path) -> Path:
+def source(work: Path, name: str = "src") -> Path:
     pin = LOCK["maafw"]
-    src = work / "src"
+    src = work / name
     if not (src / ".git").exists():
         run("git", "clone", "--depth", "1", "--branch", pin["tag"], pin["repository"], src)
     head = run("git", "rev-parse", "HEAD", cwd=src)
@@ -98,12 +112,13 @@ def source(work: Path) -> Path:
     return src
 
 
-def maadeps(work: Path, src: Path) -> None:
-    """Extract the locked MaaDeps archive once per work directory.
+def maadeps(work: Path, src: Path, deps: dict | None = None, triplet: str | None = None) -> None:
+    """Extract the locked MaaDeps archive once per source tree (MaaUtils expects it inside the tree).
 
     Reuse trusts the extracted tree; CI and release builds use a fresh --work directory.
     """
-    deps = LOCK["maadeps"]
+    deps = deps or LOCK["maadeps"]
+    triplet = triplet or LOCK["build"]["triplet"]
     root = src / "source" / "MaaUtils" / "MaaDeps"
     marker = root / f".maanikki-{deps['sha256']}"
     if marker.exists():
@@ -111,8 +126,8 @@ def maadeps(work: Path, src: Path) -> None:
     archive = fetch(deps["url"], deps["sha256"], work / "downloads" / deps["name"])
     with tarfile.open(archive) as tar:
         tar.extractall(root, filter="data")
-    if not (root / "vcpkg" / "installed" / LOCK["build"]["triplet"]).is_dir():
-        sys.exit(f"{deps['name']} has no {LOCK['build']['triplet']} tree")
+    if not (root / "vcpkg" / "installed" / triplet).is_dir():
+        sys.exit(f"{deps['name']} has no {triplet} tree")
     marker.touch()
 
 
@@ -125,17 +140,22 @@ def patch(src: Path) -> list[str]:
     return applied
 
 
-def build(work: Path, src: Path, bin_dir: Path, variant: str) -> Path:
-    patched = variant == "patched"
-    build_dir = work / f"build-{variant}"
+def check_architecture(binary: Path, expected: str) -> None:
+    """The binary must contain exactly the expected architecture (lipo -archs)."""
+    archs = run("lipo", "-archs", binary).split()
+    if archs != [expected]:
+        sys.exit(f"{binary.name} is {archs}, expected [{expected!r}]")
+
+
+def configure(src: Path, build_dir: Path, bin_dir: Path, *, triplet: str, architecture: str, tests: bool) -> None:
     pin = LOCK["build"]
     off = ["ADB", "IOS", "CUSTOM", "PLAYCOVER", "RECORD", "REPLAY", "GAMEPAD", "LINUX", "WIN32", "ANDROID_NATIVE"]
     run(bin_dir / "cmake", "-S", src, "-B", build_dir, "-G", "Ninja",
         f"-DCMAKE_MAKE_PROGRAM={bin_dir / 'ninja'}",
         "-DCMAKE_BUILD_TYPE=Release",
-        f"-DMAADEPS_TRIPLET={pin['triplet']}",
+        f"-DMAADEPS_TRIPLET={triplet}",
         "-DCMAKE_OSX_SYSROOT=macosx",
-        f"-DCMAKE_OSX_ARCHITECTURES={pin['architecture']}",
+        f"-DCMAKE_OSX_ARCHITECTURES={architecture}",
         f"-DCMAKE_OSX_DEPLOYMENT_TARGET={pin['deployment_target']}",
         # The core logs a warning when a unit reports another version; keep the tag.
         f"-DMAA_HASH_VERSION={LOCK['maafw']['tag']}",
@@ -144,16 +164,45 @@ def build(work: Path, src: Path, bin_dir: Path, variant: str) -> Path:
         "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON",
         "-DWITH_MAA_AGENT=OFF", "-DENABLE_CCACHE=OFF",
         # The patch's HybridInput tests: an extra executable, not part of the unit.
-        f"-DMAANIKKI_UNIT_TESTS={'ON' if patched else 'OFF'}",
+        f"-DMAANIKKI_UNIT_TESTS={'ON' if tests else 'OFF'}",
         *[f"-DWITH_{name}_CONTROLLER=OFF" for name in off])
+
+
+def run_input_tests(bin_dir: Path, build_dir: Path, architecture: str) -> None:
+    run(bin_dir / "cmake", "--build", build_dir, "--target", "MaaNikkiHybridInputTest")
+    test = build_dir / "bin" / "MaaNikkiHybridInputTest"
+    check_architecture(test, architecture)
+    # Fake platform only: nothing is captured or sent. A failure stops the build.
+    run(test)
+
+
+def build(work: Path, src: Path, bin_dir: Path, variant: str, *, run_tests: bool = True) -> Path:
+    """The shipped-architecture (arm64) unit; with run_tests, also the input tests, natively."""
+    patched = variant == "patched"
+    build_dir = work / f"build-{variant}"
+    pin = LOCK["build"]
+    configure(src, build_dir, bin_dir, triplet=pin["triplet"], architecture=pin["architecture"], tests=patched)
     run(bin_dir / "cmake", "--build", build_dir, "--target", "MaaMacOSControlUnit")
-    if patched:
-        run(bin_dir / "cmake", "--build", build_dir, "--target", "MaaNikkiHybridInputTest")
-        # Fake platform only: nothing is captured or sent. A failure stops the build.
-        run(build_dir / "bin" / "MaaNikkiHybridInputTest")
+    if patched and run_tests:
+        run_input_tests(bin_dir, build_dir, pin["architecture"])
     unit = build_dir / "bin" / UNIT
     check_load_commands(unit)
+    check_architecture(unit, pin["architecture"])
     return unit
+
+
+def build_tests_for(work: Path, bin_dir: Path, architecture: str) -> None:
+    """The input tests for another architecture, from the same sources and patches, in their own
+    source tree (with that architecture's MaaDeps) and build directory. Never produces a unit."""
+    deps = LOCK["maadeps_x64_tests"]
+    if architecture != deps["architecture"]:
+        sys.exit(f"no MaaDeps pinned for {architecture} tests")
+    src = source(work, f"src-tests-{architecture}")
+    maadeps(work, src, deps, deps["triplet"])
+    patch(src)
+    build_dir = work / f"build-tests-{architecture}"
+    configure(src, build_dir, bin_dir, triplet=deps["triplet"], architecture=architecture, tests=True)
+    run_input_tests(bin_dir, build_dir, architecture)
 
 
 def check_load_commands(unit: Path) -> None:
@@ -201,24 +250,43 @@ def main() -> int:
     parser.add_argument("--stock", action="store_true", help="skip patches/ and build the upstream unit")
     parser.add_argument("--work", type=Path, default=REPO / ".build" / "macos-control-unit")
     parser.add_argument("--runtime-out", type=Path, help="write the stock runtime with this unit swapped in")
+    parser.add_argument("--unit-only", action="store_true",
+                        help="build and check the arm64 unit without running the input tests (Intel CI)")
+    parser.add_argument("--tests-only", action="store_true",
+                        help="build and run only the input tests, for --test-arch, from the same sources (Intel CI)")
+    parser.add_argument("--test-arch", choices=["x86_64"], help="architecture of --tests-only")
     args = parser.parse_args()
     if sys.platform != "darwin":
         sys.exit("the macOS control unit builds only on macOS")
+    if args.tests_only and (args.unit_only or args.stock or args.runtime_out or not args.test_arch):
+        sys.exit("--tests-only takes --test-arch and nothing that builds a unit")
+    if args.test_arch and not args.tests_only:
+        sys.exit("--test-arch only applies to --tests-only")
+    if args.unit_only and args.stock:
+        sys.exit("--unit-only builds the patched unit")
 
     work = args.work.resolve()
     work.mkdir(parents=True, exist_ok=True)
     bin_dir = tools(work)
+    if args.tests_only:
+        build_tests_for(work, bin_dir, args.test_arch)
+        print(f"input logic tests passed on {args.test_arch} from the same sources (not the shipped arm64 binary)")
+        return 0
     src = source(work)
     maadeps(work, src)
     applied = [] if args.stock else patch(src)
     variant = "stock" if args.stock else "patched"
-    unit = build(work, src, bin_dir, variant)
+    unit = build(work, src, bin_dir, variant, run_tests=not args.unit_only)
 
     out = work / "out" / variant
     out.mkdir(parents=True, exist_ok=True)
     shutil.copy2(unit, out / UNIT)
     manifest = {"maafw": LOCK["maafw"]["tag"], "commit": LOCK["maafw"]["commit"],
-                "patches": applied, "sha256": sha256(out / UNIT)}
+                "patches": applied, "sha256": sha256(out / UNIT), "architecture": LOCK["build"]["architecture"],
+                # Whether this build also ran the input tests natively on the shipped architecture.
+                "input_tests": ("skipped (--unit-only)" if args.unit_only
+                                else "not built (stock)" if args.stock
+                                else "passed on " + LOCK["build"]["architecture"])}
     (out / "build.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     if args.runtime_out:
         runtime_copy(work, out / UNIT, args.runtime_out.resolve())

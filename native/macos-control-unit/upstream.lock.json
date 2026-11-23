@@ -11,6 +11,14 @@
     "url": "https://github.com/MaaXYZ/MaaDeps/releases/download/v3.0.2/MaaDeps-arm64-osx.tar.xz",
     "sha256": "18a6ed056264f64f358dace52d45780ebf1b26943edef6df982d137d62333caf"
   },
+  "maadeps_x64_tests": {
+    "name": "MaaDeps-x64-osx.tar.xz",
+    "url": "https://github.com/MaaXYZ/MaaDeps/releases/download/v3.0.2/MaaDeps-x64-osx.tar.xz",
+    "sha256": "1335e9633ec10b2530ad093eff4d7a4f58c33840356bc05d5cece930a6363b49",
+    "triplet": "maa-x64-osx",
+    "architecture": "x86_64",
+    "purpose": "x86_64 build of the fake-platform input tests on Intel CI runners; never part of the shipped unit"
+  },
   "stock_runtime": {
     "name": "MAA-macos-aarch64-v5.16.1.zip",
     "url": "https://github.com/MaaXYZ/MaaFramework/releases/download/v5.16.1/MAA-macos-aarch64-v5.16.1.zip",
