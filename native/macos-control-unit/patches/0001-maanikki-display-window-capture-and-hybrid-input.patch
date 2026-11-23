@@ -211,10 +211,10 @@ index 344f217..2744be9 100644
 +endif()
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.h b/source/MaaMacOSControlUnit/Input/HybridInput.h
 new file mode 100644
-index 0000000..203fafc
+index 0000000..a51e913
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.h
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,162 @@
 +#pragma once
 +
 +#include <map>
@@ -244,9 +244,12 @@ index 0000000..203fafc
 +//   a press first moves the cursor there and lets the hover settle (the game acts on the hovered
 +//   control), then checks everything again;
 +// - relative mouse movement is a mouse-moved event with delta fields posted to the process;
-+// - a scroll hovers the point the core gave in its bare touch_move just before (checked, moved,
++// - a bare touch_move (no press held) hovers: the point is checked like a click's, the cursor moves
++//   there and stays (the agent hovers cards to read their tooltips and parks the cursor), and the
++//   user's position is put back by the next press or scroll, or by inactive()/release_all();
++// - a scroll hovers the point of the bare touch_move the core sends just before it (checked, moved,
 +//   settled and checked again like a press), sends the wheel through the global HID stream in lines
-+//   (120 Windows wheel units = 1 line), then puts the cursor back. A bare touch_move moves nothing;
++//   (120 Windows wheel units = 1 line), then puts the cursor back;
 +// - a scene button (touch_down with kScenePressPressure) presses where the cursor already is.
 +//
 +// Foreground only: every press, text and relative move requires the target's process to be the
@@ -336,6 +339,9 @@ index 0000000..203fafc
 +    // reads input once per frame and missed a 12 ms key press on the device. Releases from the stopping
 +    // thread never wait.
 +    void hold_at_least(std::unique_lock<std::mutex>& lock, double pressed_at_ms);
++    bool hover_locked(int x, int y);
++    // Puts the cursor back after a bare hover, unless a press or scroll took that over.
++    void end_hover_locked(const char* why);
 +    bool touch_up_locked(int contact);
 +    bool key_up_locked(int key);
 +
@@ -358,9 +364,12 @@ index 0000000..203fafc
 +    CGPoint saved_cursor_ = { NAN, NAN };
 +    // The contact whose press is hovering (the lock is released while the hover settles).
 +    std::optional<int> pending_contact_;
-+    // Frame point of the core's bare touch_move, which it sends right before scroll(): the point the
++    // Frame point of the last bare touch_move (the core sends one right before scroll()): the point the
 +    // next scroll hovers. Consumed by that scroll.
 +    std::optional<std::pair<int, int>> scroll_target_;
++    // The user's cursor before a bare touch_move hovered it somewhere; the next press or scroll restores
++    // this position when it ends, and inactive()/release_all() restore it if nothing else did.
++    std::optional<CGPoint> hover_saved_;
 +    // A scroll between its hover move and its wheel (the lock is released meanwhile); a release from
 +    // another thread (a stop) cancels it.
 +    bool scroll_pending_ = false;
@@ -370,10 +379,10 @@ index 0000000..203fafc
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
 new file mode 100644
-index 0000000..99d2f0c
+index 0000000..308a52f
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
-@@ -0,0 +1,674 @@
+@@ -0,0 +1,715 @@
 +#include "HybridInput.h"
 +
 +#include "InputUtils.h"
@@ -603,7 +612,8 @@ index 0000000..99d2f0c
 +    const bool restore = held_contacts_.empty();
 +    CGPoint original = { NAN, NAN };
 +    if (restore) {
-+        auto cursor = platform_->cursor();
++        // After a bare hover the user's position is the one saved before it.
++        auto cursor = hover_saved_ ? hover_saved_ : platform_->cursor();
 +        if (!cursor) {
 +            LogError << "cursor position unknown, cannot restore it afterwards; not sending" << VAR(contact);
 +            return false;
@@ -615,6 +625,7 @@ index 0000000..99d2f0c
 +        std::string restored = "not moved back (another contact is held)";
 +        if (restore && held_contacts_.empty()) {
 +            restored = restore_cursor(original);
++            hover_saved_.reset();
 +        }
 +        LogWarn << "press abandoned after the hover" << VAR(contact) << VAR(why) << VAR(restored);
 +        return false;
@@ -668,6 +679,7 @@ index 0000000..99d2f0c
 +    const double press_ms = ms_since(phase);
 +    if (restore) {
 +        saved_cursor_ = original;
++        hover_saved_.reset(); // the release puts the cursor back now
 +    }
 +    held_contacts_[contact] = { *settled, info.mouse_button };
 +    LogInfo << "hover settled, press accepted" << VAR(contact) << VAR(settled->x) << VAR(settled->y) << VAR(first_check_ms)
@@ -744,8 +756,7 @@ index 0000000..99d2f0c
 +    // to the scroll position" right before scroll(), which hovers that point itself.
 +    auto held = held_contacts_.find(contact);
 +    if (held == held_contacts_.end()) {
-+        scroll_target_ = std::make_pair(x, y);
-+        return false;
++        return hover_locked(x, y);
 +    }
 +    if (held->second.scene) {
 +        // A scene button never drags: moving the cursor in the scene turns the camera.
@@ -778,6 +789,42 @@ index 0000000..99d2f0c
 +        lock.unlock();
 +        platform_->sleep_ms(static_cast<int>(std::ceil(remaining)));
 +        lock.lock();
++    }
++}
++
++bool HybridInput::hover_locked(int x, int y)
++{
++    scroll_target_ = std::make_pair(x, y);
++    if (!held_contacts_.empty()) {
++        // A held button (a scene press) would turn the camera if the cursor moved.
++        LogError << "hover while a mouse button is held, not moving" << VAR(x) << VAR(y);
++        return false;
++    }
++    auto point = checked_point(x, y, "hover");
++    if (!point) {
++        return false;
++    }
++    if (!hover_saved_) {
++        auto cursor = platform_->cursor();
++        if (!cursor) {
++            LogError << "cursor position unknown, cannot restore it afterwards; not moving" << VAR(x) << VAR(y);
++            return false;
++        }
++        hover_saved_ = *cursor;
++    }
++    if (!platform_->post_mouse(kCGEventMouseMoved, *point, kCGMouseButtonLeft)) {
++        return false;
++    }
++    LogInfo << "hover moved" << VAR(point->x) << VAR(point->y);
++    return true;
++}
++
++void HybridInput::end_hover_locked(const char* why)
++{
++    if (hover_saved_ && held_contacts_.empty()) {
++        std::string restored = restore_cursor(*hover_saved_);
++        hover_saved_.reset();
++        LogInfo << "hover ended" << VAR(why) << VAR(restored);
 +    }
 +}
 +
@@ -938,11 +985,12 @@ index 0000000..99d2f0c
 +    if (!point) {
 +        return false;
 +    }
-+    auto original = platform_->cursor();
++    auto original = hover_saved_ ? hover_saved_ : platform_->cursor();
 +    if (!original) {
 +        LogError << "cursor position unknown, cannot restore it afterwards; not sending" << VAR(dx) << VAR(dy);
 +        return false;
 +    }
++    hover_saved_.reset(); // this scroll puts the cursor back when it ends
 +    auto finish = [&](const char* why) {
 +        std::string restored = held_contacts_.empty() ? restore_cursor(*original) : "not moved back (a contact is held)";
 +        LogWarn << "scroll abandoned after the hover" << VAR(why) << VAR(restored);
@@ -1003,6 +1051,7 @@ index 0000000..99d2f0c
 +    std::lock_guard lock(mutex_);
 +    bool released = release_all_locked();
 +    cancel_pending_from_stop();
++    end_hover_locked("release_all");
 +    return released;
 +}
 +
@@ -1013,6 +1062,7 @@ index 0000000..99d2f0c
 +    cancelled_contacts_.clear();
 +    cancelled_keys_.clear();
 +    cancel_pending_from_stop();
++    end_hover_locked("inactive");
 +    return released;
 +}
 +
@@ -1736,10 +1786,10 @@ index 0000000..c17723a
 +MAA_CTRL_UNIT_NS_END
 diff --git a/test/maanikki/HybridInputTest.mm b/test/maanikki/HybridInputTest.mm
 new file mode 100644
-index 0000000..811968b
+index 0000000..b435841
 --- /dev/null
 +++ b/test/maanikki/HybridInputTest.mm
-@@ -0,0 +1,660 @@
+@@ -0,0 +1,707 @@
 +// Deterministic tests for HybridInput over a fake InputPlatform: orderings a real desktop cannot
 +// reproduce on demand (a stop racing a press), and every refusal path. Nothing reaches the system.
 +// Built only with -DMAANIKKI_UNIT_TESTS=ON; never part of the shipped unit.
@@ -2226,15 +2276,16 @@ index 0000000..811968b
 +void scroll_hovers_the_core_position_wheels_and_restores()
 +{
 +    Fixture t;
-+    CHECK(!t.input->touch_move(0, 100, 200, 0)); // the core's "move to the scroll position": nothing moves
-+    CHECK(t.platform->take().empty());
++    CHECK(t.input->touch_move(0, 100, 200, 0)); // the core's "move to the scroll position": a hover
++    CHECK((t.platform->take() == Events { "move@50,100" }));
 +    CHECK(t.input->scroll(0, -480));
 +    CHECK(t.platform->slept >= 300);
++    // Put back where the user had it before the hover, not at the hover point.
 +    CHECK((t.platform->take() == Events { "move@50,100", "wheel@50,100 y=-4 x=0", "warp@7,7" }));
 +    CHECK(!t.input->scroll(0, 120)); // the position was consumed: no wheel at a stale point
-+    CHECK(!t.input->touch_move(0, 100, 200, 0));
++    CHECK(t.input->touch_move(0, 100, 200, 0));
 +    CHECK(t.input->scroll(0, 60)); // less than a notch still moves one line
-+    CHECK((t.platform->take() == Events { "move@50,100", "wheel@50,100 y=1 x=0", "warp@7,7" }));
++    CHECK((t.platform->take() == Events { "move@50,100", "move@50,100", "wheel@50,100 y=1 x=0", "warp@7,7" }));
 +}
 +
 +void scroll_is_refused_like_a_press()
@@ -2247,9 +2298,9 @@ index 0000000..811968b
 +    t.platform->front = kGame;
 +    CHECK(t.platform->take().empty());
 +    t.platform->on_sleep = [&] { t.platform->front = 999; }; // the user switches apps while settling
-+    CHECK(!t.input->touch_move(0, 100, 200, 0));
++    CHECK(t.input->touch_move(0, 100, 200, 0));
 +    CHECK(!t.input->scroll(0, 120));
-+    CHECK((t.platform->take() == Events { "move@50,100", "warp@7,7" }));
++    CHECK((t.platform->take() == Events { "move@50,100", "move@50,100", "warp@7,7" }));
 +    t.platform->on_sleep = nullptr;
 +    t.platform->front = kGame;
 +    t.platform->cursor_at = CGPointMake(960, 540);
@@ -2306,9 +2357,9 @@ index 0000000..811968b
 +    t.platform->take();
 +    CHECK(t.input->key_down(59)); // Control held: the wheel would zoom
 +    t.platform->take();
-+    CHECK(!t.input->touch_move(0, 100, 200, 0));
++    CHECK(t.input->touch_move(0, 100, 200, 0)); // hovering itself is fine
 +    CHECK(!t.input->scroll(0, 120));
-+    CHECK(t.platform->take().empty());
++    CHECK((t.platform->take() == Events { "move@50,100" }));
 +}
 +
 +void stop_during_the_scroll_hover_cancels_the_wheel()
@@ -2322,10 +2373,10 @@ index 0000000..811968b
 +    };
 +    int hit_tests = 0;
 +    t.platform->on_hit_test = [&] { ++hit_tests; };
-+    CHECK(!t.input->touch_move(0, 100, 200, 0));
++    CHECK(t.input->touch_move(0, 100, 200, 0));
 +    CHECK(!t.input->scroll(0, 120));
-+    CHECK(hit_tests == 1); // no second hit test once cancelled
-+    CHECK((t.platform->take() == Events { "move@50,100", "warp@7,7" }));
++    CHECK(hit_tests == 2); // the hover's and the scroll's first check; no second check once cancelled
++    CHECK((t.platform->take() == Events { "move@50,100", "move@50,100", "warp@7,7" }));
 +}
 +
 +void stop_during_the_scene_press_checks_cancels_it()
@@ -2364,6 +2415,49 @@ index 0000000..811968b
 +                                          "rdown@960,540", "rup@960,540", "key_down 13 pid=100", "key_up 13 pid=100" }));
 +}
 +
++void bare_touch_move_hovers_and_the_next_press_restores_the_users_cursor()
++{
++    Fixture t;
++    CHECK(t.input->touch_move(0, 100, 200, 0)); // hover a card to read its tooltip
++    CHECK(t.input->touch_move(0, 300, 200, 0)); // park elsewhere: the saved position stays the first one
++    CHECK(t.input->touch_down(0, 100, 200, 0));
++    CHECK(t.input->touch_up(0));
++    CHECK((t.platform->take() == Events { "move@50,100", "move@150,100", "move@50,100", "down@50,100", "up@50,100", "warp@7,7" }));
++    CHECK(t.input->touch_move(0, 100, 200, 0));
++    CHECK(t.input->inactive()); // the task ends while hovering: the cursor goes back
++    CHECK(t.input->inactive()); // once
++    CHECK((t.platform->take() == Events { "move@50,100", "warp@7,7" }));
++}
++
++void hover_is_refused_like_a_click_and_never_moves_a_held_scene_press()
++{
++    Fixture t;
++    t.platform->front = 999;
++    CHECK(!t.input->touch_move(0, 100, 200, 0));
++    t.platform->front = kGame;
++    t.platform->hit_pid = 555;
++    CHECK(!t.input->touch_move(0, 100, 200, 0));
++    t.platform->hit_pid = kGame;
++    t.platform->cursor_at = CGPointMake(960, 540);
++    CHECK(t.input->touch_down(1, 0, 0, HybridInput::kScenePressPressure));
++    CHECK(!t.input->touch_move(0, 100, 200, 0)); // the camera would turn
++    CHECK(t.input->touch_up(1));
++    CHECK((t.platform->take() == Events { "rdown@960,540", "rup@960,540" }));
++    t.platform->cursor_known = false;
++    CHECK(!t.input->touch_move(0, 100, 200, 0)); // could not be put back
++    CHECK(t.platform->take().empty());
++}
++
++void abandoned_press_after_a_hover_restores_the_users_cursor()
++{
++    Fixture t;
++    CHECK(t.input->touch_move(0, 300, 200, 0));
++    t.platform->reject_downs = true;
++    CHECK(!t.input->touch_down(0, 100, 200, 0));
++    CHECK(t.input->inactive());
++    CHECK((t.platform->take() == Events { "move@150,100", "move@50,100", "warp@7,7" })); // once, to the user's place
++}
++
 +} // namespace
 +
 +int main()
@@ -2397,6 +2491,9 @@ index 0000000..811968b
 +    stop_during_the_scroll_hover_cancels_the_wheel();
 +    stop_during_the_scene_press_checks_cancels_it();
 +    short_presses_last_a_game_frame_but_stops_never_wait();
++    bare_touch_move_hovers_and_the_next_press_restores_the_users_cursor();
++    hover_is_refused_like_a_click_and_never_moves_a_held_scene_press();
++    abandoned_press_after_a_hover_restores_the_users_cursor();
 +    std::printf(failures ? "HybridInputTest: %d failure(s)\n" : "HybridInputTest: all passed\n", failures);
 +    return failures ? 1 : 0;
 +}
