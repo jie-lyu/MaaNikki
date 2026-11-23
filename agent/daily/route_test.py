@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from file_io import write_json
 
-import ctypes
 from copy import deepcopy
 from datetime import datetime
 import json
@@ -289,12 +288,7 @@ def navigation_route(model):
 
 
 class TestInputs(ForegroundInput):
-    def focus_details(self):
-        hwnd = self.user32.GetForegroundWindow()
-        text = ctypes.create_unicode_buffer(1024)
-        if hwnd:
-            self.user32.GetWindowTextW(hwnd, text, len(text))
-        return {"game_hwnd": self.hwnd, "foreground_hwnd": int(hwnd or 0), "foreground_title": text.value}
+    """Foreground input for route tests; focus details come from the host target."""
 
 
 class TestTeleporter(Teleporter):

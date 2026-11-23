@@ -185,6 +185,21 @@ class ForegroundInputDelegationTests(unittest.TestCase):
         self.assertFalse(self.make(background, capture_requires_foreground=True).capturable())
         self.assertFalse(self.make(FakeUser32(iconic=True)).capturable())
 
+    def test_background_input_comes_from_the_host_backend(self):
+        from navigation.controller import BackgroundInput
+        with patch.object(host.os, "name", "posix"):
+            with self.assertRaisesRegex(NavigationError, "前台导航仅支持 Windows 游戏窗口。"):
+                BackgroundInput(Mock(), lambda: False)
+        user32 = Mock(hwnd=0x10)
+        with patch.object(host.os, "name", "nt"), \
+                patch("navigation.controller.connect_target", return_value=target(user32)):
+            inputs = BackgroundInput(Mock(), lambda: False)
+        from host.win32.background_input import BackgroundInput as Win32BackgroundInput
+        self.assertIsInstance(inputs, Win32BackgroundInput)
+        self.assertTrue(inputs.window_only)
+        self.assertIs(inputs.user32, user32)
+        self.assertEqual(inputs.hwnd, 0x10)
+
     def test_session_brings_the_game_back_through_the_target(self):
         from task_control import ForegroundSession
         adapter = SimpleNamespace(target=Mock(), controller=Mock())

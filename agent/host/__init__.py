@@ -75,7 +75,8 @@ class InputBackend(Protocol):
     The neutral input class tracks held keys and buttons and guarantees their
     release; these primitives release without the agent channel or refocusing.
     Keys are Win32 virtual-key integers. The Win32 implementation is
-    host/win32/input.py; BackgroundInput still lives in navigation/controller.py.
+    host/win32/input.py; window-targeted background input is
+    host/win32/background_input.py.
     """
 
     def force_key_up(self, key: int) -> None: ...
@@ -124,6 +125,15 @@ def connect_target(controller) -> Target:
         raise NavigationError("无法读取当前连接的游戏窗口，请重新连接后再试。") from error
     from host.win32.target import Win32Target
     return Win32Target(info)
+
+
+def background_input_class():
+    """Window-targeted input class for this desktop; raises NavigationError where there is none."""
+    if platform_backend() != "win32":
+        from navigation.models import NavigationError
+        raise NavigationError("前台导航仅支持 Windows 游戏窗口。")
+    from host.win32.background_input import BackgroundInput
+    return BackgroundInput
 
 
 def capabilities(backend: str | None) -> Capabilities:

@@ -370,6 +370,7 @@
   },
   "test_host.py": {
    "tests": [
+    "ForegroundInputDelegationTests.test_background_input_comes_from_the_host_backend",
     "ForegroundInputDelegationTests.test_capturable_requires_foreground_only_for_screen_capture",
     "ForegroundInputDelegationTests.test_session_brings_the_game_back_through_the_target",
     "ForegroundInputDelegationTests.test_window_handle_and_focus_come_from_the_target",

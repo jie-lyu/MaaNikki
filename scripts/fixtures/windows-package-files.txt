@@ -100,6 +100,7 @@ agent/game_keys_reader.py
 agent/game_view.py
 agent/host/__init__.py
 agent/host/win32/__init__.py
+agent/host/win32/background_input.py
 agent/host/win32/gdi.py
 agent/host/win32/hud.py
 agent/host/win32/input.py

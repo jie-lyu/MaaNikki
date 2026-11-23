@@ -74,7 +74,7 @@ class Win32Input:
     def last_error(self) -> int:
         return ctypes.get_last_error()
 
-    # Raw helpers for BackgroundInput until it moves into this backend.
+    # Raw helpers used by BackgroundInput.
     def send_mouse(self, flags, *, dx=0, dy=0, data=0) -> bool:
         return send_mouse(self.user32, flags, dx=dx, dy=dy, data=data)
 
