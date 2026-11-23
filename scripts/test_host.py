@@ -212,6 +212,23 @@ class Win32InputTests(unittest.TestCase):
         self.assertEqual(alt[1], 0x0104)
 
 
+    def test_physical_keys_read_the_high_bit_of_async_key_state(self):
+        from host.win32.input import Win32PhysicalKeys
+        user32 = Mock()
+        user32.GetAsyncKeyState.side_effect = lambda key: {87: -32768, 32: 1}.get(key, 0)
+        with patch("host.win32.input.ctypes.WinDLL", create=True, return_value=user32):
+            keys = Win32PhysicalKeys()
+        self.assertTrue(keys.down(87))
+        self.assertFalse(keys.down(32))  # only the "pressed since last call" bit
+        self.assertFalse(keys.down(65))
+
+    def test_route_recorder_polls_keys_through_the_input_backend(self):
+        from daily.route_studio import KeyWatcher
+        inputs = SimpleNamespace(native=Mock())
+        watcher = KeyWatcher(inputs, {87: "key:forward"})
+        self.assertIs(watcher.keys, inputs.native.physical_keys.return_value)
+
+
 class ForegroundInputDelegationTests(unittest.TestCase):
     def make(self, user32, **kwargs):
         from navigation.controller import ForegroundInput

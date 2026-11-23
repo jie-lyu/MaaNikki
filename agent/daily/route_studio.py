@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-import ctypes
 from datetime import datetime
 import json
 import math
@@ -55,9 +54,7 @@ class KeyWatcher(threading.Thread):
     def __init__(self, inputs, watched):
         super().__init__(daemon=True)
         self.inputs, self.watched = inputs, watched
-        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
-        self.user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
-        self.user32.GetAsyncKeyState.restype = ctypes.c_short
+        self.keys = inputs.native.physical_keys()
         self.finished = threading.Event()
         self.lock = threading.Lock()
         self.events = []
@@ -69,7 +66,7 @@ class KeyWatcher(threading.Thread):
             focused = self.inputs.foreground()
             now = wall_time.monotonic()
             for code, kind in self.watched.items():
-                down = focused and bool(self.user32.GetAsyncKeyState(code) & 0x8000)
+                down = focused and self.keys.down(code)
                 if down and code not in held:
                     held[code] = now
                     # Game keys are kept on release, once their hold time is known.

@@ -74,9 +74,25 @@ class Win32Input:
     def last_error(self) -> int:
         return ctypes.get_last_error()
 
+    def physical_keys(self) -> "Win32PhysicalKeys":
+        """Reader for the user's physical key state (route recording)."""
+        return Win32PhysicalKeys()
+
     # Raw helpers used by BackgroundInput.
     def send_mouse(self, flags, *, dx=0, dy=0, data=0) -> bool:
         return send_mouse(self.user32, flags, dx=dx, dy=dy, data=data)
 
     def window_key_spec(self, key: int):
         return _window_key_spec(self.user32, key)
+
+
+class Win32PhysicalKeys:
+    """Physical key state through GetAsyncKeyState (moved from route_studio's KeyWatcher)."""
+
+    def __init__(self):
+        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
+        self.user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+        self.user32.GetAsyncKeyState.restype = ctypes.c_short
+
+    def down(self, key: int) -> bool:
+        return bool(self.user32.GetAsyncKeyState(key) & 0x8000)
