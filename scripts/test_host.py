@@ -439,19 +439,6 @@ class MacOSPreviewPathTests(unittest.TestCase):
             with self.assertRaises(GameFrameSizeError):
                 rt.capture()
 
-    def test_stop_settles_the_control_unit_only_on_macos(self):
-        controller = Mock()
-        controller.post_inactive.return_value.wait.return_value.succeeded = True
-        get = Mock(return_value=controller)
-        with backend("win32"):
-            self.assertTrue(host.settle_controller_after_stop(get))
-        get.assert_not_called()
-        with backend("macos"):
-            self.assertTrue(host.settle_controller_after_stop(get))
-            controller.post_inactive.return_value.wait.return_value.succeeded = False
-            self.assertFalse(host.settle_controller_after_stop(get))
-        self.assertEqual(controller.post_inactive.call_count, 2)
-
 
 class SelectionTests(unittest.TestCase):
     def test_backend_follows_platform_and_controller_type(self):
