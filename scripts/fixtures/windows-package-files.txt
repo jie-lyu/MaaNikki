@@ -3,7 +3,7 @@
 # generated: MaaNikki.exe
 # generated: licenses/MaaFramework-LGPL-3.0.md
 # generated: licenses/dependencies/**
-# generated: maafw/*.dll
+# generated: maafw/**/*.dll
 # generated: maafw/MaaAgentBinary/**
 # generated: maafw/integrity.json
 # generated: python/**

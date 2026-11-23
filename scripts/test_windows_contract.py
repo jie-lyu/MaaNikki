@@ -53,7 +53,8 @@ GENERATED_ENTRIES = (
     "MaaNikki.exe",
     "licenses/MaaFramework-LGPL-3.0.md",
     "licenses/dependencies/**",
-    "maafw/*.dll",
+    # prepare() copies every bin/**.dll of the SDK, including subfolders such as plugins/.
+    "maafw/**/*.dll",
     "maafw/MaaAgentBinary/**",
     "maafw/integrity.json",
     "python/**",
@@ -204,6 +205,10 @@ def _matches(relative: str, patterns) -> bool:
         if pattern.endswith("/**"):
             if relative.startswith(pattern[:-2]):
                 return True
+        elif "/**/" in pattern:
+            prefix, tail = pattern.split("/**/", 1)
+            if relative.startswith(prefix + "/") and fnmatchcase(relative.rsplit("/", 1)[-1], tail):
+                return True
         elif "/" in pattern and fnmatchcase(relative, pattern) and relative.count("/") == pattern.count("/"):
             return True
         elif relative == pattern:
@@ -319,7 +324,8 @@ class ContractHelperTests(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as folder:
             runtime = Path(folder)
-            for name in ("interface.json", "agent/main.py", "maafw/MaaFramework.dll", "maafw/integrity.json",
+            for name in ("interface.json", "agent/main.py", "maafw/MaaFramework.dll", "maafw/plugins/Demo.dll",
+                         "maafw/integrity.json",
                          "python/python.exe", "runtime-manifest.json", "maafw/MaaAgentBinary/x/y.bin",
                          "licenses/MaaFramework-LGPL-3.0.md", "debug/maa.log", "stray.txt"):
                 (runtime / name).parent.mkdir(parents=True, exist_ok=True)

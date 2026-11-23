@@ -35,15 +35,20 @@ jobs:
         # Includes the agent import/registration check and MaaFramework resource loading.
         run: python scripts/release.py prepare --output .build/ci-runtime
       - name: Compare the prepared runtime with the package inventory
-        # Also records the generated runtime files for scripts/fixtures/windows-runtime-generated.txt.
-        # Remove --bootstrap-runtime-recording once that recording is reviewed and committed.
-        run: python -B scripts/test_windows_contract.py --runtime .build/ci-runtime --record-runtime .build/ci-results/windows-runtime-generated.txt --bootstrap-runtime-recording
+        id: contract
+        # Keep going on failure so the suites still run and their outcomes are uploaded;
+        # the last step fails the job. Also records the generated runtime files.
+        continue-on-error: true
+        run: python -B scripts/test_windows_contract.py --runtime .build/ci-runtime --record-runtime .build/ci-results/windows-runtime-generated.txt
       - name: Place the runtime where the suites expect it
         shell: pwsh
         run: |
           Move-Item -LiteralPath .build/ci-runtime/python -Destination python
           Move-Item -LiteralPath .build/ci-runtime/maafw -Destination maafw
       - name: Install client dependencies
+        id: client
+        # On failure the Python suites still run; the last step fails the job.
+        continue-on-error: true
         shell: pwsh
         run: |
           $packageManager = (Get-Content -LiteralPath 'client/package.json' -Raw | ConvertFrom-Json).packageManager
@@ -73,6 +78,10 @@ jobs:
           path: .build/ci-results/
           if-no-files-found: warn
           retention-days: 14
+      - name: Fail if an earlier check failed
+        if: steps.contract.outcome == 'failure' || steps.client.outcome == 'failure'
+        shell: pwsh
+        run: throw 'Contract comparison or client checks failed; see the steps above.'
 
   client-check:
     runs-on: windows-2022

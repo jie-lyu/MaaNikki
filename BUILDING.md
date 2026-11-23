@@ -163,7 +163,7 @@ python scripts/run_offline_tests.py --python python/python.exe
 
 `scripts/test_windows_contract.py` 用标准库运行，任何系统都可执行。它固定 Windows 用户实际得到的内容：合并导入并按 Windows 过滤后的接口定义（控制器、agent、前置任务、任务与选项的标识和默认值），以及 Windows 包的文件清单。快照位于 `scripts/fixtures/windows-contract.json` 和 `scripts/fixtures/windows-package-files.txt`。有意修改这些内容时运行 `python -B scripts/test_windows_contract.py --update`，并在评审中核对快照差异。`scripts/test_windows_contract.cjs` 以 Windows 后端运行客户端实际的接口加载代码，确认结果与上述快照一致，并固定 Win32 控制器的截图与输入配置（`scripts/fixtures/windows-controller-config.json`）。
 
-工作流还会把准备好的运行环境中由下载生成的文件（`python/`、`maafw/` 等）写入附件中的 `windows-runtime-generated.txt`。提交为 `scripts/fixtures/windows-runtime-generated.txt` 后，这些文件也按清单逐一比对；提交后应删除工作流中的 `--bootstrap-runtime-recording`，此后缺少该文件会使检查失败。`MaaNikki.exe` 与依赖许可证只在发布构建中生成，不在此工作流的比对范围内。
+工作流还会把准备好的运行环境中由下载生成的文件（`python/`、`maafw/` 等）写入附件中的 `windows-runtime-generated.txt`。该清单已提交为 `scripts/fixtures/windows-runtime-generated.txt`，这些文件按清单逐一比对，缺少清单文件也会使检查失败；锁定的下载变化后，以工作流附件中的新清单核对后更新。运行环境比对失败时，工作流仍会继续运行离线测试并上传附件，最后再判定失败。`MaaNikki.exe` 与依赖许可证只在发布构建中生成，不在此工作流的比对范围内。
 
 ## 源码公开范围
 
