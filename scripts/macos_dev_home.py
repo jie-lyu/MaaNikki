@@ -5,23 +5,24 @@
 
 A debug build of the client reads interface.json, resource/, tasks/, maafw/ and the agent from
 MAANIKKI_DEV_HOME (client/src-tauri/src/commands/utils.rs). This script fills that directory the
-way a macOS package will: the repository's resource directories are linked, interface.json is
-written with the macOS agent command, maafw/ is the official runtime with MaaNikki's patched
-control unit (native/macos-control-unit/build.py --runtime-out), and python/ is a virtual
-environment with requirements.txt. The repository's interface.json keeps the Windows command, so
-nothing here touches what Windows users get. User data still goes to
-~/Library/Application Support/MaaNikki.
+way a macOS package will: the repository's resource directories are linked, interface.json is the
+repository's with build/macos/interface-overlay.json applied (the macOS agent command and the
+nikki_macos controller), maafw/ is the official runtime with MaaNikki's patched control unit
+(native/macos-control-unit/build.py --runtime-out), and python/ is a virtual environment with
+requirements.txt. The repository's interface.json, which the Windows package copies unchanged,
+is not touched. User data still goes to ~/Library/Application Support/MaaNikki.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-# Agent command inside a macOS home or package: the embedded interpreter's layout.
-MAC_AGENT_CHILD_EXEC = "./python/bin/python3"
+OVERLAY = ROOT / "build" / "macos" / "interface-overlay.json"
+PATCHED_BUILD = ROOT / ".build" / "macos-control-unit" / "out" / "patched" / "build.json"
 LINKED = ("agent", "ai", "resource", "tasks", "options", "docs", "licenses")
 MARKER = ".maanikki-macos-dev-home"
 
@@ -50,6 +51,13 @@ def main() -> int:
         sys.exit(f"{venv} is not a virtual environment; create it with Python 3.12 and requirements.txt")
     if not (runtime / "libMaaFramework.dylib").exists() or not (runtime / ".maanikki-control-unit-runtime").exists():
         sys.exit(f"{runtime} is not a runtime from native/macos-control-unit/build.py --runtime-out")
+    # A stock runtime also carries the build.py marker; only the patched unit can drive the game.
+    if not PATCHED_BUILD.exists():
+        sys.exit(f"{PATCHED_BUILD} is missing; run native/macos-control-unit/build.py first")
+    expected = json.loads(PATCHED_BUILD.read_text(encoding="utf-8"))["sha256"]
+    actual = hashlib.sha256((runtime / "libMaaMacOSControlUnit.dylib").read_bytes()).hexdigest()
+    if actual != expected:
+        sys.exit(f"{runtime} does not hold the patched control unit ({actual[:12]} != {expected[:12]})")
     if home.exists() and any(home.iterdir()) and not (home / MARKER).exists():
         sys.exit(f"{home} exists and was not written by this script")
     home.mkdir(parents=True, exist_ok=True)
@@ -61,9 +69,11 @@ def main() -> int:
     link(home / "python", venv)
 
     interface = json.loads((ROOT / "interface.json").read_text(encoding="utf-8"))
+    overlay = json.loads(OVERLAY.read_text(encoding="utf-8"))
     agents = interface["agent"] if isinstance(interface["agent"], list) else [interface["agent"]]
     for agent in agents:
-        agent["child_exec"] = MAC_AGENT_CHILD_EXEC
+        agent.update(overlay["agent"])
+    interface["controller"] = [*interface["controller"], *overlay["controller"]]
     target = home / "interface.json"
     if target.is_symlink():
         target.unlink()

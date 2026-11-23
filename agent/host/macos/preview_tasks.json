@@ -1,0 +1,6 @@
+{
+  "comment": "Pipeline entries of the tasks the macOS preview runs. Read by the agent (host.macos) and by the client before submitting tasks. Add an entry only after the task passed on a real Mac (docs/macos-support-plan.md, task order).",
+  "entries": [
+    "MaaNikki_Mailbox"
+  ]
+}
