@@ -238,7 +238,7 @@ impl Drop for AgentOutputBatcher {
 }
 
 /// 发送 Agent 输出事件（Tauri WebView + WebSocket 浏览器客户端）
-fn emit_agent_output(app: &tauri::AppHandle, instance_id: &str, stream: &str, line: &str) {
+pub(crate) fn emit_agent_output(app: &tauri::AppHandle, instance_id: &str, stream: &str, line: &str) {
     let clean_line = strip_ansi_escapes(line);
 
     // 广播到所有 WebSocket 客户端

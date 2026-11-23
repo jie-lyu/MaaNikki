@@ -1551,6 +1551,45 @@ pub fn is_desktop_window_controller(config: &ControllerConfig) -> bool {
     )
 }
 
+/// macOS 自编译控制模块：停止或结束后确认已松开全部输入的期限。
+const MACOS_RELEASE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
+const MACOS_RELEASE_UNCONFIRMED_MESSAGE: &str =
+    "停止后未能确认 Mac 控制模块已松开全部按键和鼠标；下次运行会重新连接游戏。若游戏里有按键卡住，请在游戏中按一下对应的键。";
+
+/// 轮询一个控制器操作直到结束或超过期限；超过期限返回 None。
+/// 不调用阻塞的 wait()：对端一直不结束时也必须能返回。
+fn poll_until_done(
+    mut status: impl FnMut() -> MaaStatus,
+    timeout: Duration,
+    step: Duration,
+) -> Option<bool> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let current = status();
+        if current.done() {
+            return Some(current.succeeded());
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(step);
+    }
+}
+
+/// 让 MaaNikki 的 Mac 控制模块松开仍按住的键和鼠标，并在期限内确认结果。
+/// 控制模块的 inactive() 在有松开发不出去时返回失败；主库自己在任务结束时的那次调用不检查结果，
+/// 也可能因为停止而没有执行，所以释放控制器之前在客户端再确认一次。
+fn confirm_macos_release(controller: &Controller) -> bool {
+    let Ok(id) = controller.post_inactive() else {
+        return false;
+    };
+    poll_until_done(
+        || controller.status(id),
+        MACOS_RELEASE_CONFIRM_TIMEOUT,
+        Duration::from_millis(20),
+    ) == Some(true)
+}
+
 fn try_release_controller_handles(
     app: &tauri::AppHandle,
     state: &Arc<MaaState>,
@@ -1612,6 +1651,22 @@ fn try_release_controller_handles(
         (dropped_tasker, dropped_controller, exact_key)
     };
 
+    // 已停止的连接不会被复用（controller_stopped 使下次运行重新连接）；Mac 控制模块在丢弃前确认松开。
+    let is_macos = exact_key
+        .as_ref()
+        .is_some_and(|(_, cfg)| matches!(cfg, ControllerConfig::MacOS { .. }));
+    if is_macos {
+        if let Some(controller) = dropped_controller.as_ref() {
+            if !confirm_macos_release(controller) {
+                warn!(
+                    "[ControllerRelease] macOS control unit did not confirm releasing held input for instance {}",
+                    instance_id
+                );
+                super::maa_agent::emit_agent_output(app, instance_id, "stderr", MACOS_RELEASE_UNCONFIRMED_MESSAGE);
+            }
+        }
+    }
+
     let mut pooled_controllers = Vec::new();
     if let Ok(mut pool) = state.controller_pool.lock() {
         if let Some(key) = exact_key {
@@ -1658,7 +1713,7 @@ pub fn schedule_release_idle_desktop_controller(
     state: &Arc<MaaState>,
     instance_id: &str,
 ) {
-    let target_gen = {
+    let (target_gen, is_macos) = {
         let Ok(instances) = state.instances.lock() else {
             return;
         };
@@ -1675,7 +1730,10 @@ pub fn schedule_release_idle_desktop_controller(
         {
             return;
         }
-        instance.start_generation
+        (
+            instance.start_generation,
+            matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. })),
+        )
     };
 
     let app_clone = app.clone();
@@ -1700,6 +1758,15 @@ pub fn schedule_release_idle_desktop_controller(
                                 "[ControllerRelease] Timed out waiting for tasker stop on instance {}",
                                 instance_id_owned
                             );
+                            if is_macos {
+                                // 任务仍未结束，控制模块尚未确认松开；下次运行仍会重新连接。
+                                super::maa_agent::emit_agent_output(
+                                    &app_clone,
+                                    &instance_id_owned,
+                                    "stderr",
+                                    MACOS_RELEASE_UNCONFIRMED_MESSAGE,
+                                );
+                            }
                             break;
                         }
                         std::thread::sleep(Duration::from_millis(wait_ms));
@@ -1958,4 +2025,32 @@ pub async fn maa_screenshot_unsubscribe(
         .screenshot_service
         .unsubscribe(&instance_id, &subscriber_id);
     Ok(())
+}
+
+#[cfg(test)]
+mod release_confirm_tests {
+    use super::*;
+
+    #[test]
+    fn poll_returns_the_result_once_the_operation_finishes() {
+        let mut calls = 0;
+        let result = poll_until_done(
+            || {
+                calls += 1;
+                if calls < 3 { MaaStatus::RUNNING } else { MaaStatus::SUCCEEDED }
+            },
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+        );
+        assert_eq!(result, Some(true));
+        assert_eq!(poll_until_done(|| MaaStatus::FAILED, Duration::from_secs(1), Duration::from_millis(1)), Some(false));
+    }
+
+    #[test]
+    fn poll_gives_up_when_the_peer_never_finishes() {
+        let started = Instant::now();
+        let result = poll_until_done(|| MaaStatus::PENDING, Duration::from_millis(60), Duration::from_millis(5));
+        assert_eq!(result, None);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 }
