@@ -77,7 +77,8 @@ class Runtime:
         if session is not None and session.context is self.context:
             return session._background_mode()
         try:
-            return parameters(self.context, "MaaNikki_FocusLost").get("mode") == "background"
+            from task_control import focus_lost_mode
+            return focus_lost_mode(parameters(self.context, "MaaNikki_FocusLost").get("mode")) == "background"
         except (AttributeError, RuntimeError, TypeError, ValueError):
             return False
 

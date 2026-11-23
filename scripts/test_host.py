@@ -509,6 +509,26 @@ class TaskAllowlistTests(unittest.TestCase):
             self.assertFalse(host.task_entry_supported("MaaNikki_GameKeysRead"))
             self.assertFalse(host.task_entry_supported(None))
 
+    def test_background_mode_falls_back_to_pause_without_window_input(self):
+        from task_control import focus_lost_mode
+        with backend("win32"):
+            self.assertEqual([focus_lost_mode(m) for m in ("background", "return", "pause", "x", None)],
+                             ["background", "return", "pause", "pause", "pause"])
+        with backend("macos"):
+            self.assertEqual([focus_lost_mode(m) for m in ("background", "return", "pause")],
+                             ["pause", "return", "pause"])
+
+    def test_runtime_background_mode_follows_the_capability(self):
+        from daily.runtime import Runtime
+        context = SimpleNamespace(tasker=SimpleNamespace(stopping=False, controller=SimpleNamespace()))
+        rt = Runtime(context)
+        with patch("daily.runtime.active_session", return_value=None), \
+                patch("daily.runtime.parameters", return_value={"mode": "background"}):
+            with backend("win32"):
+                self.assertTrue(rt.background_mode())
+            with backend("macos"):
+                self.assertFalse(rt.background_mode())
+
     def test_dev_switch_adds_exact_entries_on_macos_only(self):
         with patch.dict(os.environ, {"MAANIKKI_MACOS_EXTRA_TASKS": " MaaNikki_Dig ,, MaaNikki_MonthlyPass"}):
             with backend("macos"):

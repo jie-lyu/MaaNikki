@@ -18,6 +18,22 @@ from diagnostics import FailureEvidence
 from performance import count
 
 
+
+def focus_lost_mode(mode) -> str:
+    """The FocusLostBehavior option as this desktop can honour it.
+
+    Background running needs window-targeted input (host capability background_input); where there
+    is none (macOS), a saved "background" choice behaves like the default "pause" instead of failing
+    every task that would build a BackgroundInput.
+    """
+    if mode not in {"pause", "return", "background"}:
+        return "pause"
+    if mode == "background":
+        from host import capabilities, platform_backend
+        if not capabilities(platform_backend()).background_input:
+            return "pause"
+    return mode
+
 class TaskStopped(NavigationError):
     pass
 
@@ -137,7 +153,7 @@ class ForegroundSession:
         def load():
             try:
                 mode = node_action_params(self.context, "MaaNikki_FocusLost").get("mode")
-                return mode if mode in {"pause", "return", "background"} else "pause"
+                return focus_lost_mode(mode)
             except Exception:
                 traceback.print_exc()
                 return "pause"
