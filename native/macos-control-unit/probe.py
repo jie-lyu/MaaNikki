@@ -281,6 +281,91 @@ def cmd_refusal_check(args) -> int:
     return 0 if results["passed"] else 1
 
 
+def _ax_process_at(points):
+    """pid owning each global point per the accessibility hit test (what a click would reach), with the AX error."""
+    import ctypes
+
+    ax = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+    cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    ax.AXUIElementCreateSystemWide.restype = ctypes.c_void_p
+    ax.AXUIElementSetMessagingTimeout.argtypes = [ctypes.c_void_p, ctypes.c_float]
+    ax.AXUIElementCopyElementAtPosition.argtypes = [ctypes.c_void_p, ctypes.c_float, ctypes.c_float,
+                                                    ctypes.POINTER(ctypes.c_void_p)]
+    ax.AXUIElementGetPid.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+    cf.CFRelease.argtypes = [ctypes.c_void_p]
+    system = ax.AXUIElementCreateSystemWide()
+    ax.AXUIElementSetMessagingTimeout(system, 0.25)
+    results = []
+    for x, y in points:
+        element = ctypes.c_void_p()
+        error = ax.AXUIElementCopyElementAtPosition(system, x, y, ctypes.byref(element))
+        pid = ctypes.c_int(-1)
+        if error == 0 and element.value:
+            ax.AXUIElementGetPid(element, ctypes.byref(pid))
+            cf.CFRelease(element)
+        results.append((pid.value, error))
+    cf.CFRelease(system)
+    return results
+
+
+def _front_pid() -> int:
+    import ctypes
+
+    hi = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+    psn = (ctypes.c_uint32 * 2)()
+    pid = ctypes.c_int(-1)
+    if hi.GetFrontProcess(ctypes.byref(psn)) == 0:
+        hi.GetProcessPID(ctypes.byref(psn), ctypes.byref(pid))
+    return pid.value
+
+
+def _bundle_pid(bundle_id: str) -> int | None:
+    import re
+    import subprocess
+
+    asn = subprocess.run(["lsappinfo", "find", f"bundleid={bundle_id}"], capture_output=True, text=True).stdout.split()
+    if len(asn) != 1:
+        return None
+    info = subprocess.run(["lsappinfo", "info", "-only", "pid", asn[0]], capture_output=True, text=True).stdout
+    match = re.search(r'"?pid"?\s*=\s*(\d+)', info)
+    return int(match.group(1)) if match else None
+
+
+def cmd_hit_test(args) -> int:
+    """No input. Maps a grid of 1280x720 points through the patched unit's capture geometry and asks
+    the accessibility hit test which process a click there would reach."""
+    import re
+    from maa.tasker import Tasker
+    from maa.toolkit import Toolkit
+
+    if _profile != "maanikki":
+        sys.exit("hit-test reads the patched unit's capture geometry; pass --profile maanikki")
+    out = Path(args.out).resolve()
+    if out.exists() and any(out.iterdir()):
+        sys.exit(f"{out} is not empty")
+    out.mkdir(parents=True, exist_ok=True)
+    Tasker.set_log_dir(out)
+    window_id = _pick_window(args, Toolkit)
+    controller, ok, _ = _connect(window_id, raw=False)
+    if not ok or _grab(controller)[0] is None:
+        sys.exit("connection or capture failed")
+    log = (out / "maafw.log").read_text(encoding="utf-8", errors="replace")
+    target = [line for line in log.splitlines() if "capture target" in line][-1]
+    value = lambda name: float(re.search(re.escape(f"[{name}=") + r"([-0-9.]+)\]", target).group(1))
+    origin_x, origin_y = value("visible.origin.x"), value("visible.origin.y")
+    width, height = value("visible.size.width"), value("visible.size.height")
+    owner = next((w for w in Toolkit.find_desktop_windows() if int(w.hwnd) == window_id), None)
+    game_pid = _bundle_pid(owner.class_name) if owner else None
+    samples = {f"{x},{y}": (x, y) for x in (4, 46, 320, 640, 960, 1276) for y in (4, 31, 180, 360, 540, 716)}
+    globals_ = {name: (origin_x + x * width / 1280, origin_y + y * height / 720) for name, (x, y) in samples.items()}
+    hits = _ax_process_at(list(globals_.values()))
+    report = {"front_pid": _front_pid(), "visible": [origin_x, origin_y, width, height], "target_pid": game_pid,
+              "hits": {name: {"global": [round(c, 1) for c in globals_[name]], "pid": pid, "ax_error": error}
+                       for name, (pid, error) in zip(globals_, hits)}}
+    print(json.dumps(report, indent=2))
+    return 0
+
+
 def cmd_input_check(args) -> int:
     """Sends input to the game. Only with the maintainer at the machine; see the README."""
     import cv2
@@ -353,7 +438,7 @@ def cmd_input_check(args) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("windows", "lifecycle", "capture", "input-check", "refusal-check"):
+    for name in ("windows", "lifecycle", "capture", "input-check", "refusal-check", "hit-test"):
         command = sub.add_parser(name)
         command.add_argument("--runtime", help="directory with libMaaFramework.dylib and the control units")
         command.add_argument("--profile", choices=sorted(PROFILES), default="stock",
@@ -381,7 +466,7 @@ def main() -> int:
     global _profile
     _profile = args.profile
     commands = {"windows": cmd_windows, "lifecycle": cmd_lifecycle, "capture": cmd_capture,
-                "input-check": cmd_input_check, "refusal-check": cmd_refusal_check}
+                "input-check": cmd_input_check, "refusal-check": cmd_refusal_check, "hit-test": cmd_hit_test}
     return commands[args.command](args)
 
 
