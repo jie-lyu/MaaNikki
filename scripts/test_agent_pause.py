@@ -35,6 +35,13 @@ def server(identifier, directory):
     marker = directory / "stage"
     user32 = Mock()
     user32.IsWindow.return_value = True
+    # Mock attributes are truthy by default; the window is neither minimized nor hung.
+    user32.IsIconic.return_value = False
+    user32.IsHungAppWindow.return_value = False
+    def class_name(hwnd, buffer, length):
+        buffer.value = "UnrealWindow"
+        return len(buffer.value)
+    user32.GetClassNameW.side_effect = class_name
     user32.GetWindowTextLengthW.return_value = 4
     def title(hwnd, buffer, length):
         buffer.value = "Infinity Nikki"
