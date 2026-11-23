@@ -67,6 +67,8 @@ modules['@/types/maa'] = load('types/maa.ts');
 modules['@/utils/jsonc'] = load('utils/jsonc.ts');
 const loader = load('services/interfaceLoader.ts');
 const controllerUtils = load('utils/controller.ts');
+modules['@/utils/controller'] = controllerUtils;
+const gameTarget = load('utils/gameTarget.ts');
 
 function pythonEffectiveInterface() {
   const code = [
@@ -111,4 +113,16 @@ test('Windows sees only nikki_windows and builds the pinned Win32 controller con
   }
   assert.deepStrictEqual(actual, JSON.parse(readFileSync(CONFIG_FIXTURE, 'utf8')),
     'Win32 controller config changed; rerun with --update if intended and review the diff');
+});
+
+test('built-in features select nikki_windows and connect with the pinned config', async () => {
+  const pi = (await windowsInterface()).interface;
+  const controller = gameTarget.selectGameController(pi);
+  assert.equal(controller?.name, 'nikki_windows');
+  const calls = [];
+  const finder = { findWin32Windows: async (...args) => { calls.push(args); return [{ handle: HANDLE }]; } };
+  const [window] = await gameTarget.findGameWindows(finder, controller);
+  assert.deepStrictEqual(calls, [[controller.win32.class_regex, controller.win32.window_regex, undefined]]);
+  const config = JSON.parse(JSON.stringify(gameTarget.buildGameControllerConfig(controller, window)));
+  assert.deepStrictEqual(config, JSON.parse(readFileSync(CONFIG_FIXTURE, 'utf8')).nikki_windows);
 });

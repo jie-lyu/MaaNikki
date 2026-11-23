@@ -267,6 +267,16 @@
    ],
    "skips": []
   },
+  "test_game_target.cjs": {
+   "tests": [
+    "builds the Win32 controller config with the found window handle",
+    "passes the controller class/title regex and quiet flag to the finder",
+    "returns the empty result when no window is found",
+    "selects the first Win32 controller and ignores other types"
+   ],
+   "known_failures": [],
+   "skips": []
+  },
   "test_gameplay.py": {
    "tests": [
     "GameplayTests.test_absent_cannot_place_message_does_not_mean_success",
@@ -610,6 +620,7 @@
   "test_windows_contract.cjs": {
    "tests": [
     "Windows sees only nikki_windows and builds the pinned Win32 controller config",
+    "built-in features select nikki_windows and connect with the pinned config",
     "production loader on a Windows backend matches the pinned effective interface"
    ],
    "known_failures": [],
