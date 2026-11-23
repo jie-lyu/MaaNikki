@@ -98,6 +98,14 @@ agent/game_hud.py
 agent/game_keys.py
 agent/game_keys_reader.py
 agent/game_view.py
+agent/host/__init__.py
+agent/host/win32/__init__.py
+agent/host/win32/gdi.py
+agent/host/win32/hud.py
+agent/host/win32/layered_surface.py
+agent/host/win32/map_overlay.py
+agent/host/win32/overlays.py
+agent/host/win32/route_overlay.py
 agent/main.py
 agent/map_mask/__init__.py
 agent/map_mask/icons.py
@@ -105,7 +113,6 @@ agent/map_mask/matching.py
 agent/map_mask/pearpal.py
 agent/map_mask/service.py
 agent/map_mask/surface.py
-agent/map_mask/window.py
 agent/message_log.py
 agent/mouse_guard.py
 agent/navigation/__init__.py

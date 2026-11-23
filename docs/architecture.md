@@ -112,6 +112,8 @@
 
 `agent/app_paths.py` 区分只读的 `RESOURCE_ROOT`（`interface.json`、`resource/`、`tasks/`、`maafw/`）和可写的 `DATA_ROOT`（`config/`、`logs/`、`debug/`、`cache/`、`data_overlay/`）。客户端通过 `MAANIKKI_RESOURCE_ROOT` 与 `MAANIKKI_DATA_ROOT` 传给 agent、启动游戏前置任务和路线生成子进程；未传入时两者都是程序目录，Windows 便携版上两者也都是程序目录。客户端 `read_local_file` 读取上述可写目录下的文件时同样使用数据目录，与 agent 写入的位置一致。Agent 模块不再从 `__file__` 推导目录；接收 `root` 参数的函数中，存储用户数据的（账号、统计、库存、冒险报告、客户端配置）取数据根，加载游戏资源的（路线生成、材料目录）取资源根，需要另一根时从 `app_paths` 读取。
 
+`agent/host/` 收纳依赖桌面平台的代码。包名不用 `platform`，因为 `agent/main.py` 把 agent 目录放在 `sys.path` 最前，会遮住标准库。`host/__init__.py` 定义目标窗口（身份与焦点）、带保证释放的输入、画面几何和能力清单四个接口，并按已连接控制器的信息选择后端；`host.win32` 是 Windows 后端，只通过这些入口按需导入。任务代码导入和注册时不得加载任何平台后端，`scripts/test_host_imports.py` 在屏蔽 `host.win32` 的情况下导入 `agent/main.py` 并核对注册的动作与识别名称。悬浮层（任务状态、路线小地图、大地图遮罩）的 Win32 窗口与 GDI 原语位于 `host/win32/`；`overlay_style.py`、`game_hud.py`、`navigation/overlay.py` 和 `map_mask/surface.py` 只保留主题、标签、设置和像素绘制，通过 `host.overlay_backend()` 取得窗口实现。
+
 `agent/file_io.py` 提供唯一的原子 JSON 快照写入：UTF-8 编码、拒绝非有限数值、同目录唯一临时文件、刷盘后替换。账号状态、祝福闪光报告、启动记录、日常诊断及性能快照使用此入口；它不依赖任何业务模块。
 
 `agent/account_state.py` 继续负责账号标识、周期与完成状态，`agent/collection/storage.py` 负责祝福闪光业务数据。状态持久化失败应由上层明确处理；可选诊断写入失败不能覆盖原任务结果。JSONL 是追加事件流，保留追加写入方式，与完整快照区分。

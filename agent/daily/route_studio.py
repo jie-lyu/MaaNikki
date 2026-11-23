@@ -21,7 +21,8 @@ from map_mask.service import BIGMAP_SCALES
 from navigation.controller import ForegroundInput
 from navigation.matching import luma, match_map
 from navigation.models import GameWindowClosed, NavigationError, maps
-from navigation.overlay import RouteMinimapOverlay, resolve_route_overlay_mode
+from host import overlay_backend
+from navigation.overlay import resolve_route_overlay_mode
 from navigation.vision import Locator, Pose
 from task_control import TaskStopped, active_session
 
@@ -156,8 +157,9 @@ class RouteRecorder(Runtime):
                 if session is not None
                 else should_exclude_from_capture(self.controller)
             )
+            overlays = overlay_backend() if getattr(inputs, "hwnd", 0) else None
             overlay = (
-                RouteMinimapOverlay(
+                overlays.RouteMinimapOverlay(
                     inputs.hwnd,
                     spec,
                     exclude_from_capture=True if exclude_capture is None else bool(exclude_capture),
@@ -166,7 +168,7 @@ class RouteRecorder(Runtime):
                     hud_sink=hud,
                     allow_background=bool(session is not None and session._background_mode()),
                 )
-                if getattr(inputs, "hwnd", 0) else None
+                if overlays is not None else None
             )
             watched = {virtual_key(self.game_keys.get("jump")): "jump",
                        virtual_key(self.game_keys.get("interact")): "interact", **HOTKEYS}

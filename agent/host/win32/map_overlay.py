@@ -1,4 +1,4 @@
-"""Independent Win32 overlay following one controller HWND with big-map tutorials."""
+"""Independent Win32 overlay following one controller HWND with big-map tutorials (moved from map_mask/window)."""
 from __future__ import annotations
 
 import ctypes
@@ -8,9 +8,11 @@ import os
 import threading
 import time
 
+from host.win32.gdi import Win32WakeEvent, bind, checked
+from host.win32.layered_surface import LayeredSurface
+from map_mask.surface import split_exploration_hint
 from message_log import write_message
-from overlay_style import Win32WakeEvent, resolve_overlay_theme
-from .surface import LayeredSurface, bind, checked, split_exploration_hint
+from overlay_style import resolve_overlay_theme
 
 
 PROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, w.HWND, w.UINT, w.WPARAM, w.LPARAM)

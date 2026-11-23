@@ -23,7 +23,7 @@ from vision import prepared_template
 from . import EDGE_RANGE_RATIO, OUTER_RING_RATIO
 from .matching import BigMapMatcher, MinimapMatcher, minimap_hint
 from .pearpal import PearPal
-from .window import OverlayWindow
+from host import overlay_backend
 
 
 def _kind_family(kind: str) -> str:
@@ -170,8 +170,11 @@ class MapMask:
         self.thread = threading.Thread(target=self._run, name="map-mask-matching", daemon=True)
         try:
             self.data = PearPal(DATA_ROOT)
-            self.window = OverlayWindow(hwnd, exclude_from_capture=not window_capture,
-                                        tutorial_provider=self.data.tutorial, hud_sink=hud_sink)
+            overlays = overlay_backend()
+            if overlays is None:
+                raise RuntimeError("当前系统不支持地图遮罩窗口。")
+            self.window = overlays.OverlayWindow(hwnd, exclude_from_capture=not window_capture,
+                                                 tutorial_provider=self.data.tutorial, hud_sink=hud_sink)
             self.thread.start()
         except Exception:
             if self.data:

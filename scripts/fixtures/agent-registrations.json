@@ -1,0 +1,37 @@
+{
+ "actions": [
+  "nikki.backpack_read",
+  "nikki.blessing_maintain",
+  "nikki.blessing_pursuit",
+  "nikki.claim_daily_rewards",
+  "nikki.close_game",
+  "nikki.collect_starlight_crystals",
+  "nikki.crown",
+  "nikki.daily_config",
+  "nikki.daily_fail",
+  "nikki.daily_tasks",
+  "nikki.exploration",
+  "nikki.feature_settings",
+  "nikki.game_key",
+  "nikki.game_keys_read",
+  "nikki.gameplay",
+  "nikki.minigame_bling",
+  "nikki.open_world_collect",
+  "nikki.persistent_abilities",
+  "nikki.realm_queue",
+  "nikki.renewal_read",
+  "nikki.route_record",
+  "nikki.route_run",
+  "nikki.route_test",
+  "nikki.run_coordination",
+  "nikki.start_game",
+  "nikki.subtask_test",
+  "nikki.ui_click",
+  "nikki.wardrobe_read",
+  "nikki.weekly_challenge"
+ ],
+ "recognitions": [
+  "nikki.crown_ready",
+  "nikki.ui_template"
+ ]
+}

@@ -358,6 +358,14 @@
    ],
    "skips": []
   },
+  "test_host_imports.py": {
+   "tests": [
+    "HostImportTests.test_registered_handlers_match_snapshot",
+    "HostImportTests.test_registration_loads_no_platform_backend"
+   ],
+   "known_failures": [],
+   "skips": []
+  },
   "test_meteor.py": {
    "tests": [
     "MeteorTests.test_available_respects_auto_option_and_mode",

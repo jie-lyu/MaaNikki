@@ -7,7 +7,8 @@ from client_config import mxu_config, node_action_params
 from overlay_style import should_exclude_from_capture
 from task_control import active_session
 from .engine import Navigator
-from .overlay import RouteMinimapOverlay, resolve_route_overlay_config
+from host import overlay_backend
+from .overlay import resolve_route_overlay_config
 
 
 
@@ -51,8 +52,9 @@ def create_navigator(runtime, teleporter, *, actions=None, event=lambda value: N
         if session is not None
         else should_exclude_from_capture(runtime.controller)
     )
+    overlays = overlay_backend() if hwnd else None
     overlay = (
-        RouteMinimapOverlay(
+        overlays.RouteMinimapOverlay(
             hwnd,
             teleporter.locator.spec,
             exclude_from_capture=True if exclude_capture is None else bool(exclude_capture),
@@ -61,7 +63,7 @@ def create_navigator(runtime, teleporter, *, actions=None, event=lambda value: N
             hud_sink=hud,
             allow_background=allow_bg,
         )
-        if hwnd else None
+        if overlays is not None else None
     )
     return Navigator(teleporter.locator, teleporter.inputs, runtime.capture,
         lambda: runtime.stopped, runtime.pause, event,
