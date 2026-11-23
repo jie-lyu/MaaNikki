@@ -59,6 +59,59 @@ def target(user32: FakeUser32, *, capture_requires_foreground=False) -> Win32Tar
     return item
 
 
+class CaptureBoundsTests(unittest.TestCase):
+    """Click-target bounds: Win32 work-area clipping where the backend has it, the frame elsewhere."""
+
+    def setUp(self):
+        import tall_window
+        self.tall_window = tall_window
+        patcher = patch.object(tall_window, "platform_backend", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_without_work_area_clipping_the_frame_is_the_bound(self):
+        tw = self.tall_window
+        self.assertTrue(tw.is_capture_point_safe(None, [0, 0]))
+        self.assertTrue(tw.is_capture_point_safe(None, [1279, 719]))
+        self.assertTrue(tw.is_capture_point_safe(None, [600, 340, 80, 40]))  # rect centre
+        for target in ([1280, 10], [10, 720], [-1, 10], [float("nan"), 1], [1, 2, 3], "x", None, ["a", 1]):
+            with self.subTest(target=target):
+                self.assertFalse(tw.is_capture_point_safe(None, target))
+        self.assertEqual(tw.clamp_capture_park_point(None, [-5, 900]), [0, 719])
+        self.assertEqual(tw.safe_capture_y_range(None, 720), (0, 719))
+
+    def test_tall_frame_keeps_clicks_inside_the_16_9_base_like_win32_without_a_window(self):
+        tw = self.tall_window
+        tall = (tw.TALL_CAPTURE_WIDTH, tw.TALL_CAPTURE_HEIGHT)
+        self.assertTrue(tw.is_capture_point_safe(None, [10, 719], capture_size=tall))
+        self.assertFalse(tw.is_capture_point_safe(None, [10, 720], capture_size=tall))
+        from host.win32 import window_layout
+        for size in ((1280, 720), tall, (1, 1)):
+            with self.subTest(size=size):
+                self.assertEqual(tw._frame_bounds(size), window_layout.safe_capture_bounds(None, size))
+
+    def test_frame_fallback_never_loads_the_window_layout(self):
+        tw = self.tall_window
+        with patch.object(tw, "_layout", side_effect=AssertionError("window layout loaded")):
+            self.assertTrue(tw.is_capture_point_safe(None, [5, 5]))
+            tw.clamp_capture_park_point(None, [5, 5])
+            tw.safe_capture_y_range(None, 720)
+
+    def test_win32_delegates_to_the_window_layout_unchanged(self):
+        tw = self.tall_window
+        layout = Mock()
+        layout.is_capture_point_safe.return_value = "safe"
+        with patch.object(tw, "platform_backend", return_value="win32"), \
+                patch.dict(sys.modules, {"host.win32.window_layout": layout}), \
+                patch("host.win32.window_layout", layout, create=True):
+            self.assertEqual(tw.is_capture_point_safe(7, [1, 2], margin_px=4, require_work_area=True), "safe")
+            tw.clamp_capture_park_point(7, [0, 0], capture_size=(1280, 720), margin_px=4)
+            tw.safe_capture_y_range(7, 720, margin_px=8)
+        layout.is_capture_point_safe.assert_called_once_with(7, [1, 2], margin_px=4, require_work_area=True)
+        layout.clamp_capture_park_point.assert_called_once_with(7, [0, 0], capture_size=(1280, 720), margin_px=4)
+        layout.safe_capture_y_range.assert_called_once_with(7, 720, margin_px=8)
+
+
 class SelectionTests(unittest.TestCase):
     def test_backend_follows_platform_and_controller_type(self):
         with patch.object(host.os, "name", "nt"):
@@ -122,6 +175,7 @@ class SelectionTests(unittest.TestCase):
         capabilities = host.capabilities("win32")
         self.assertEqual(capabilities.backend, "win32")
         self.assertTrue(capabilities.foreground_input and capabilities.overlay and capabilities.tall_window)
+        self.assertTrue(capabilities.work_area_bounds)
 
     def test_non_windows_host_rejects_with_the_previous_message(self):
         controller = Mock()

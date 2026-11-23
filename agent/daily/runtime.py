@@ -286,6 +286,7 @@ class Runtime:
         return hwnd, cap_size
 
     def _validate_pointer_targets(self, action, fields, inputs=None, *, require_work_area=None):
+        from host import capabilities, platform_backend
         from tall_window import (
             BASE_CAPTURE_HEIGHT,
             BASE_CAPTURE_WIDTH,
@@ -313,6 +314,7 @@ class Runtime:
                 not safe
                 and not tried_adjust
                 and cap_size == (BASE_CAPTURE_WIDTH, BASE_CAPTURE_HEIGHT)
+                and capabilities(platform_backend()).tall_window
                 and is_auto_adjust_resolution_enabled(self.context)
             ):
                 tried_adjust = True

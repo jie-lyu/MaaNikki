@@ -39,6 +39,7 @@ class Capabilities:
     background_input: bool = False
     overlay: bool = False
     tall_window: bool = False  # 16:9 healing and the temporary tall scan window
+    work_area_bounds: bool = False  # click targets clipped to the monitor work area (taskbar, off-screen)
     launch_game: bool = False
     close_game: bool = False
     clipboard: bool = False
