@@ -558,28 +558,48 @@ def cmd_camera_check(args) -> int:
     if _map_back_score(start) >= MAP_CLOSED_SCORE:
         fail("the big map is open; start in the open world")
     cursor_before = _cursor()
+
+    def option_press(name):
+        before = frame(f"before-{name}")
+        sent = controller.post_click_key(KEY_OPTION).wait().succeeded
+        time.sleep(0.8)
+        after = frame(f"after-{name}")
+        steps.append({"step": name, "sent": sent, "changed_pct": _changed(before, after), "cursor": _cursor()})
+        if not sent:
+            fail(f"the unit refused {name} (game not in front?)")
+        return after
+
+    if args.option:
+        # The navigation engine's order: release the cursor mode with Option, then turn.
+        start = option_press("option-before-turn")
     sent = controller.post_relative_move(args.pixels, 0).wait().succeeded
-    time.sleep(0.8)
-    turned = frame("after-turn")
-    steps.append({"step": f"relative move +{args.pixels}", "sent": sent, "scene_changed_pct": _changed(start[band], turned[band])})
     if not sent:
         fail("the unit refused the relative move (game not in front?)")
+    time.sleep(0.8)
+    turned = frame("after-turn")
+    turn_pct = _changed(start[band], turned[band])
+    steps.append({"step": f"relative move +{args.pixels}", "sent": sent, "scene_changed_pct": turn_pct})
     sent = controller.post_relative_move(-args.pixels, 0).wait().succeeded
+    if not sent:
+        fail("the unit refused the reverse relative move")
     time.sleep(0.8)
     back = frame("after-turn-back")
     steps.append({"step": f"relative move -{args.pixels}", "sent": sent, "scene_changed_pct": _changed(turned[band], back[band]),
                   "vs_start_pct": _changed(start[band], back[band])})
-    steps.append({"step": "real cursor", "before": cursor_before, "after": _cursor()})
+    cursor_after = _cursor()
+    steps.append({"step": "real cursor", "before": cursor_before, "after": cursor_after})
     if args.option:
-        for press in ("option-1", "option-2"):
-            before = frame(f"before-{press}")
-            sent = controller.post_click_key(KEY_OPTION).wait().succeeded
-            time.sleep(0.8)
-            after = frame(f"after-{press}")
-            steps.append({"step": press, "sent": sent, "changed_pct": _changed(before, after), "cursor": _cursor()})
+        option_press("option-after-turn")  # back to the cursor mode the game started in
+    if abs(cursor_after[0] - cursor_before[0]) > 1 or abs(cursor_after[1] - cursor_before[1]) > 1:
+        fail("the real cursor moved: relative moves must not move it")
+    if turn_pct < 1:
+        fail(f"+{args.pixels} did not change the scene: the camera did not turn")
+    # A turn changes the scene; whether it is a clean horizontal turn and comes back is judged from
+    # the saved frames, not from these numbers.
+    steps.append({"verdict": "needs_review", "frames": str(out)})
     print(json.dumps(steps, ensure_ascii=False, indent=2))
-    print(f"frames and maafw.log in {out}; the turn passes when +{args.pixels} changes the scene clearly, "
-          f"-{args.pixels} brings it back near the start, and the real cursor did not move")
+    print(f"needs review: look at the frames in {out}. The turn passes when +{args.pixels} turns the camera "
+          f"horizontally and -{args.pixels} brings the view back near the start.")
     return 0
 
 
@@ -610,7 +630,7 @@ def main() -> int:
         if name == "camera-check":
             command.add_argument("--pixels", type=int, default=400, help="relative move each way (the plan measured 400)")
             command.add_argument("--option", action="store_true",
-                                 help="also press Option twice (the game's cursor-mode toggle), judged from captures")
+                                 help="press Option before the turn (as the navigation engine does) and once more after it")
         if name == "input-check":
             command.add_argument("--release", action="store_true",
                                  help="also hold W across a controller destroy (the character walks briefly)")

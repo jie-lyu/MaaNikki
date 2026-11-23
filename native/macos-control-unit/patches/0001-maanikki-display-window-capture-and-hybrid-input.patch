@@ -211,10 +211,10 @@ index 344f217..2744be9 100644
 +endif()
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.h b/source/MaaMacOSControlUnit/Input/HybridInput.h
 new file mode 100644
-index 0000000..a51e913
+index 0000000..1e07764
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.h
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,166 @@
 +#pragma once
 +
 +#include <map>
@@ -339,6 +339,7 @@ index 0000000..a51e913
 +    // reads input once per frame and missed a 12 ms key press on the device. Releases from the stopping
 +    // thread never wait.
 +    void hold_at_least(std::unique_lock<std::mutex>& lock, double pressed_at_ms);
++    bool touch_down_impl(int contact, int x, int y, int pressure);
 +    bool hover_locked(int x, int y);
 +    // Puts the cursor back after a bare hover, unless a press or scroll took that over.
 +    void end_hover_locked(const char* why);
@@ -370,6 +371,9 @@ index 0000000..a51e913
 +    // The user's cursor before a bare touch_move hovered it somewhere; the next press or scroll restores
 +    // this position when it ends, and inactive()/release_all() restore it if nothing else did.
 +    std::optional<CGPoint> hover_saved_;
++    // Contacts whose last press was refused: the core still sends a refused swipe's moves, which must
++    // not turn into hovers. Cleared by that contact's touch_up and by inactive().
++    std::set<int> refused_contacts_;
 +    // A scroll between its hover move and its wheel (the lock is released meanwhile); a release from
 +    // another thread (a stop) cancels it.
 +    bool scroll_pending_ = false;
@@ -379,10 +383,10 @@ index 0000000..a51e913
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
 new file mode 100644
-index 0000000..308a52f
+index 0000000..799496b
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
-@@ -0,0 +1,715 @@
+@@ -0,0 +1,748 @@
 +#include "HybridInput.h"
 +
 +#include "InputUtils.h"
@@ -579,6 +583,19 @@ index 0000000..308a52f
 +
 +bool HybridInput::touch_down(int contact, int x, int y, int pressure)
 +{
++    const bool accepted = touch_down_impl(contact, x, y, pressure);
++    std::lock_guard lock(mutex_);
++    if (accepted) {
++        refused_contacts_.erase(contact);
++    }
++    else {
++        refused_contacts_.insert(contact);
++    }
++    return accepted;
++}
++
++bool HybridInput::touch_down_impl(int contact, int x, int y, int pressure)
++{
 +    const auto started = Clock::now();
 +    std::unique_lock lock(mutex_);
 +    worker_ = std::this_thread::get_id();
@@ -612,20 +629,24 @@ index 0000000..308a52f
 +    const bool restore = held_contacts_.empty();
 +    CGPoint original = { NAN, NAN };
 +    if (restore) {
-+        // After a bare hover the user's position is the one saved before it.
++        // After a bare hover the user's position is the one saved before it; this press owns it from
++        // here on (restored when it ends or is abandoned), so a concurrent cleanup cannot restore it too.
 +        auto cursor = hover_saved_ ? hover_saved_ : platform_->cursor();
 +        if (!cursor) {
 +            LogError << "cursor position unknown, cannot restore it afterwards; not sending" << VAR(contact);
 +            return false;
 +        }
 +        original = *cursor;
++        hover_saved_.reset();
 +    }
 +    // Every exit after the hover move and before an accepted press.
 +    auto abandon = [&](const char* why) {
 +        std::string restored = "not moved back (another contact is held)";
 +        if (restore && held_contacts_.empty()) {
 +            restored = restore_cursor(original);
-+            hover_saved_.reset();
++            if (restored == "warp failed") {
++                hover_saved_ = original; // retried by the next cleanup
++            }
 +        }
 +        LogWarn << "press abandoned after the hover" << VAR(contact) << VAR(why) << VAR(restored);
 +        return false;
@@ -678,8 +699,7 @@ index 0000000..308a52f
 +    }
 +    const double press_ms = ms_since(phase);
 +    if (restore) {
-+        saved_cursor_ = original;
-+        hover_saved_.reset(); // the release puts the cursor back now
++        saved_cursor_ = original; // the release puts the cursor back
 +    }
 +    held_contacts_[contact] = { *settled, info.mouse_button };
 +    LogInfo << "hover settled, press accepted" << VAR(contact) << VAR(settled->x) << VAR(settled->y) << VAR(first_check_ms)
@@ -756,6 +776,11 @@ index 0000000..308a52f
 +    // to the scroll position" right before scroll(), which hovers that point itself.
 +    auto held = held_contacts_.find(contact);
 +    if (held == held_contacts_.end()) {
++        if (refused_contacts_.contains(contact)) {
++            // The rest of a swipe whose press was refused: no hover along its path.
++            LogError << "touch_move after a refused press, not moving" << VAR(contact);
++            return false;
++        }
 +        return hover_locked(x, y);
 +    }
 +    if (held->second.scene) {
@@ -794,7 +819,7 @@ index 0000000..308a52f
 +
 +bool HybridInput::hover_locked(int x, int y)
 +{
-+    scroll_target_ = std::make_pair(x, y);
++    scroll_target_.reset();
 +    if (!held_contacts_.empty()) {
 +        // A held button (a scene press) would turn the camera if the cursor moved.
 +        LogError << "hover while a mouse button is held, not moving" << VAR(x) << VAR(y);
@@ -815,15 +840,19 @@ index 0000000..308a52f
 +    if (!platform_->post_mouse(kCGEventMouseMoved, *point, kCGMouseButtonLeft)) {
 +        return false;
 +    }
++    scroll_target_ = std::make_pair(x, y); // only a hover that happened positions the next scroll
 +    LogInfo << "hover moved" << VAR(point->x) << VAR(point->y);
 +    return true;
 +}
 +
 +void HybridInput::end_hover_locked(const char* why)
 +{
++    scroll_target_.reset(); // a stop or the task's end: no scroll at a point hovered before it
 +    if (hover_saved_ && held_contacts_.empty()) {
 +        std::string restored = restore_cursor(*hover_saved_);
-+        hover_saved_.reset();
++        if (restored != "warp failed") {
++            hover_saved_.reset(); // a failed warp stays pending for the next cleanup
++        }
 +        LogInfo << "hover ended" << VAR(why) << VAR(restored);
 +    }
 +}
@@ -841,6 +870,7 @@ index 0000000..308a52f
 +
 +bool HybridInput::touch_up_locked(int contact)
 +{
++    refused_contacts_.erase(contact);
 +    // A release from the stopping thread may belong to a press still on its way, whether or not an
 +    // older press of the same contact is held: cancel that next press either way.
 +    note_stop_release(cancelled_contacts_, contact);
@@ -993,6 +1023,9 @@ index 0000000..308a52f
 +    hover_saved_.reset(); // this scroll puts the cursor back when it ends
 +    auto finish = [&](const char* why) {
 +        std::string restored = held_contacts_.empty() ? restore_cursor(*original) : "not moved back (a contact is held)";
++        if (restored == "warp failed") {
++            hover_saved_ = *original; // retried by the next cleanup
++        }
 +        LogWarn << "scroll abandoned after the hover" << VAR(why) << VAR(restored);
 +        return false;
 +    };
@@ -1034,6 +1067,9 @@ index 0000000..308a52f
 +    platform_->sleep_ms(kWheelDeliveryMs);
 +    lock.lock();
 +    std::string restored = held_contacts_.empty() ? restore_cursor(*original) : "not moved back (a contact is held)";
++    if (restored == "warp failed") {
++        hover_saved_ = *original; // retried by the next cleanup
++    }
 +    LogInfo << "scroll posted" << VAR(lines_y) << VAR(lines_x) << VAR(settled->x) << VAR(settled->y) << VAR(first.hit_test_ms)
 +            << VAR(second.hit_test_ms) << VAR(restored) << "total_ms=" << ms_since(started);
 +    return true;
@@ -1061,6 +1097,7 @@ index 0000000..308a52f
 +    bool released = release_all_locked();
 +    cancelled_contacts_.clear();
 +    cancelled_keys_.clear();
++    refused_contacts_.clear();
 +    cancel_pending_from_stop();
 +    end_hover_locked("inactive");
 +    return released;
@@ -1786,10 +1823,10 @@ index 0000000..c17723a
 +MAA_CTRL_UNIT_NS_END
 diff --git a/test/maanikki/HybridInputTest.mm b/test/maanikki/HybridInputTest.mm
 new file mode 100644
-index 0000000..b435841
+index 0000000..c6e91db
 --- /dev/null
 +++ b/test/maanikki/HybridInputTest.mm
-@@ -0,0 +1,707 @@
+@@ -0,0 +1,780 @@
 +// Deterministic tests for HybridInput over a fake InputPlatform: orderings a real desktop cannot
 +// reproduce on demand (a stop racing a press), and every refusal path. Nothing reaches the system.
 +// Built only with -DMAANIKKI_UNIT_TESTS=ON; never part of the shipped unit.
@@ -1931,8 +1968,13 @@ index 0000000..b435841
 +    CGPoint cursor_at = CGPointMake(7, 7);
 +    std::optional<CGPoint> cursor() override { return cursor_known ? std::optional(cursor_at) : std::nullopt; }
 +
++    int fail_warps = 0; // the next N warps fail (nothing recorded)
 +    bool warp_cursor(CGPoint point) override
 +    {
++        if (fail_warps > 0) {
++            --fail_warps;
++            return false;
++        }
 +        record("warp@" + std::to_string(int(point.x)) + "," + std::to_string(int(point.y)));
 +        return true;
 +    }
@@ -2458,6 +2500,70 @@ index 0000000..b435841
 +    CHECK((t.platform->take() == Events { "move@150,100", "move@50,100", "warp@7,7" })); // once, to the user's place
 +}
 +
++void a_stop_forgets_the_hovered_scroll_target()
++{
++    Fixture t;
++    CHECK(t.input->touch_move(0, 100, 200, 0)); // the core's move before a scroll
++    std::thread([&] { t.input->inactive(); }).join(); // a stop lands in between
++    CHECK(!t.input->scroll(0, 120)); // no wheel at the point hovered before the stop
++    CHECK((t.platform->take() == Events { "move@50,100", "warp@7,7" }));
++    CHECK(t.input->touch_move(0, 100, 200, 0));
++    t.platform->front = 999;
++    CHECK(!t.input->touch_move(0, 300, 200, 0)); // a refused hover positions nothing either
++    t.platform->front = kGame;
++    CHECK(!t.input->scroll(0, 120));
++}
++
++void the_users_cursor_is_restored_once_and_retried_when_a_warp_fails()
++{
++    Fixture t;
++    CHECK(t.input->touch_move(0, 300, 200, 0));
++    bool cleaned = false;
++    t.platform->on_sleep = [&] { // the stopping thread cleans up while the press settles
++        if (!std::exchange(cleaned, true)) {
++            std::thread([&] { t.input->release_all(); }).join();
++        }
++    };
++    CHECK(!t.input->touch_down(0, 100, 200, 0));
++    CHECK(t.input->touch_up(0)); // the core releases after every click, refused or not
++    CHECK((t.platform->take() == Events { "move@150,100", "move@50,100", "warp@7,7" })); // one warp
++    t.platform->on_sleep = nullptr;
++    CHECK(t.input->touch_move(0, 300, 200, 0));
++    t.platform->fail_warps = 1;
++    t.input->inactive(); // the warp fails: still pending
++    t.input->inactive(); // retried
++    t.input->inactive(); // and done
++    CHECK((t.platform->take() == Events { "move@150,100", "warp@7,7" }));
++}
++
++void early_refusals_after_a_hover_leave_it_to_the_cleanup()
++{
++    Fixture t;
++    CHECK(t.input->touch_move(0, 300, 200, 0));
++    t.platform->hit_pid = 555;
++    CHECK(!t.input->touch_down(0, 100, 200, 0)); // refused at the first check: the hover stays
++    CHECK(t.input->touch_up(0));
++    t.platform->hit_pid = kGame;
++    CHECK(t.input->key_down(59));
++    CHECK(!t.input->scroll(0, 120)); // refused for the held key: the hover stays
++    CHECK(t.input->key_up(59));
++    CHECK(t.input->inactive());
++    CHECK((t.platform->take() == Events { "move@150,100", "key_down 59 pid=100", "key_up 59 pid=100", "warp@7,7" }));
++}
++
++void a_refused_swipe_never_hovers_along_its_path()
++{
++    Fixture t;
++    t.platform->front = 999;
++    CHECK(!t.input->touch_down(0, 100, 200, 0)); // the core's swipe goes on after a refused press
++    t.platform->front = kGame;
++    CHECK(!t.input->touch_move(0, 200, 200, 0));
++    CHECK(!t.input->touch_move(0, 300, 200, 0));
++    CHECK(t.input->touch_up(0));
++    CHECK(t.platform->take().empty());
++    CHECK(t.input->touch_move(0, 300, 200, 0)); // after its touch_up, hovers work again
++}
++
 +} // namespace
 +
 +int main()
@@ -2494,6 +2600,10 @@ index 0000000..b435841
 +    bare_touch_move_hovers_and_the_next_press_restores_the_users_cursor();
 +    hover_is_refused_like_a_click_and_never_moves_a_held_scene_press();
 +    abandoned_press_after_a_hover_restores_the_users_cursor();
++    a_stop_forgets_the_hovered_scroll_target();
++    the_users_cursor_is_restored_once_and_retried_when_a_warp_fails();
++    early_refusals_after_a_hover_leave_it_to_the_cleanup();
++    a_refused_swipe_never_hovers_along_its_path();
 +    std::printf(failures ? "HybridInputTest: %d failure(s)\n" : "HybridInputTest: all passed\n", failures);
 +    return failures ? 1 : 0;
 +}
