@@ -61,6 +61,11 @@ class Win32Target:
                 or not re.fullmatch(r"\s*(Infinity\s*Nikki|无限暖暖|無限暖暖)\s*", title.value)):
             raise NavigationError("当前连接的窗口不是无限暖暖，导航已停止，请检查连接对象。")
 
+    def input(self):
+        """InputBackend bound to this window."""
+        from host.win32.input import Win32Input
+        return Win32Input(self)
+
     def exists(self) -> bool:
         return bool(self.user32.IsWindow(self.hwnd))
 

@@ -173,17 +173,24 @@ class CollectionTests(unittest.TestCase):
             motion.close.assert_called_once()
 
 
+def attach_native(inputs):
+    # Input primitives come from the host backend, wrapping the fake user32.
+    from host.win32.input import Win32Input
+    inputs.native = Win32Input(SimpleNamespace(user32=inputs.user32, hwnd=1))
+
+
 class SceneInputTests(unittest.TestCase):
     def test_scene_click_preserves_cursor_and_other_held_inputs(self):
         for button in range(5):
             inputs = ForegroundInput.__new__(ForegroundInput)
             inputs.controller, inputs.user32 = Mock(), Mock()
+            attach_native(inputs)
             inputs.check, inputs.wait = Mock(), Mock()
             inputs.foreground = Mock(return_value=True)
             other = 4 if button != 4 else 2
             inputs.buttons, inputs.held = {other}, {87}
             inputs.controller.post_touch_up.return_value.wait.return_value.succeeded = True
-            with patch("navigation.controller.send_mouse", return_value=True) as send:
+            with patch("host.win32.input.send_mouse", return_value=True) as send:
                 self.assertTrue(inputs.click_mouse(button))
             flags = {0: 0x0002, 1: 0x0008, 2: 0x0020, 3: 0x0080, 4: 0x0080}
             send.assert_called_once_with(inputs.user32, flags[button], data=button-2 if button >= 3 else 0)
@@ -198,10 +205,11 @@ class SceneInputTests(unittest.TestCase):
     def test_scene_click_releases_after_interruption_without_stealing_focus(self):
         inputs = ForegroundInput.__new__(ForegroundInput)
         inputs.controller, inputs.user32 = Mock(), Mock()
+        attach_native(inputs)
         inputs.check, inputs.wait = Mock(), Mock(side_effect=NavigationError("已停止"))
         inputs.foreground = Mock(return_value=False)
         inputs.buttons, inputs.held = set(), {87}
-        with patch("navigation.controller.send_mouse", return_value=True):
+        with patch("host.win32.input.send_mouse", return_value=True):
             with self.assertRaises(NavigationError):
                 inputs.click_mouse(0)
         inputs.user32.mouse_event.assert_called_once_with(0x0004, 0, 0, 0, 0)
@@ -212,10 +220,11 @@ class SceneInputTests(unittest.TestCase):
     def test_failed_scene_click_down_is_released_with_fallback(self):
         inputs = ForegroundInput.__new__(ForegroundInput)
         inputs.controller, inputs.user32, inputs.check = Mock(), Mock(), Mock()
+        attach_native(inputs)
         inputs.foreground = Mock(return_value=True)
         inputs.buttons = set()
         inputs.controller.post_touch_up.return_value.wait.return_value.succeeded = False
-        with patch("navigation.controller.send_mouse", return_value=False):
+        with patch("host.win32.input.send_mouse", return_value=False):
             with self.assertRaises(NavigationError):
                 inputs.click_mouse(1)
         inputs.controller.post_touch_up.assert_called_once_with(1)
@@ -226,8 +235,9 @@ class SceneInputTests(unittest.TestCase):
         for succeeded in (True, False):
             inputs = ForegroundInput.__new__(ForegroundInput)
             inputs.controller, inputs.user32, inputs.check = Mock(), Mock(), Mock()
+            attach_native(inputs)
             inputs.buttons = set()
-            with patch("navigation.controller.send_mouse", return_value=succeeded) as send:
+            with patch("host.win32.input.send_mouse", return_value=succeeded) as send:
                 if succeeded:
                     inputs.mouse_down(1)
                 else:

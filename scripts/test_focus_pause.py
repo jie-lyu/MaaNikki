@@ -43,6 +43,7 @@ class PauseTests(unittest.TestCase):
         inputs.target.handle = inputs.target.hwnd = 1
         inputs.target.user32 = inputs.user32
         inputs.target.capture_requires_foreground = False
+        inputs.native = inputs.target.input()
         inputs.user32.IsWindow.return_value = True
         inputs.stopped = lambda: context.tasker.stopping
         inputs.foreground = lambda: state.focused

@@ -64,6 +64,9 @@ class Target(Protocol):
         """Restore and activate the window; True when it is in the foreground afterwards."""
         ...
     def focus_details(self) -> dict: ...
+    def input(self) -> "InputBackend":
+        """Input primitives bound to this window."""
+        ...
 
 
 class InputBackend(Protocol):
@@ -71,9 +74,8 @@ class InputBackend(Protocol):
 
     The neutral input class tracks held keys and buttons and guarantees their
     release; these primitives release without the agent channel or refocusing.
-    Keys are Win32 virtual-key integers. Pending: the Win32 implementation
-    (send_mouse, keybd_event/mouse_event fallbacks, window-message keys and
-    BackgroundInput) still lives in navigation/controller.py.
+    Keys are Win32 virtual-key integers. The Win32 implementation is
+    host/win32/input.py; BackgroundInput still lives in navigation/controller.py.
     """
 
     def force_key_up(self, key: int) -> None: ...
@@ -81,6 +83,7 @@ class InputBackend(Protocol):
     def press_mouse(self, button: int) -> bool: ...
     def post_window_key(self, key: int, *, down: bool) -> bool: ...
     def relative_move(self, dx: int, dy: int) -> bool: ...
+    def last_error(self) -> int: ...
 
 
 class Geometry(Protocol):

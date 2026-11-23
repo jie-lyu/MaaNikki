@@ -102,6 +102,7 @@ agent/host/__init__.py
 agent/host/win32/__init__.py
 agent/host/win32/gdi.py
 agent/host/win32/hud.py
+agent/host/win32/input.py
 agent/host/win32/layered_surface.py
 agent/host/win32/map_overlay.py
 agent/host/win32/overlays.py

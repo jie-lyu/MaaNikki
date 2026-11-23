@@ -129,6 +129,43 @@ class Win32TargetTests(unittest.TestCase):
         controller.post_key_up.assert_not_called()
 
 
+class Win32InputTests(unittest.TestCase):
+    def native(self):
+        user32 = Mock()
+        user32.MapVirtualKeyW.return_value = 0x11  # scan code for W, not extended
+        from host.win32.input import Win32Input
+        return Win32Input(SimpleNamespace(user32=user32, hwnd=0x10)), user32
+
+    def test_force_releases_bypass_the_agent_channel(self):
+        native, user32 = self.native()
+        native.force_key_up(87)
+        native.force_key_up(38)  # arrow keys are extended
+        native.force_mouse_up(4)
+        self.assertEqual(user32.keybd_event.call_args_list[0].args, (87, 0, 0x0002, 0))
+        self.assertEqual(user32.keybd_event.call_args_list[1].args, (38, 0, 0x0003, 0))
+        user32.mouse_event.assert_called_once_with(0x0100, 0, 0, 2, 0)
+
+    def test_press_and_relative_move_use_send_input_without_moving_the_cursor(self):
+        native, user32 = self.native()
+        with patch("host.win32.input.send_mouse", return_value=True) as send:
+            self.assertTrue(native.press_mouse(3))
+            self.assertTrue(native.relative_move(5, -2))
+        self.assertEqual(send.call_args_list[0].args, (user32, 0x0080))
+        self.assertEqual(send.call_args_list[0].kwargs, {"data": 1})
+        self.assertEqual(send.call_args_list[1].kwargs, {"dx": 5, "dy": -2})
+
+    def test_window_keys_post_matching_down_and_up(self):
+        native, user32 = self.native()
+        user32.PostMessageW.return_value = 1
+        self.assertTrue(native.post_window_key(87, down=True))
+        self.assertTrue(native.post_window_key(87, down=False))
+        self.assertTrue(native.post_window_key(18, down=True))  # Alt uses WM_SYSKEYDOWN
+        down, up, alt = (call.args for call in user32.PostMessageW.call_args_list)
+        self.assertEqual(down, (0x10, 0x0100, 87, 1 | (0x11 << 16)))
+        self.assertEqual(up, (0x10, 0x0101, 87, 1 | (0x11 << 16) | 0xC0000000))
+        self.assertEqual(alt[1], 0x0104)
+
+
 class ForegroundInputDelegationTests(unittest.TestCase):
     def make(self, user32, **kwargs):
         from navigation.controller import ForegroundInput

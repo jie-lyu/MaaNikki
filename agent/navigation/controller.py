@@ -40,37 +40,6 @@ class _MONITORINFO(ctypes.Structure):
     ]
 
 
-class MouseEvent(ctypes.Structure):
-    _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG), ("mouseData", wintypes.DWORD),
-                ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD), ("extra", ctypes.c_size_t)]
-
-
-class InputPayload(ctypes.Union):
-    # Windows x64 INPUT's largest member is MOUSEINPUT (32 bytes).
-    _fields_ = [("mouse", MouseEvent), ("alignment", ctypes.c_byte*32)]
-
-
-class MouseInput(ctypes.Structure):
-    _fields_ = [("type", wintypes.DWORD), ("payload", InputPayload)]
-
-
-def send_mouse(user32, flags, *, dx=0, dy=0, data=0):
-    event = MouseInput(type=0, payload=InputPayload(mouse=MouseEvent(
-        dx=dx, dy=dy, mouseData=data, dwFlags=flags)))
-    user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(MouseInput), ctypes.c_int]
-    user32.SendInput.restype = wintypes.UINT
-    return user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(event)) == 1
-
-
-def _window_key_spec(user32, key: int):
-    scan = user32.MapVirtualKeyW(key, 4)  # MAPVK_VK_TO_VSC_EX
-    extended = (scan >> 8) in (0xE0, 0xE1)
-    flags = 1 | ((scan & 0xFF) << 16) | (int(extended) << 24)
-    # Alt uses WM_SYSKEY*, other configured keys use WM_KEY*.
-    down, up = (0x0104, 0x0105) if key in (18, 164, 165) else (0x0100, 0x0101)
-    return down, up, flags
-
-
 class ForegroundInput:
     """Bounded Maa key pulses. Stop/focus loss always releases held keys."""
     window_only = False
@@ -87,8 +56,9 @@ class ForegroundInput:
         self.target = connect_target(controller)
         self.hwnd = self.target.handle
         self.capture_requires_foreground = self.target.capture_requires_foreground
-        # Win32 handle shared with BackgroundInput and the input helpers below,
-        # which move into host.win32 in a later step.
+        # Platform input primitives that release without the agent channel.
+        self.native = self.target.input()
+        # Win32 handle for BackgroundInput, which moves into host.win32 next.
         self.user32 = self.target.user32
         from task_control import active_session
         session = active_session()
@@ -134,27 +104,24 @@ class ForegroundInput:
         self._wait_without_session(ready)
 
     def _post_window_key(self, key: int, *, down: bool) -> bool:
-        down_msg, up_msg, flags = _window_key_spec(self.user32, key)
-        msg = down_msg if down else up_msg
-        lparam = flags if down else (flags | 0xC0000000)
-        return bool(self.user32.PostMessageW(self.hwnd, msg, key, lparam))
+        return self.native.post_window_key(key, down=down)
 
     def click_window_key(self, key, pause, seconds=.05):
         """Post a key pulse to the connected window without global input/focus."""
         if type(key) is not int or not 0 < key < 256 or not .01 <= seconds <= 1:
             raise NavigationError("后台按键参数无效。")
-        if self.stopped() or not self.user32.IsWindow(self.hwnd) or self.user32.IsIconic(self.hwnd):
+        if self.stopped() or not self.target.exists() or self.target.minimized():
             return False
         if not self._post_window_key(key, down=True):
-            raise NavigationError(f"无法向游戏窗口发送后台按键（错误 {ctypes.get_last_error()}）。")
+            raise NavigationError(f"无法向游戏窗口发送后台按键（错误 {self.native.last_error()}）。")
         try:
             return pause(seconds)
         finally:
             # Even Stop during the pulse must enqueue the matching window-only up.
             # Never use global key_up here: it could affect the user's active app.
-            if self.user32.IsWindow(self.hwnd):
+            if self.target.exists():
                 if not self._post_window_key(key, down=False):
-                    raise NavigationError(f"无法释放游戏窗口的后台按键（错误 {ctypes.get_last_error()}）。")
+                    raise NavigationError(f"无法释放游戏窗口的后台按键（错误 {self.native.last_error()}）。")
 
     @property
     def generation(self):
@@ -260,12 +227,10 @@ class ForegroundInput:
 
     def force_key_up(self, key):
         # Cleanup only: do not require a working Agent channel or refocus.
-        extended = key in {33, 34, 35, 36, 37, 38, 39, 40, 45, 46, 163, 165}
-        self.user32.keybd_event(key, 0, 0x0002 | (0x0001 if extended else 0), 0)
+        self.native.force_key_up(key)
 
     def force_mouse_up(self, button):
-        self.user32.mouse_event({0: 0x0004, 1: 0x0010, 2: 0x0040, 3: 0x0100, 4: 0x0100}[button],
-                                0, 0, button-2 if button >= 3 else 0, 0)
+        self.native.force_mouse_up(button)
 
     def hold(self, key, seconds, *, restore=True):
         """Press any registered game action, for route-authored key steps."""
@@ -325,10 +290,8 @@ class ForegroundInput:
             raise NavigationError("鼠标按键未登记。")
         self.check()
         self.buttons.add(button)
-        # Maa Seize touch_down relocates the cursor before pressing. Scene
-        # buttons must only press, otherwise that warp can turn the camera.
-        flags = {0: 0x0002, 1: 0x0008, 2: 0x0020, 3: 0x0080, 4: 0x0080}[button]
-        if not send_mouse(self.user32, flags, data=button-2 if button >= 3 else 0):
+        # Press only; the backend never moves the cursor (that could turn the camera).
+        if not self.native.press_mouse(button):
             raise NavigationError("鼠标动作输入失败。")
 
     def mouse_up(self, button=0):
@@ -511,7 +474,7 @@ class BackgroundInput(ForegroundInput):
         self.check(require_foreground=True)
         self.buttons.add(button)
         flags = {0: 0x0002, 1: 0x0008, 2: 0x0020, 3: 0x0080, 4: 0x0080}[button]
-        if not send_mouse(self.user32, flags, data=button-2 if button >= 3 else 0):
+        if not self.native.send_mouse(flags, data=button-2 if button >= 3 else 0):
             raise NavigationError("鼠标动作输入失败。")
 
     @staticmethod
@@ -932,7 +895,7 @@ class BackgroundInput(ForegroundInput):
             if 2 in self.buttons:
                 return False
             self.buttons.add(2)
-            if not send_mouse(self.user32, 0x0020):
+            if not self.native.send_mouse(0x0020):
                 self.buttons.discard(2)
                 raise NavigationError("鼠标中键输入失败。")
             try:
@@ -1052,7 +1015,7 @@ class BackgroundInput(ForegroundInput):
         target = self._active_window_target()
         if not self._activate_window(target):
             return False
-        enter_down, enter_up, enter_flags = _window_key_spec(self.user32, 13)
+        enter_down, enter_up, enter_flags = self.native.window_key_spec(13)
         for ch in content:
             if self.stopped() or not self.user32.IsWindow(target):
                 return False
@@ -1092,5 +1055,5 @@ def relative_camera(controller, dx: int, dy: int) -> bool:
         adapter.check()
     if not adapter.foreground():
         return False
-    return send_mouse(adapter.user32, 0x0001, dx=dx, dy=dy)
+    return adapter.native.relative_move(dx, dy)
 
