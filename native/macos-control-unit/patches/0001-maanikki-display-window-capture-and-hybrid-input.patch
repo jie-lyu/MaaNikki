@@ -1,12 +1,24 @@
 diff --git a/source/MaaMacOSControlUnit/Base/CaptureGeometry.cpp b/source/MaaMacOSControlUnit/Base/CaptureGeometry.cpp
 new file mode 100644
-index 0000000..6579457
+index 0000000..1e86efb
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Base/CaptureGeometry.cpp
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,61 @@
 +#include "CaptureGeometry.h"
 +
 +MAA_CTRL_UNIT_NS_BEGIN
++
++DisplayMode display_mode(CGDirectDisplayID display_id)
++{
++    DisplayMode mode;
++    CGDisplayModeRef ref = CGDisplayCopyDisplayMode(display_id);
++    if (ref) {
++        mode.pixel_width = CGDisplayModeGetPixelWidth(ref);
++        mode.pixel_height = CGDisplayModeGetPixelHeight(ref);
++        CGDisplayModeRelease(ref);
++    }
++    return mode;
++}
 +
 +std::optional<WindowState> query_window(uint32_t window_id)
 +{
@@ -55,10 +67,10 @@ index 0000000..6579457
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Base/CaptureGeometry.h b/source/MaaMacOSControlUnit/Base/CaptureGeometry.h
 new file mode 100644
-index 0000000..e886438
+index 0000000..4991002
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Base/CaptureGeometry.h
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,94 @@
 +#pragma once
 +
 +#include <mutex>
@@ -84,17 +96,46 @@ index 0000000..e886438
 +    double scale = 0;                  // frame pixels per point
 +    int width = 0;                     // frame size in pixels
 +    int height = 0;
++    CGRect display_bounds = CGRectZero; // CGDisplayBounds at capture time
++    size_t display_pixel_width = 0;     // display mode at capture time
++    size_t display_pixel_height = 0;
++    // Consecutive published frames with this geometry. A press is refused on the first frame after
++    // a change: the click may have been computed from a frame with the previous geometry.
++    int frames_with_geometry = 0;
 +};
++
++inline bool same_geometry(const CaptureFrame& a, const CaptureFrame& b)
++{
++    return a.window_id == b.window_id && a.pid == b.pid && a.display_id == b.display_id
++           && CGRectEqualToRect(CGRectIntegral(a.window_bounds), CGRectIntegral(b.window_bounds))
++           && CGRectEqualToRect(a.captured_rect, b.captured_rect) && a.scale == b.scale && a.width == b.width && a.height == b.height
++           && CGRectEqualToRect(a.display_bounds, b.display_bounds) && a.display_pixel_width == b.display_pixel_width
++           && a.display_pixel_height == b.display_pixel_height;
++}
++
++struct DisplayMode
++{
++    size_t pixel_width = 0;
++    size_t pixel_height = 0;
++
++    bool operator==(const DisplayMode&) const = default;
++};
++
++DisplayMode display_mode(CGDirectDisplayID display_id);
 +
 +class CaptureGeometry
 +{
 +public:
-+    void publish(const CaptureFrame& frame)
++    void publish(CaptureFrame frame)
 +    {
 +        std::lock_guard lock(mutex_);
++        frame.frames_with_geometry = previous_ && same_geometry(*previous_, frame) ? previous_->frames_with_geometry + 1 : 1;
 +        frame_ = frame;
++        previous_ = frame;
 +    }
 +
++    // The target is gone or being rebuilt: no press may map through the old frame. The previous
++    // geometry is kept so that an identical rebuild does not count as a change.
 +    void invalidate()
 +    {
 +        std::lock_guard lock(mutex_);
@@ -110,6 +151,7 @@ index 0000000..e886438
 +private:
 +    mutable std::mutex mutex_;
 +    std::optional<CaptureFrame> frame_;
++    std::optional<CaptureFrame> previous_;
 +};
 +
 +// CGWindowList view of one window: owner pid, global bounds in points, on-screen flag.
@@ -125,14 +167,17 @@ index 0000000..e886438
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.h b/source/MaaMacOSControlUnit/Input/HybridInput.h
 new file mode 100644
-index 0000000..60d7d94
+index 0000000..7450533
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.h
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,94 @@
 +#pragma once
 +
++#include <chrono>
++#include <map>
 +#include <memory>
-+#include <set>
++#include <mutex>
++#include <thread>
 +
 +#include "Base/CaptureGeometry.h"
 +#include "Base/UnitBase.h"
@@ -145,15 +190,22 @@ index 0000000..60d7d94
 +// Input profile selected by MaaMacOSInputMethod_GlobalEvent | MaaMacOSInputMethod_PostToPid,
 +// each event kind on the path that a game accepts:
 +//
-+// - keys and text are posted to the window's process (works in the foreground and the background);
++// - keys and text are posted to the window's process;
 +// - absolute mouse events go through the global HID stream (games ignore posted clicks), at the
 +//   desktop point that the last captured frame maps the pixel to, and never activate the window;
 +// - relative mouse movement is a mouse-moved event with delta fields posted to the process.
 +//
-+// Clicks need a frame from DisplayWindowScreencap: before each press the window must still exist
-+// with the geometry of that frame, its process must own the frontmost window and the point must lie
-+// inside the frame. Otherwise nothing is sent. Releases are always sent. Held keys and buttons are
-+// released by inactive() and on destruction.
++// Foreground only: every press, text and relative move requires the target's process to be the
++// front application. A click additionally requires a settled frame from DisplayWindowScreencap
++// whose window and display geometry still hold, and hit-test evidence that the connected window is
++// what receives a click at that point. Otherwise nothing is sent.
++//
++// Releases only follow accepted presses, go where the press went (same point, same process), and
++// are always sent. inactive() and destruction release everything still held.
++//
++// The core calls releases from its stopping thread while its worker may be inside a press, so all
++// state is guarded by one mutex. A release that arrives from another thread for a press the unit
++// has not accepted yet cancels that press when it arrives shortly afterwards.
 +class HybridInput : public InputBase
 +{
 +public:
@@ -182,30 +234,43 @@ index 0000000..60d7d94
 +    void release_all();
 +
 +private:
-+    std::optional<CGPoint> checked_point(int x, int y, const char* action);
-+    std::optional<pid_t> foreground_pid(const char* action);
-+    std::optional<pid_t> target_pid(const char* action);
++    using Clock = std::chrono::steady_clock;
 +
-+    bool post_mouse(CGEventType type, CGPoint location, CGMouseButton button);
-+    bool post_key(pid_t pid, CGKeyCode key, bool down);
++    struct HeldContact
++    {
++        CGPoint point = CGPointZero;
++        CGMouseButton button = kCGMouseButtonLeft;
++    };
++
++    std::optional<pid_t> foreground_target(const char* action) const;
++    std::optional<CGPoint> checked_point(int x, int y, const char* action) const;
++
++    bool touch_up_locked(int contact);
++    bool key_up_locked(int key);
++
++    // A release from a foreign thread for something not held: remember it briefly.
++    void note_unmatched_release(std::map<int, Clock::time_point>& cancels, int id);
++    bool take_cancel(std::map<int, Clock::time_point>& cancels, int id);
 +
 +    uint32_t window_id_ = 0;
 +    std::shared_ptr<CaptureGeometry> geometry_;
 +
-+    pid_t last_pid_ = -1;
-+    std::set<int> held_keys_;
-+    std::set<int> held_contacts_;
-+    CGPoint last_point_ = CGPointZero;
++    mutable std::mutex mutex_;
++    std::thread::id worker_;
++    std::map<int, HeldContact> held_contacts_;
++    std::map<int, pid_t> held_keys_; // key -> process the press went to
++    std::map<int, Clock::time_point> cancelled_contacts_;
++    std::map<int, Clock::time_point> cancelled_keys_;
 +    CGPoint saved_cursor_ = { NAN, NAN };
 +};
 +
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
 new file mode 100644
-index 0000000..2837a81
+index 0000000..8620f54
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
-@@ -0,0 +1,370 @@
+@@ -0,0 +1,468 @@
 +#include "HybridInput.h"
 +
 +#include "InputUtils.h"
@@ -221,76 +286,122 @@ index 0000000..2837a81
 +namespace
 +{
 +
-+pid_t frontmost_window_pid()
++constexpr auto kCancelWindow = std::chrono::milliseconds(500);
++constexpr float kAxTimeoutSeconds = 0.25f;
++
++AXUIElementRef system_wide()
 +{
-+    // The owner of the first on-screen normal-layer window is the active application. NSWorkspace
-+    // would need a running main run loop in this process to stay current.
-+    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
-+    if (!list) {
-+        return -1;
-+    }
++    static AXUIElementRef element = [] {
++        AXUIElementRef created = AXUIElementCreateSystemWide();
++        AXUIElementSetMessagingTimeout(created, kAxTimeoutSeconds);
++        return created;
++    }();
++    return element;
++}
++
++// The front (active) application. GetFrontProcess is deprecated but still answers from the window
++// server without a run loop; NSWorkspace.frontmostApplication goes stale in a process that does not
++// run its main loop, and the accessibility server's focused application fails for apps that do not
++// answer accessibility requests (-25204 observed with Activity Monitor in front).
++pid_t front_application_pid()
++{
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wdeprecated-declarations"
++    ProcessSerialNumber psn {};
 +    pid_t pid = -1;
-+    for (CFIndex i = 0; i < CFArrayGetCount(list); ++i) {
-+        auto info = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(list, i));
-+        int layer = -1;
-+        auto layer_ref = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowLayer));
-+        if (layer_ref) {
-+            CFNumberGetValue(layer_ref, kCFNumberIntType, &layer);
-+        }
-+        if (layer != 0) {
-+            continue;
-+        }
-+        auto pid_ref = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowOwnerPID));
-+        if (pid_ref) {
-+            CFNumberGetValue(pid_ref, kCFNumberIntType, &pid);
-+        }
-+        break;
++    if (GetFrontProcess(&psn) != noErr || GetProcessPID(&psn, &pid) != noErr) {
++        pid = -1;
 +    }
-+    CFRelease(list);
++#pragma clang diagnostic pop
 +    return pid;
 +}
 +
-+// Windows of other processes stacked above the target that contain the point. Logged for now:
-+// which of them actually intercept clicks (Dock, menu bar, click-through overlays) is measured on
-+// the real game before it becomes a rule.
-+void log_windows_above(uint32_t window_id, pid_t pid, CGPoint point)
++// The process whose window receives a click at this global point. The window server's hit test
++// behind it skips click-through overlays, which the window list cannot tell apart (several apps keep
++// full-screen transparent windows above everything).
++pid_t process_at_point(CGPoint point, AXError* error)
 +{
-+    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenAboveWindow, window_id);
-+    if (!list) {
-+        return;
++    AXUIElementRef element = nullptr;
++    *error = AXUIElementCopyElementAtPosition(system_wide(), static_cast<float>(point.x), static_cast<float>(point.y), &element);
++    if (*error != kAXErrorSuccess || !element) {
++        return -1;
 +    }
-+    for (CFIndex i = 0; i < CFArrayGetCount(list); ++i) {
++    pid_t pid = -1;
++    if (AXUIElementGetPid(element, &pid) != kAXErrorSuccess) {
++        pid = -1;
++    }
++    CFRelease(element);
++    return pid;
++}
++
++// Among the target process's own on-screen windows, the front-most one containing the point.
++// Separates the game window from the process's other windows (dialogs, helper windows).
++uint32_t front_window_of_process_at(pid_t pid, CGPoint point)
++{
++    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
++    if (!list) {
++        return 0;
++    }
++    uint32_t found = 0;
++    for (CFIndex i = 0; i < CFArrayGetCount(list) && found == 0; ++i) {
 +        auto info = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(list, i));
 +        pid_t owner = -1;
-+        int layer = 0;
-+        double alpha = 1;
-+        CGRect bounds = CGRectZero;
 +        if (auto ref = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowOwnerPID))) {
 +            CFNumberGetValue(ref, kCFNumberIntType, &owner);
 +        }
-+        if (auto ref = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowLayer))) {
-+            CFNumberGetValue(ref, kCFNumberIntType, &layer);
++        if (owner != pid) {
++            continue;
 +        }
++        double alpha = 1;
 +        if (auto ref = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowAlpha))) {
 +            CFNumberGetValue(ref, kCFNumberDoubleType, &alpha);
 +        }
++        CGRect bounds = CGRectZero;
 +        if (auto ref = static_cast<CFDictionaryRef>(CFDictionaryGetValue(info, kCGWindowBounds))) {
 +            CGRectMakeWithDictionaryRepresentation(ref, &bounds);
 +        }
-+        if (owner == pid || !CGRectContainsPoint(bounds, point)) {
++        if (alpha <= 0 || !CGRectContainsPoint(bounds, point)) {
 +            continue;
 +        }
-+        std::string owner_name;
-+        if (auto ref = static_cast<CFStringRef>(CFDictionaryGetValue(info, kCGWindowOwnerName))) {
-+            char buffer[256] = {};
-+            if (CFStringGetCString(ref, buffer, sizeof(buffer), kCFStringEncodingUTF8)) {
-+                owner_name = buffer;
-+            }
++        if (auto ref = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowNumber))) {
++            CFNumberGetValue(ref, kCFNumberSInt32Type, &found);
 +        }
-+        LogInfo << "window above target at click point" << VAR(owner) << VAR(owner_name) << VAR(layer) << VAR(alpha) << VAR(bounds.origin.x)
-+                << VAR(bounds.origin.y) << VAR(bounds.size.width) << VAR(bounds.size.height);
 +    }
 +    CFRelease(list);
++    return found;
++}
++
++bool post_mouse(CGEventType type, CGPoint location, CGMouseButton button)
++{
++    CGEventRef event = CGEventCreateMouseEvent(nullptr, type, location, button);
++    if (!event) {
++        LogError << "failed to create mouse event";
++        return false;
++    }
++    CGEventPost(kCGHIDEventTap, event);
++    CFRelease(event);
++    return true;
++}
++
++bool post_key(pid_t pid, CGKeyCode key, bool down)
++{
++    CGEventRef event = CGEventCreateKeyboardEvent(nullptr, key, down);
++    if (!event) {
++        LogError << "failed to create keyboard event";
++        return false;
++    }
++    CGEventPostToPid(pid, event);
++    CFRelease(event);
++    return true;
++}
++
++bool valid_key(int key)
++{
++    if (key < 0 || key > 0xFFFF) {
++        LogError << "key code out of range" << VAR(key);
++        return false;
++    }
++    return true;
 +}
 +
 +} // namespace
@@ -299,9 +410,6 @@ index 0000000..2837a81
 +    : window_id_(window_id)
 +    , geometry_(std::move(geometry))
 +{
-+    if (auto window = query_window(window_id_)) {
-+        last_pid_ = window->pid;
-+    }
 +}
 +
 +HybridInput::~HybridInput()
@@ -314,36 +422,30 @@ index 0000000..2837a81
 +    return MaaControllerFeature_UseMouseDownAndUpInsteadOfClick | MaaControllerFeature_UseKeyboardDownAndUpInsteadOfClick;
 +}
 +
-+std::optional<pid_t> HybridInput::target_pid(const char* action)
++std::optional<pid_t> HybridInput::foreground_target(const char* action) const
 +{
 +    auto window = query_window(window_id_);
-+    if (!window) {
-+        LogError << "target window is gone, not sending" << VAR(action) << VAR(window_id_);
++    if (!window || !window->on_screen) {
++        LogError << "target window is gone or off screen, not sending" << VAR(action) << VAR(window_id_);
 +        return std::nullopt;
 +    }
-+    last_pid_ = window->pid;
++    pid_t front = front_application_pid();
++    if (front != window->pid) {
++        LogError << "target is not the front application, not sending" << VAR(action) << VAR(window->pid) << VAR(front);
++        return std::nullopt;
++    }
 +    return window->pid;
 +}
 +
-+std::optional<pid_t> HybridInput::foreground_pid(const char* action)
-+{
-+    auto pid = target_pid(action);
-+    if (!pid) {
-+        return std::nullopt;
-+    }
-+    pid_t front = frontmost_window_pid();
-+    if (front != *pid) {
-+        LogError << "target is not the frontmost application, not sending" << VAR(action) << VAR(*pid) << VAR(front);
-+        return std::nullopt;
-+    }
-+    return pid;
-+}
-+
-+std::optional<CGPoint> HybridInput::checked_point(int x, int y, const char* action)
++std::optional<CGPoint> HybridInput::checked_point(int x, int y, const char* action) const
 +{
 +    auto frame = geometry_->latest();
 +    if (!frame || frame->window_id != window_id_ || frame->scale <= 0) {
 +        LogError << "no captured frame to map the point through, not sending" << VAR(action);
++        return std::nullopt;
++    }
++    if (frame->frames_with_geometry < 2) {
++        LogError << "geometry changed with the last frame; capture again before clicking" << VAR(action);
 +        return std::nullopt;
 +    }
 +    if (x < 0 || y < 0 || x >= frame->width || y >= frame->height) {
@@ -351,43 +453,57 @@ index 0000000..2837a81
 +                 << VAR(frame->height);
 +        return std::nullopt;
 +    }
++
 +    auto window = query_window(window_id_);
++    DisplayMode mode = display_mode(frame->display_id);
 +    if (!window || !window->on_screen || window->pid != frame->pid
-+        || !CGRectEqualToRect(CGRectIntegral(window->bounds), CGRectIntegral(frame->window_bounds))) {
-+        LogError << "window changed since the last frame, not sending" << VAR(action) << VAR(window.has_value());
++        || !CGRectEqualToRect(CGRectIntegral(window->bounds), CGRectIntegral(frame->window_bounds))
++        || !CGRectEqualToRect(CGDisplayBounds(frame->display_id), frame->display_bounds) || mode.pixel_width != frame->display_pixel_width
++        || mode.pixel_height != frame->display_pixel_height) {
++        LogError << "window or display changed since the last frame, not sending" << VAR(action) << VAR(window.has_value());
 +        return std::nullopt;
 +    }
-+    if (!foreground_pid(action)) {
++    auto pid = foreground_target(action);
++    if (!pid) {
 +        return std::nullopt;
 +    }
++
 +    // Frame pixel -> global point: one origin, one scale, the same ones the frame was cropped with.
 +    CGPoint point = CGPointMake(frame->captured_rect.origin.x + x / frame->scale, frame->captured_rect.origin.y + y / frame->scale);
-+    log_windows_above(window_id_, frame->pid, point);
++
++    AXError error = kAXErrorSuccess;
++    pid_t owner = process_at_point(point, &error);
++    if (owner != *pid) {
++        LogError << "another process receives clicks at this point (Dock, menu bar, a window above?), not sending" << VAR(action)
++                 << VAR(point.x) << VAR(point.y) << VAR(owner) << VAR(error);
++        return std::nullopt;
++    }
++    uint32_t front = front_window_of_process_at(*pid, point);
++    if (front != window_id_) {
++        LogError << "another window of the game covers this point, not sending" << VAR(action) << VAR(point.x) << VAR(point.y) << VAR(front);
++        return std::nullopt;
++    }
 +    return point;
 +}
 +
-+bool HybridInput::post_mouse(CGEventType type, CGPoint location, CGMouseButton button)
++void HybridInput::note_unmatched_release(std::map<int, Clock::time_point>& cancels, int id)
 +{
-+    CGEventRef event = CGEventCreateMouseEvent(nullptr, type, location, button);
-+    if (!event) {
-+        LogError << "failed to create mouse event";
-+        return false;
++    // The core's own worker releases after a refused press; only a release racing in from the stopping
++    // thread may belong to a press that is about to arrive.
++    if (std::this_thread::get_id() != worker_) {
++        cancels[id] = Clock::now();
 +    }
-+    CGEventPost(kCGHIDEventTap, event);
-+    CFRelease(event);
-+    return true;
 +}
 +
-+bool HybridInput::post_key(pid_t pid, CGKeyCode key, bool down)
++bool HybridInput::take_cancel(std::map<int, Clock::time_point>& cancels, int id)
 +{
-+    CGEventRef event = CGEventCreateKeyboardEvent(nullptr, key, down);
-+    if (!event) {
-+        LogError << "failed to create keyboard event";
++    auto it = cancels.find(id);
++    if (it == cancels.end()) {
 +        return false;
 +    }
-+    CGEventPostToPid(pid, event);
-+    CFRelease(event);
-+    return true;
++    bool fresh = Clock::now() - it->second < kCancelWindow;
++    cancels.erase(it);
++    return fresh;
 +}
 +
 +bool HybridInput::click(int x, int y)
@@ -406,10 +522,20 @@ index 0000000..2837a81
 +bool HybridInput::touch_down(int contact, int x, int y, int pressure)
 +{
 +    std::ignore = pressure;
++    std::lock_guard lock(mutex_);
++    worker_ = std::this_thread::get_id();
 +
 +    MouseEventInfo info;
 +    if (!contact_to_mouse_down_info(contact, info)) {
 +        LogError << "contact out of range" << VAR(contact);
++        return false;
++    }
++    if (take_cancel(cancelled_contacts_, contact)) {
++        LogWarn << "press cancelled by a stop that arrived before it" << VAR(contact);
++        return false;
++    }
++    if (held_contacts_.contains(contact)) {
++        LogError << "contact already pressed" << VAR(contact);
 +        return false;
 +    }
 +    auto point = checked_point(x, y, "touch_down");
@@ -427,15 +553,21 @@ index 0000000..2837a81
 +    if (!post_mouse(info.event_type, *point, info.mouse_button)) {
 +        return false;
 +    }
-+    held_contacts_.insert(contact);
-+    last_point_ = *point;
++    held_contacts_[contact] = { *point, info.mouse_button };
 +    return true;
 +}
 +
 +bool HybridInput::touch_move(int contact, int x, int y, int pressure)
 +{
 +    std::ignore = pressure;
++    std::lock_guard lock(mutex_);
 +
++    // Only drags of an accepted press; hovering without a press is not part of this profile.
++    auto held = held_contacts_.find(contact);
++    if (held == held_contacts_.end()) {
++        LogError << "touch_move without an accepted press, not sending" << VAR(contact);
++        return false;
++    }
 +    MouseEventInfo info;
 +    if (!contact_to_mouse_move_info(contact, info)) {
 +        LogError << "contact out of range" << VAR(contact);
@@ -448,20 +580,29 @@ index 0000000..2837a81
 +    if (!post_mouse(info.event_type, *point, info.mouse_button)) {
 +        return false;
 +    }
-+    last_point_ = *point;
++    held->second.point = *point;
 +    return true;
 +}
 +
 +bool HybridInput::touch_up(int contact)
 +{
-+    MouseEventInfo info;
-+    if (!contact_to_mouse_up_info(contact, info)) {
-+        LogError << "contact out of range" << VAR(contact);
-+        return false;
++    std::lock_guard lock(mutex_);
++    return touch_up_locked(contact);
++}
++
++bool HybridInput::touch_up_locked(int contact)
++{
++    auto held = held_contacts_.find(contact);
++    if (held == held_contacts_.end()) {
++        // Nothing was pressed (the press was refused, or has not arrived yet): send nothing.
++        note_unmatched_release(cancelled_contacts_, contact);
++        return true;
 +    }
++    MouseEventInfo info;
++    contact_to_mouse_up_info(contact, info);
 +    // Released where it was pressed, whatever the window or the user's cursor did since.
-+    bool ok = post_mouse(info.event_type, last_point_, info.mouse_button);
-+    held_contacts_.erase(contact);
++    bool ok = post_mouse(info.event_type, held->second.point, held->second.button);
++    held_contacts_.erase(held);
 +    if (held_contacts_.empty() && !std::isnan(saved_cursor_.x)) {
 +        CGWarpMouseCursorPosition(saved_cursor_);
 +        saved_cursor_ = { NAN, NAN };
@@ -477,7 +618,8 @@ index 0000000..2837a81
 +
 +bool HybridInput::input_text(const std::string& text)
 +{
-+    auto pid = target_pid("input_text");
++    std::lock_guard lock(mutex_);
++    auto pid = foreground_target("input_text");
 +    if (!pid) {
 +        return false;
 +    }
@@ -502,48 +644,60 @@ index 0000000..2837a81
 +
 +bool HybridInput::key_down(int key)
 +{
-+    if (key < 0 || key > 0xFFFF) {
-+        LogError << "key code out of range" << VAR(key);
++    std::lock_guard lock(mutex_);
++    worker_ = std::this_thread::get_id();
++    if (!valid_key(key)) {
 +        return false;
 +    }
-+    auto pid = target_pid("key_down");
++    if (take_cancel(cancelled_keys_, key)) {
++        LogWarn << "key press cancelled by a stop that arrived before it" << VAR(key);
++        return false;
++    }
++    if (held_keys_.contains(key)) {
++        return true; // already down where it was sent
++    }
++    auto pid = foreground_target("key_down");
 +    if (!pid || !post_key(*pid, static_cast<CGKeyCode>(key), true)) {
 +        return false;
 +    }
-+    held_keys_.insert(key);
++    held_keys_[key] = *pid;
 +    return true;
 +}
 +
 +bool HybridInput::key_up(int key)
 +{
-+    if (key < 0 || key > 0xFFFF) {
-+        LogError << "key code out of range" << VAR(key);
++    std::lock_guard lock(mutex_);
++    if (!valid_key(key)) {
 +        return false;
 +    }
-+    held_keys_.erase(key);
-+    // A release goes to the last known process even if the window has just closed.
-+    pid_t pid = last_pid_;
-+    if (auto current = query_window(window_id_)) {
-+        pid = current->pid;
++    return key_up_locked(key);
++}
++
++bool HybridInput::key_up_locked(int key)
++{
++    auto held = held_keys_.find(key);
++    if (held == held_keys_.end()) {
++        note_unmatched_release(cancelled_keys_, key);
++        return true;
 +    }
-+    if (pid <= 0) {
-+        LogError << "no target process for key_up" << VAR(key);
-+        return false;
-+    }
-+    return post_key(pid, static_cast<CGKeyCode>(key), false);
++    // To the process that got the press, even if the window has closed or its id was reused since.
++    bool ok = post_key(held->second, static_cast<CGKeyCode>(key), false);
++    held_keys_.erase(held);
++    return ok;
 +}
 +
 +bool HybridInput::scroll(int dx, int dy)
 +{
-+    // No captured point to scroll at has been validated for this profile yet; refuse rather than
-+    // send a wheel event to whatever lies under a stale position.
++    // No validated point to scroll at in this profile yet; refuse rather than send a wheel event to
++    // whatever lies under a stale position.
 +    LogError << "scroll is not supported by the hybrid input" << VAR(dx) << VAR(dy);
 +    return false;
 +}
 +
 +bool HybridInput::relative_move(int dx, int dy)
 +{
-+    auto pid = foreground_pid("relative_move");
++    std::lock_guard lock(mutex_);
++    auto pid = foreground_target("relative_move");
 +    if (!pid) {
 +        return false;
 +    }
@@ -567,11 +721,20 @@ index 0000000..2837a81
 +
 +void HybridInput::release_all()
 +{
-+    for (int contact : std::set<int>(held_contacts_)) {
-+        touch_up(contact);
++    std::lock_guard lock(mutex_);
++    std::vector<int> contacts;
++    for (const auto& [contact, _] : held_contacts_) {
++        contacts.push_back(contact);
 +    }
-+    for (int key : std::set<int>(held_keys_)) {
-+        key_up(key);
++    for (int contact : contacts) {
++        touch_up_locked(contact);
++    }
++    std::vector<int> keys;
++    for (const auto& [key, _] : held_keys_) {
++        keys.push_back(key);
++    }
++    for (int key : keys) {
++        key_up_locked(key);
 +    }
 +}
 +
@@ -747,10 +910,10 @@ index 0000000..8c9e621
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Screencap/DisplayWindowScreencap.mm b/source/MaaMacOSControlUnit/Screencap/DisplayWindowScreencap.mm
 new file mode 100644
-index 0000000..36c9717
+index 0000000..c17723a
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Screencap/DisplayWindowScreencap.mm
-@@ -0,0 +1,251 @@
+@@ -0,0 +1,246 @@
 +#include "DisplayWindowScreencap.h"
 +
 +#include "MaaUtils/Logger.h"
@@ -775,26 +938,6 @@ index 0000000..36c9717
 +bool same_rect(CGRect a, CGRect b)
 +{
 +    return CGRectEqualToRect(CGRectIntegral(a), CGRectIntegral(b));
-+}
-+
-+struct DisplayMode
-+{
-+    size_t pixel_width = 0;
-+    size_t pixel_height = 0;
-+
-+    bool operator==(const DisplayMode&) const = default;
-+};
-+
-+DisplayMode display_mode(CGDirectDisplayID display_id)
-+{
-+    DisplayMode mode;
-+    CGDisplayModeRef ref = CGDisplayCopyDisplayMode(display_id);
-+    if (ref) {
-+        mode.pixel_width = CGDisplayModeGetPixelWidth(ref);
-+        mode.pixel_height = CGDisplayModeGetPixelHeight(ref);
-+        CGDisplayModeRelease(ref);
-+    }
-+    return mode;
 +}
 +
 +} // namespace
@@ -843,41 +986,57 @@ index 0000000..36c9717
 +           && same_rect(CGDisplayBounds(cached.display_id), target_->display_bounds) && display_mode(cached.display_id) == target_->mode;
 +}
 +
++// Fills lookup.window / lookup.display (retained) with the window and the display holding most of it.
++template <typename Lookup>
++static void pick_window_and_display(SCShareableContent* content, uint32_t window_id, Lookup& lookup)
++{
++    for (SCWindow* candidate in content.windows) {
++        if (candidate.windowID == window_id) {
++            lookup.window = [candidate retain];
++            break;
++        }
++    }
++    if (!lookup.window) {
++        return;
++    }
++    CGFloat best = 0;
++    for (SCDisplay* display in content.displays) {
++        CGRect overlap = CGRectIntersection(display.frame, lookup.window.frame);
++        CGFloat area = CGRectIsNull(overlap) ? 0 : overlap.size.width * overlap.size.height;
++        if (area > best) {
++            best = area;
++            [lookup.display release];
++            lookup.display = [display retain];
++        }
++    }
++}
++
 +bool DisplayWindowScreencap::rebuild_target(const WindowState& window)
 +{
 +    reset_target();
 +
-+    // The handler must not touch `this`: after a timeout it may run once the unit is gone.
++    // Shared by this call and the handler, so objects retained after a timeout are released when the
++    // late handler finishes. The handler must not touch `this`: the unit may be gone by then.
++    struct Lookup
++    {
++        SCWindow* window = nil;
++        SCDisplay* display = nil;
++
++        ~Lookup()
++        {
++            [window release];
++            [display release];
++        }
++    };
++    auto lookup = std::make_shared<Lookup>();
 +    const uint32_t wanted_id = window_id_;
 +    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-+    __block SCWindow* found_window = nil;
-+    __block SCDisplay* found_display = nil;
 +
 +    [SCShareableContent getShareableContentExcludingDesktopWindows:YES
 +                                               onScreenWindowsOnly:YES
 +                                                 completionHandler:^(SCShareableContent* content, NSError* error) {
-+                                                     if (error || !content) {
-+                                                         dispatch_semaphore_signal(semaphore);
-+                                                         return;
-+                                                     }
-+                                                     for (SCWindow* candidate in content.windows) {
-+                                                         if (candidate.windowID == wanted_id) {
-+                                                             found_window = [candidate retain];
-+                                                             break;
-+                                                         }
-+                                                     }
-+                                                     if (found_window) {
-+                                                         // The display holding the largest part of the window.
-+                                                         CGFloat best = 0;
-+                                                         for (SCDisplay* display in content.displays) {
-+                                                             CGRect overlap = CGRectIntersection(display.frame, found_window.frame);
-+                                                             CGFloat area = CGRectIsNull(overlap) ? 0 : overlap.size.width * overlap.size.height;
-+                                                             if (area > best) {
-+                                                                 best = area;
-+                                                                 [found_display release];
-+                                                                 found_display = [display retain];
-+                                                             }
-+                                                         }
++                                                     if (!error && content) {
++                                                         pick_window_and_display(content, wanted_id, *lookup);
 +                                                     }
 +                                                     dispatch_semaphore_signal(semaphore);
 +                                                 }];
@@ -885,15 +1044,14 @@ index 0000000..36c9717
 +    bool signalled = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, kTimeoutNs)) == 0;
 +    dispatch_release(semaphore);
 +    if (!signalled) {
-+        // The handler may still run and retain objects; they leak rather than race.
 +        LogError << "shareable content lookup timed out" << VAR(window_id_);
 +        return false;
 +    }
++    SCWindow* found_window = lookup->window;
++    SCDisplay* found_display = lookup->display;
 +    if (!found_window || !found_display) {
 +        LogError << "window or its display not found in shareable content" << VAR(window_id_) << VAR(found_window != nil)
 +                 << VAR(found_display != nil);
-+        [found_window release];
-+        [found_display release];
 +        return false;
 +    }
 +
@@ -925,15 +1083,15 @@ index 0000000..36c9717
 +    target->frame.height = static_cast<int>(target->config.height);
 +    target->display_bounds = CGDisplayBounds(found_display.displayID);
 +    target->mode = display_mode(found_display.displayID);
++    target->frame.display_bounds = target->display_bounds;
++    target->frame.display_pixel_width = target->mode.pixel_width;
++    target->frame.display_pixel_height = target->mode.pixel_height;
 +
 +    LogInfo << "capture target" << VAR(window_id_) << VAR(target->frame.display_id) << VAR(found_window.frame.origin.x)
 +            << VAR(found_window.frame.origin.y) << VAR(found_window.frame.size.width) << VAR(found_window.frame.size.height)
 +            << VAR(window.bounds.origin.x) << VAR(window.bounds.origin.y) << VAR(window.bounds.size.width) << VAR(window.bounds.size.height)
 +            << VAR(visible.origin.x) << VAR(visible.origin.y) << VAR(visible.size.width) << VAR(visible.size.height) << VAR(scale)
 +            << VAR(target->frame.width) << VAR(target->frame.height);
-+
-+    [found_window release];
-+    [found_display release];
 +
 +    if (target->frame.width <= 0 || target->frame.height <= 0) {
 +        LogError << "window has no visible area on its display" << VAR(window_id_);

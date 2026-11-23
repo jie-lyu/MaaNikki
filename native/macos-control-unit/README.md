@@ -20,7 +20,17 @@ Mac 版使用基于 MaaFramework 源码打补丁、自行编译的 `libMaaMacOSC
 | 截图 `1 << 1`（DisplayWindow） | 方法 A：按窗口所在显示器过滤出这一个窗口，`sourceRect` 取窗口在该显示器内的可见部分，按真实像素输出。缓存窗口查找和过滤器；每次截图先用 CGWindowList 和 CGDisplay 比对窗口位置、显示器位置和显示模式，有变化才重建；截图期间几何变化时丢弃这一帧。 |
 | 输入 `GlobalEvent \| PostToPid`（Hybrid） | 按键和文字发给游戏进程；绝对坐标的鼠标走全局事件，不激活窗口；相对移动发给游戏进程。必须与 DisplayWindow 截图一起使用。 |
 
-点击坐标按最近一帧的原点和缩放换算到桌面坐标，截图和点击共用同一套数据，每个偏移只加一次。按下前检查：有可用的帧、窗口仍在且几何与该帧一致、游戏是最前面的应用、坐标在画面内，任一不满足就不发送。松开总是发送，位置与按下时相同。`inactive()` 和销毁时松开仍按住的键和鼠标键。滚轮暂不支持。点击位置上方的其他窗口（Dock、菜单栏等）目前只记录日志，实机测量后再决定拦截规则。
+只在前台工作：按键、文字、相对移动和点击都要求游戏是最前面的应用（`GetFrontProcess`，已弃用但仍可用；辅助功能的「当前焦点应用」在部分应用前台时会失败，`NSWorkspace` 在没有主循环的进程里不会更新）。
+
+点击坐标按最近一帧的原点和缩放换算到桌面坐标，截图和点击共用同一套数据，每个偏移只加一次。按下前还要满足：
+
+- 有可用的帧，且不是几何变化后的第一帧（点击可能是按变化前的画面算出的）；
+- 窗口仍在，窗口位置、显示器位置和显示模式与该帧一致；
+- 坐标在画面内；
+- 用辅助功能按坐标命中测试，接收点击的是游戏进程，而不是 Dock、菜单栏或别的窗口。窗口列表无法用来判断：本机就有三个应用在所有窗口之上放着全屏的透明窗口，点击会穿过它们；
+- 在游戏进程自己的窗口里，该坐标最前面的是已连接的窗口。
+
+任一不满足就不发送。松开只跟随被接受的按下，位置和进程与按下时相同，并且总是发送。拖动只跟随被接受的按下。主库停止时会在另一个线程直接松开按键，所以全部状态由一把锁保护；停止线程送来的松开如果对应的按下还没到，随后 0.5 秒内到达的这次按下会被取消。`inactive()` 和销毁时松开仍按住的键和鼠标键。滚轮暂不支持。
 
 `get_info()` 增加 `maanikki_patch`，agent 据此区分本构建和官方控制模块。
 
@@ -44,8 +54,14 @@ python3 -I native/macos-control-unit/build.py --runtime-out .build/macos-control
 
 ```sh
 python probe.py windows --runtime .build/macos-control-unit/runtime
-python probe.py lifecycle --runtime .build/macos-control-unit/runtime --game \
+python probe.py lifecycle --runtime .build/macos-control-unit/runtime --profile maanikki --game \
     --log-dir /tmp/probe-log --expect-unit <build.json 中的 sha256>
+python probe.py refusal-check --runtime .build/macos-control-unit/runtime --profile maanikki \
+    --window <一个不在前台的应用的窗口> --out /tmp/refusal
 ```
 
+`--profile maanikki` 使用补丁新增的截图和输入取值；不加时是官方取值，在补丁版里走的也是官方代码。
+
 `probe.py` 需要已安装 `maafw` 的 Python，并且宿主应用已获得「屏幕录制」权限。`lifecycle` 报告每轮的连接结果、画面尺寸和截图延迟。只有同时满足以下条件才算通过：至少两轮，每轮都连接成功并截到画面；新日志里控制模块的创建与销毁次数都等于轮数；进程中实际加载的主库和 MaaUtils 与 `upstream.lock.json` 一致，控制模块的哈希等于 `--expect-unit`（`stock` 表示官方版）。截图失败时不读取主库缓存的上一张图。
+
+`refusal-check` 不发送任何输入：目标窗口所属应用在前台时直接退出；否则点击、按键和相对移动都必须被控制模块拒绝并记录日志。`input-check` 会向游戏发送按键和点击，只能在维护者在场、同意后运行，见 `probe.py` 的说明。
