@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "maafw": {
+    "tag": "v5.16.1",
+    "commit": "ea944bd7b75f649851dc4807295966b3676bc821",
+    "repository": "https://github.com/MaaXYZ/MaaFramework.git",
+    "maautils_commit": "55be777e326db9419f45b4082e2bf2a1ed10e697"
+  },
+  "maadeps": {
+    "name": "MaaDeps-arm64-osx.tar.xz",
+    "url": "https://github.com/MaaXYZ/MaaDeps/releases/download/v3.0.2/MaaDeps-arm64-osx.tar.xz",
+    "sha256": "18a6ed056264f64f358dace52d45780ebf1b26943edef6df982d137d62333caf"
+  },
+  "stock_runtime": {
+    "name": "MAA-macos-aarch64-v5.16.1.zip",
+    "url": "https://github.com/MaaXYZ/MaaFramework/releases/download/v5.16.1/MAA-macos-aarch64-v5.16.1.zip",
+    "sha256": "fee7eef4ce9aace7a875be47e10ee1b3600d927f3d983e1d1a782aca20cbbd3d",
+    "libMaaFramework.dylib": "7517a94036fecf39112df739e7eea85b023572b40da216c847e1d5cc60324e38",
+    "libMaaUtils.dylib": "c7e5f19ae809cf4772dbbcb5705155a4985880223f5df6e4a51320bbbbd832d7",
+    "libMaaMacOSControlUnit.dylib": "4095064e97a85d2c0e4820d1e5ced07b459a3f90649c73b00e0ce36400687ea7"
+  },
+  "build": {
+    "triplet": "maa-arm64-osx",
+    "architecture": "arm64",
+    "deployment_target": "13.3",
+    "cmake": "4.4.5",
+    "ninja": "1.13.2"
+  }
+}
