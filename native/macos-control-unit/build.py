@@ -91,10 +91,18 @@ def source(work: Path) -> Path:
     utils = run("git", "rev-parse", "HEAD", cwd=src / "source" / "MaaUtils")
     if utils != pin["maautils_commit"]:
         sys.exit(f"MaaUtils at {utils}, expected {pin['maautils_commit']}")
+    # A reused work directory must not carry edits to tracked upstream files.
+    dirty = run("git", "status", "--porcelain", "--untracked-files=no", cwd=src / "source" / "MaaUtils")
+    if dirty:
+        sys.exit(f"MaaUtils has local changes; use a clean --work directory:\n{dirty}")
     return src
 
 
 def maadeps(work: Path, src: Path) -> None:
+    """Extract the locked MaaDeps archive once per work directory.
+
+    Reuse trusts the extracted tree; CI and release builds use a fresh --work directory.
+    """
     deps = LOCK["maadeps"]
     root = src / "source" / "MaaUtils" / "MaaDeps"
     marker = root / f".maanikki-{deps['sha256']}"
@@ -130,18 +138,42 @@ def build(work: Path, src: Path, bin_dir: Path, variant: str) -> Path:
         f"-DCMAKE_OSX_DEPLOYMENT_TARGET={pin['deployment_target']}",
         # The core logs a warning when a unit reports another version; keep the tag.
         f"-DMAA_HASH_VERSION={LOCK['maafw']['tag']}",
+        # Link with the install RPATHs (@loader_path, @executable_path) instead of absolute build-tree paths,
+        # so a missing packaged dependency cannot resolve from this machine's build or MaaDeps directories.
+        "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON",
         "-DWITH_MAA_AGENT=OFF", "-DENABLE_CCACHE=OFF",
         *[f"-DWITH_{name}_CONTROLLER=OFF" for name in off])
     run(bin_dir / "cmake", "--build", build_dir, "--target", "MaaMacOSControlUnit")
-    return build_dir / "bin" / UNIT
+    unit = build_dir / "bin" / UNIT
+    check_load_commands(unit)
+    return unit
+
+
+def check_load_commands(unit: Path) -> None:
+    """The unit must load like the official one: same RPATHs, dependencies only via @rpath or the system."""
+    commands = run("otool", "-l", unit).splitlines()
+    rpaths = [commands[i + 2].split()[1] for i, line in enumerate(commands) if line.strip() == "cmd LC_RPATH"]
+    if rpaths != ["@loader_path", "@executable_path"]:
+        sys.exit(f"unexpected LC_RPATH entries {rpaths}")
+    for line in run("otool", "-L", unit).splitlines()[1:]:
+        dependency = line.split()[0]
+        if not dependency.startswith(("@rpath/", "/System/Library/", "/usr/lib/")):
+            sys.exit(f"{UNIT} links {dependency}, which a tester's Mac will not have")
+
+
+RUNTIME_MARKER = ".maanikki-control-unit-runtime"
 
 
 def runtime_copy(work: Path, unit: Path, target: Path) -> None:
     stock = LOCK["stock_runtime"]
     archive = fetch(stock["url"], stock["sha256"], work / "downloads" / stock["name"])
     if target.exists():
+        # Only ever replace a directory this tool wrote; never an arbitrary path such as the checkout.
+        if any(target.iterdir()) and not (target / RUNTIME_MARKER).is_file():
+            sys.exit(f"{target} exists and was not written by build.py; choose a new or empty directory")
         shutil.rmtree(target)
     target.mkdir(parents=True)
+    (target / RUNTIME_MARKER).write_text("written by native/macos-control-unit/build.py\n", encoding="utf-8")
     with zipfile.ZipFile(archive) as bundle:
         for member in bundle.namelist():
             if member.startswith("bin/") and not member.endswith("/"):

@@ -6,11 +6,13 @@ directory, so swapping only the control unit into a copy of that directory
 shows whether a self-built unit works with the stock core.
 
     python probe.py windows
-    python probe.py lifecycle --runtime DIR [--window ID | --game] [--frames N]
+    python probe.py lifecycle --runtime DIR (--window ID | --game) --log-dir DIR --expect-unit SHA256|stock
     python probe.py capture --runtime DIR --game --out DIR
 
 `lifecycle` connects, captures, destroys the controller, then connects and
-captures again, twice over. `capture` saves one raw frame and one frame at
+captures again, for each round. It passes only when every round connects and
+captures, the log shows one unit Destroy per Create, the loaded core and
+MaaUtils match upstream.lock.json and the loaded unit has --expect-unit. `capture` saves one raw frame and one frame at
 the agent's 720 short side. Neither sends input.
 
 `--runtime` is the directory holding libMaaFramework.dylib and the control
@@ -62,12 +64,17 @@ def _pick_window(args, toolkit) -> int:
     sys.exit("pass --window ID or --game")
 
 
+# MaaNikki profile of the patched unit: display-window capture at native pixels
+# (screencap 1 << 1) with the hybrid input (GlobalEvent | PostToPid).
+PROFILES = {"stock": (1, 2), "maanikki": (1 << 1, 1 | 1 << 1)}
+_profile = "stock"
+
+
 def _connect(window_id: int, *, raw: bool):
     from maa.controller import MacOSController
-    from maa.define import MaaMacOSInputMethodEnum, MaaMacOSScreencapMethodEnum
 
-    controller = MacOSController(window_id, MaaMacOSScreencapMethodEnum.ScreenCaptureKit,
-                                 MaaMacOSInputMethodEnum.PostToPid)
+    screencap_method, input_method = PROFILES[_profile]
+    controller = MacOSController(window_id, screencap_method, input_method)
     if raw:
         controller.set_screenshot_use_raw_size(True)
     else:
@@ -79,15 +86,23 @@ def _connect(window_id: int, *, raw: bool):
 
 def _grab(controller):
     started = time.perf_counter()
-    frame = controller.post_screencap().wait().get()
+    job = controller.post_screencap().wait()
     elapsed = (time.perf_counter() - started) * 1000
+    if not job.succeeded:
+        # get() would return the core's cached image from an earlier successful capture.
+        return None, elapsed
+    frame = job.get()
     if frame is None or getattr(frame, "size", 0) == 0:
         return None, elapsed
     return frame, elapsed
 
 
-def _loaded_unit() -> dict | None:
-    """Path and SHA-256 of the control unit dyld actually loaded into this process."""
+LOCK = json.loads((Path(__file__).resolve().parent / "upstream.lock.json").read_text(encoding="utf-8"))
+CHECKED_LIBRARIES = ("libMaaFramework.dylib", "libMaaUtils.dylib", "libMaaMacOSControlUnit.dylib")
+
+
+def _loaded_libraries() -> dict[str, dict]:
+    """Path and SHA-256 of the MaaFramework libraries dyld actually loaded into this process."""
     import ctypes
     import hashlib
 
@@ -95,11 +110,12 @@ def _loaded_unit() -> dict | None:
     libsystem._dyld_image_count.restype = ctypes.c_uint32
     libsystem._dyld_get_image_name.restype = ctypes.c_char_p
     libsystem._dyld_get_image_name.argtypes = [ctypes.c_uint32]
+    loaded = {}
     for index in range(libsystem._dyld_image_count()):
-        name = libsystem._dyld_get_image_name(index).decode()
-        if name.endswith("/libMaaMacOSControlUnit.dylib"):
-            return {"path": name, "sha256": hashlib.sha256(Path(name).read_bytes()).hexdigest()}
-    return None
+        path = Path(libsystem._dyld_get_image_name(index).decode())
+        if path.name in CHECKED_LIBRARIES:
+            loaded[path.name] = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    return loaded
 
 
 def cmd_windows(_args) -> int:
@@ -114,10 +130,16 @@ def cmd_lifecycle(args) -> int:
     from maa.library import Library
     from maa.toolkit import Toolkit
 
-    log_dir = Path(args.log_dir).resolve() if args.log_dir else None
-    if log_dir:
-        from maa.tasker import Tasker
-        Tasker.set_log_dir(log_dir)
+    from maa.tasker import Tasker
+
+    if args.rounds < 2 or args.frames < 1:
+        sys.exit("lifecycle needs at least two rounds (to reconnect) and one frame per round")
+    expected_unit = LOCK["stock_runtime"][CHECKED_LIBRARIES[2]] if args.expect_unit == "stock" else args.expect_unit
+    log_dir = Path(args.log_dir).resolve()
+    if log_dir.exists() and any(log_dir.iterdir()):
+        sys.exit(f"{log_dir} is not empty; the create/destroy count needs a fresh log")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    Tasker.set_log_dir(log_dir)
     window_id = _pick_window(args, Toolkit)
     report = {"runtime": str(Library.framework_libpath.parent), "window_id": window_id, "rounds": []}
     failed = False
@@ -147,15 +169,20 @@ def cmd_lifecycle(args) -> int:
         gc.collect()  # MacOSController.__del__ destroys the native controller and its unit
         entry["destroyed"] = True
         report["rounds"].append(entry)
-    report["loaded_unit"] = _loaded_unit()
-    if log_dir:
-        # The control unit logs its C entry points; one Destroy per Create proves teardown.
-        text = (log_dir / "maafw.log").read_text(encoding="utf-8", errors="replace")
-        lines = text.splitlines()
-        report["unit_creates"] = sum("MaaMacOSControlUnitCreate(uint32_t" in line and "| enter" in line for line in lines)
-        report["unit_destroys"] = sum("MaaMacOSControlUnitDestroy(MaaMacOSControlUnitHandle)] [handle=true] | enter" in line
-                                      for line in lines)
-        failed = failed or report["unit_creates"] != args.rounds or report["unit_destroys"] != args.rounds
+    # The core and MaaUtils must be the locked official binaries, the unit the one under test.
+    loaded = _loaded_libraries()
+    report["loaded"] = loaded
+    expected = {name: LOCK["stock_runtime"][name] for name in CHECKED_LIBRARIES[:2]}
+    expected[CHECKED_LIBRARIES[2]] = expected_unit
+    report["mismatched"] = sorted(name for name, sha in expected.items() if loaded.get(name, {}).get("sha256") != sha)
+    # The control unit logs its C entry points; one Destroy per Create proves teardown.
+    lines = (log_dir / "maafw.log").read_text(encoding="utf-8", errors="replace").splitlines()
+    report["unit_creates"] = sum("MaaMacOSControlUnitCreate(uint32_t" in line and "| enter" in line for line in lines)
+    report["unit_destroys"] = sum("MaaMacOSControlUnitDestroy(MaaMacOSControlUnitHandle)] [handle=true] | enter" in line
+                                  for line in lines)
+    failed = (failed or bool(report["mismatched"])
+              or report["unit_creates"] != args.rounds or report["unit_destroys"] != args.rounds)
+    report["passed"] = not failed
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 1 if failed else 0
 
@@ -189,6 +216,8 @@ def main() -> int:
     for name in ("windows", "lifecycle", "capture"):
         command = sub.add_parser(name)
         command.add_argument("--runtime", help="directory with libMaaFramework.dylib and the control units")
+        command.add_argument("--profile", choices=sorted(PROFILES), default="stock",
+                             help="stock: ScreenCaptureKit + PostToPid; maanikki: the patched unit's own methods")
         if name == "windows":
             continue
         command.add_argument("--window", type=int, help="CGWindowID to connect")
@@ -197,11 +226,16 @@ def main() -> int:
             command.add_argument("--frames", type=int, default=10)
             command.add_argument("--rounds", type=int, default=3)
             command.add_argument("--raw", action="store_true", help="capture at raw size instead of 720 short side")
-            command.add_argument("--log-dir", help="empty directory for maafw.log; checks one unit Destroy per Create")
+            command.add_argument("--log-dir", required=True,
+                                 help="new or empty directory for maafw.log; checks one unit Destroy per Create")
+            command.add_argument("--expect-unit", required=True, metavar="SHA256|stock",
+                                 help="SHA-256 the loaded control unit must have (build.json), or 'stock' for the official one")
         else:
             command.add_argument("--out", required=True)
     args = parser.parse_args()
     _ensure_runtime(args.runtime)
+    global _profile
+    _profile = args.profile
     return {"windows": cmd_windows, "lifecycle": cmd_lifecycle, "capture": cmd_capture}[args.command](args)
 
 
