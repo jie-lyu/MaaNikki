@@ -211,8 +211,11 @@ def task_entry_supported(entry) -> bool:
     Win32 runs every task, as before. macOS runs only the preview's allowlist.
     """
     if platform_backend() == "macos":
-        from host.macos import PREVIEW_TASK_ENTRIES
-        return entry in PREVIEW_TASK_ENTRIES
+        from host.macos import preview_task_entries
+        try:
+            return entry in preview_task_entries()
+        except (OSError, ValueError, KeyError, TypeError):
+            return False  # no readable list: refuse, like the client
     return True
 
 

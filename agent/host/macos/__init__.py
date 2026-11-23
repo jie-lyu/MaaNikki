@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from host import Capabilities
 
@@ -12,12 +11,19 @@ from host import Capabilities
 CAPABILITIES = Capabilities("macos", foreground_input=True)
 
 
-# Pipeline entries of the tasks the preview runs (preview_tasks.json beside this file). The agent
-# checks the running task's entry before any task code (agent/registration.py); the client checks
-# every entry before submitting it, which also covers MXU's built-in tasks. Each entry is added only
-# after the task passed on a real Mac (docs/macos-support-plan.md, task order).
-PREVIEW_TASK_ENTRIES = frozenset(
-    json.loads((Path(__file__).with_name("preview_tasks.json")).read_text(encoding="utf-8"))["entries"])
+# Pipeline entries of the tasks the preview runs, from agent/host/macos/preview_tasks.json under
+# the resource root, the same file the client reads before submitting tasks (which also covers MXU's
+# built-in tasks). The agent checks the running task's entry before any task code
+# (agent/registration.py). Each entry is added only after the task passed on a real Mac
+# (docs/macos-support-plan.md, task order).
+PREVIEW_TASKS_FILE = ("agent", "host", "macos", "preview_tasks.json")
+
+
+def preview_task_entries() -> frozenset[str]:
+    from app_paths import RESOURCE_ROOT
+    path = RESOURCE_ROOT.joinpath(*PREVIEW_TASKS_FILE)
+    return frozenset(json.loads(path.read_text(encoding="utf-8"))["entries"])
+
 
 # interface.json names of the patched control unit's methods (client/src/types/maa.ts maps them).
 SCREENCAP_NAME = "DisplayWindow"
