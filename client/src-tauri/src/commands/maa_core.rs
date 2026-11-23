@@ -1446,6 +1446,8 @@ pub fn run_task_impl(
         }
 
         let tasker = Tasker::new().map_err(|e| e.to_string())?;
+        instance.tasker_serial = instance.tasker_serial.wrapping_add(1);
+        let tasker_serial = instance.tasker_serial;
 
         let app_for_sink = app.clone();
         let maa_state_for_sink = Arc::clone(state);
@@ -1456,6 +1458,7 @@ pub fn run_task_impl(
                     &maa_state_for_sink,
                     &app_for_sink,
                     &instance_id_for_sink,
+                    tasker_serial,
                     msg,
                     detail,
                 );
@@ -1645,8 +1648,8 @@ fn retire_macos_handles_in_background(instance_id: &str, controller: Option<Cont
 }
 
 /// Mac 运行结束（完成、失败或停止收尾）：标记连接不可用、取走这次运行的 agent 和释放应针对的代数，
-/// 并标记收尾进行中。必须在判定运行结束的同一个临界区里调用（持有实例锁）；返回 None 表示不是
-/// Mac 连接，调用方走原来的流程。
+/// 让这次运行的 Tasker 的迟到回调失效，并标记收尾进行中。必须在判定运行结束的同一个临界区里调用
+/// （持有实例锁）；返回 None 表示不是 Mac 连接，调用方走原来的流程。
 pub(crate) fn finish_macos_run(
     instance: &mut super::types::InstanceRuntime,
 ) -> Option<super::mac_connection::FinishedRun<maa_framework::agent_client::AgentClient, std::process::Child>> {
@@ -1662,11 +1665,12 @@ pub(crate) fn finish_macos_run(
         },
         &mut instance.agent_clients,
         &mut instance.agent_children,
-        &mut instance.macos_cleanup_pending,
+        &mut instance.macos_cleanup,
+        &mut instance.tasker_serial,
     ))
 }
 
-/// Mac 上一轮运行的收尾：同步断开取走的 agent（反注册其动作），清除收尾标记，再通知前端运行结束，
+/// Mac 上一轮运行的收尾：同步断开取走的 agent（反注册其动作），清除这次收尾自己的标记，再通知前端运行结束，
 /// 并只释放那一代的连接。调用方已在判定运行结束的同一个临界区里取得 `finished`。
 pub(crate) fn complete_macos_run(
     app: &tauri::AppHandle,
@@ -1677,7 +1681,7 @@ pub(crate) fn complete_macos_run(
     super::maa_agent::stop_taken_agents(finished.clients, finished.children);
     if let Ok(mut instances) = state.instances.lock() {
         if let Some(instance) = instances.get_mut(instance_id) {
-            instance.macos_cleanup_pending = false;
+            super::mac_connection::clear_cleanup(&mut instance.macos_cleanup, finished.generation);
         }
     }
     super::utils::emit_state_changed(app, instance_id, "task-progress");

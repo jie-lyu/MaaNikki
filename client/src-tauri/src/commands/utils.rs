@@ -94,10 +94,15 @@ pub fn emit_state_changed(app: &AppHandle, instance_id: &str, kind: &str) {
 /// 应在 tasker sink 中调用，在 `emit_callback_event` 之前处理任务状态变更。
 /// 负责跟踪 Tasker.Task.Starting / Succeeded / Failed，并在所有任务完成后
 /// 更新 `overall_status` 并发射 `tasks-completed` 事件。
+///
+/// `tasker_serial` 是发出回调的 Tasker 创建时的序号。Mac 连接上，只有当前 Tasker、且属于当前这一轮
+/// 的回调能改动实例（`mac_connection::callback_is_current`）；已结束或已被换掉的运行的迟到回调一律
+/// 忽略，不会结束下一轮或取走它的 agent。Windows 连接不做这些判断，行为不变。
 pub fn handle_task_callback(
     maa_state: &Arc<MaaState>,
     app: &AppHandle,
     instance_id: &str,
+    tasker_serial: u64,
     message: &str,
     details: &str,
 ) {
@@ -136,6 +141,7 @@ pub fn handle_task_callback(
             };
             if instance.stop_in_progress
                 || instance.task_run_state.overall_status.as_deref() != Some("Running")
+                || is_stale_macos_callback(instance, tasker_serial)
             {
                 (false, None)
             } else {
@@ -180,6 +186,14 @@ pub fn handle_task_callback(
             Some(i) => i,
             None => return,
         };
+        // Mac：已结束或已被换掉的运行的回调，或不属于当前这一轮的结束回调，不改动任何状态。
+        if is_stale_macos_callback(instance, tasker_serial)
+            || (is_macos_connection(instance)
+                && !is_started
+                && !instance.task_run_state.pending_task_ids.contains(&task_id))
+        {
+            return;
+        }
         let state = &mut instance.task_run_state;
 
         if is_started {
@@ -259,6 +273,23 @@ pub fn handle_task_callback(
         }
         super::maa_core::schedule_release_idle_desktop_controller(app, maa_state, instance_id);
     }
+}
+
+fn is_macos_connection(instance: &super::types::InstanceRuntime) -> bool {
+    matches!(
+        instance.controller_config,
+        Some(super::types::ControllerConfig::MacOS { .. })
+    )
+}
+
+/// Mac 连接上，回调来自已结束或已被换掉的 Tasker。
+fn is_stale_macos_callback(instance: &super::types::InstanceRuntime, tasker_serial: u64) -> bool {
+    is_macos_connection(instance)
+        && !super::mac_connection::callback_is_current(
+            instance.tasker_serial,
+            instance.tasker.is_some(),
+            tasker_serial,
+        )
 }
 
 /// 发送配置变更事件（双通道：WS 浏览器客户端 + Tauri WebView）

@@ -652,24 +652,6 @@ pub async fn start_tasks_impl(
     info!("agent_configs: {:?}", agent_configs);
     info!("cwd: {}, tcp_compat_mode: {}", cwd, tcp_compat_mode);
 
-    // Mac：上一轮的 agent 还在断开（反注册动作）时不能开始新的运行；最多等 3 秒。
-    let cleanup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        let pending = maa_state
-            .instances
-            .lock()
-            .map_err(|e| e.to_string())?
-            .get(&instance_id)
-            .is_some_and(|inst| inst.macos_cleanup_pending);
-        if !pending {
-            break;
-        }
-        if std::time::Instant::now() >= cleanup_deadline {
-            return Err("上一轮任务仍在收尾，请稍后再开始。".to_string());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-
     let reconnect_config = {
         let mut instances = maa_state.instances.lock().map_err(|e| e.to_string())?;
         instances.get_mut(&instance_id).and_then(|inst| {
@@ -716,108 +698,136 @@ pub async fn start_tasks_impl(
         }
     }
 
-    let (resource, controller, tasker, start_generation, stale_clients, stale_children) = {
-        debug!("[start_tasks] Acquiring instances lock...");
-        let mut instances = maa_state.instances.lock().map_err(|e| e.to_string())?;
-        debug!("[start_tasks] Instances lock acquired");
-        let instance = instances
-            .get_mut(&instance_id)
-            .ok_or("Instance not found")?;
-        debug!("[start_tasks] Instance found: {}", instance_id);
+    // Mac：上一轮仍在运行、或它的 agent 仍在断开（反注册动作）时不能开始新的运行。判断与取得启动权
+    // （清除停止标记、代数加一、新建 Tasker）在同一个临界区里；被挡住时在锁外等待，最多 3 秒。
+    let claim_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let (resource, controller, tasker, start_generation, stale_clients, stale_children) = loop {
+        let claimed = 'claim: {
+            debug!("[start_tasks] Acquiring instances lock...");
+            let mut instances = maa_state.instances.lock().map_err(|e| e.to_string())?;
+            debug!("[start_tasks] Instances lock acquired");
+            let instance = instances
+                .get_mut(&instance_id)
+                .ok_or("Instance not found")?;
+            debug!("[start_tasks] Instance found: {}", instance_id);
 
-        let res = instance
-            .resource
-            .as_ref()
-            .ok_or("Resource not loaded")?
-            .clone();
-        debug!("[start_tasks] Resource acquired");
-
-        let ctrl = instance
-            .controller
-            .as_ref()
-            .ok_or("Controller not connected")?
-            .clone();
-        debug!("[start_tasks] Controller acquired");
-
-        instance.stop_in_progress = false;
-        instance.stop_started_at = None;
-        instance.start_generation = instance.start_generation.wrapping_add(1);
-        let start_generation = instance.start_generation;
-        let (stale_clients, stale_children) = if reset_state {
-            (
-                std::mem::take(&mut instance.agent_clients),
-                std::mem::take(&mut instance.agent_children),
-            )
-        } else {
-            (Vec::new(), Vec::new())
-        };
-
-        // 创建或获取 tasker（若已有 tasker 但未初始化则自动丢弃并重建）
-        let needs_new_tasker = match instance.tasker.as_ref() {
-            None => true,
-            Some(t) => !t.inited(),
-        };
-        if needs_new_tasker {
-            if instance.tasker.is_some() {
-                warn!("[start_tasks] Existing tasker is not initialized, discarding and rebuilding...");
-                instance.tasker = None;
+            if reset_state
+                && matches!(
+                    instance.controller_config,
+                    Some(super::types::ControllerConfig::MacOS { .. })
+                )
+                && super::mac_connection::start_blocked(
+                    instance.macos_cleanup,
+                    instance.task_run_state.overall_status.as_deref() == Some("Running"),
+                )
+            {
+                break 'claim None;
             }
 
-            debug!("[start_tasks] Creating new tasker...");
-            let t = Tasker::new().map_err(|e| e.to_string())?;
-            debug!("[start_tasks] Tasker created");
+            let res = instance
+                .resource
+                .as_ref()
+                .ok_or("Resource not loaded")?
+                .clone();
+            debug!("[start_tasks] Resource acquired");
 
-            // 添加回调 Sink，用于接收任务状态通知并更新后端 TaskRunState
-            debug!("[start_tasks] Adding tasker sink...");
-            let app_handle = app.clone();
-            let maa_state_for_sink = Arc::clone(maa_state);
-            let inst_id_for_sink = instance_id.clone();
-            t.add_sink(move |msg, detail| {
-                // 先更新后端 TaskRunState（单一真相来源）
-                handle_task_callback(
-                    &maa_state_for_sink,
-                    &app_handle,
-                    &inst_id_for_sink,
-                    msg,
-                    detail,
-                );
-                // 再转发原始回调到前端
-                emit_callback_event(&app_handle, msg, detail);
-            })
-            .map_err(|e| e.to_string())?;
-            debug!("[start_tasks] Tasker sink added");
+            let ctrl = instance
+                .controller
+                .as_ref()
+                .ok_or("Controller not connected")?
+                .clone();
+            debug!("[start_tasks] Controller acquired");
 
-            // 添加 Context Sink，用于接收 Node 级别的通知（包含 focus 消息）
-            debug!("[start_tasks] Adding tasker context sink...");
-            let app_handle = app.clone();
-            let inst_id_for_ctx_sink = instance_id.clone();
-            t.add_context_sink(move |msg, detail| {
-                // 遥测：把失败节点挂到任务 Span 下，形成失败链路
-                super::telemetry::on_node_event(&inst_id_for_ctx_sink, msg, detail);
-                emit_callback_event(&app_handle, msg, detail);
-            })
-            .map_err(|e| e.to_string())?;
-            debug!("[start_tasks] Tasker context sink added");
+            instance.stop_in_progress = false;
+            instance.stop_started_at = None;
+            instance.start_generation = instance.start_generation.wrapping_add(1);
+            let start_generation = instance.start_generation;
+            let (stale_clients, stale_children) = if reset_state {
+                (
+                    std::mem::take(&mut instance.agent_clients),
+                    std::mem::take(&mut instance.agent_children),
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
 
-            debug!("[start_tasks] Binding resource and controller...");
-            t.bind(&res, &ctrl).map_err(|e| e.to_string())?;
-            debug!("[start_tasks] Resource and controller bound");
+            // 创建或获取 tasker（若已有 tasker 但未初始化则自动丢弃并重建）
+            let needs_new_tasker = match instance.tasker.as_ref() {
+                None => true,
+                Some(t) => !t.inited(),
+            };
+            if needs_new_tasker {
+                if instance.tasker.is_some() {
+                    warn!("[start_tasks] Existing tasker is not initialized, discarding and rebuilding...");
+                    instance.tasker = None;
+                }
 
-            instance.tasker = Some(t);
-            debug!("[start_tasks] Tasker created and stored");
-        } else {
-            debug!("[start_tasks] Using existing initialized tasker");
+                debug!("[start_tasks] Creating new tasker...");
+                let t = Tasker::new().map_err(|e| e.to_string())?;
+                debug!("[start_tasks] Tasker created");
+                instance.tasker_serial = instance.tasker_serial.wrapping_add(1);
+                let tasker_serial = instance.tasker_serial;
+
+                // 添加回调 Sink，用于接收任务状态通知并更新后端 TaskRunState
+                debug!("[start_tasks] Adding tasker sink...");
+                let app_handle = app.clone();
+                let maa_state_for_sink = Arc::clone(maa_state);
+                let inst_id_for_sink = instance_id.clone();
+                t.add_sink(move |msg, detail| {
+                    // 先更新后端 TaskRunState（单一真相来源）
+                    handle_task_callback(
+                        &maa_state_for_sink,
+                        &app_handle,
+                        &inst_id_for_sink,
+                        tasker_serial,
+                        msg,
+                        detail,
+                    );
+                    // 再转发原始回调到前端
+                    emit_callback_event(&app_handle, msg, detail);
+                })
+                .map_err(|e| e.to_string())?;
+                debug!("[start_tasks] Tasker sink added");
+
+                // 添加 Context Sink，用于接收 Node 级别的通知（包含 focus 消息）
+                debug!("[start_tasks] Adding tasker context sink...");
+                let app_handle = app.clone();
+                let inst_id_for_ctx_sink = instance_id.clone();
+                t.add_context_sink(move |msg, detail| {
+                    // 遥测：把失败节点挂到任务 Span 下，形成失败链路
+                    super::telemetry::on_node_event(&inst_id_for_ctx_sink, msg, detail);
+                    emit_callback_event(&app_handle, msg, detail);
+                })
+                .map_err(|e| e.to_string())?;
+                debug!("[start_tasks] Tasker context sink added");
+
+                debug!("[start_tasks] Binding resource and controller...");
+                t.bind(&res, &ctrl).map_err(|e| e.to_string())?;
+                debug!("[start_tasks] Resource and controller bound");
+
+                instance.tasker = Some(t);
+                debug!("[start_tasks] Tasker created and stored");
+            } else {
+                debug!("[start_tasks] Using existing initialized tasker");
+            }
+
+            let t = instance.tasker.as_ref().unwrap().clone();
+            Some((
+                res,
+                ctrl,
+                t,
+                start_generation,
+                stale_clients,
+                stale_children,
+            ))
+        };
+        match claimed {
+            Some(claimed) => break claimed,
+            None if std::time::Instant::now() >= claim_deadline => {
+                return Err("上一轮任务仍在运行或收尾，请稍后再开始。".to_string());
+            }
+            None => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
         }
-
-        let t = instance.tasker.as_ref().unwrap().clone();
-        (
-            res,
-            ctrl,
-            t,
-            start_generation,
-            stale_clients,
-            stale_children,
-        )
     };
     debug!("[start_tasks] Resource, controller and tasker acquired, proceeding...");
 

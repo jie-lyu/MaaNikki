@@ -228,8 +228,12 @@ pub struct InstanceRuntime {
     pub stop_started_at: Option<Instant>,
     /// 任务运行状态（后端管理，单一真相来源）
     pub task_run_state: TaskRunState,
-    /// Mac：上一轮运行的 agent 已取走、尚未断开（反注册完成前不能开始新的运行）
-    pub macos_cleanup_pending: bool,
+    /// Mac：上一轮运行的 agent 已取走、尚未断开时记下那一代（反注册完成前不能开始新的运行，
+    /// 只有那次收尾能清除）
+    pub macos_cleanup: Option<u64>,
+    /// 当前 Tasker 的序号：新建 Tasker 时加一并交给它的回调；Mac 运行结束时也加一，
+    /// 让那次运行的迟到回调失效
+    pub tasker_serial: u64,
 }
 
 impl Drop for InstanceRuntime {
