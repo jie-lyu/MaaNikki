@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .shop import ShopWorkflow
-from .settings import ROOT
+from app_paths import DATA_ROOT
 from adventure_report import try_record_adventure_entry
 
 
@@ -94,7 +94,7 @@ class MonthlyExchange(ShopWorkflow):
                 return False
         if self.newly_exchanged:
             try_record_adventure_entry(
-                ROOT,
+                DATA_ROOT,
                 self.rt,
                 category="daily",
                 task="monthly_exchange",

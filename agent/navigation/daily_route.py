@@ -598,9 +598,9 @@ class RouteActions:
                 diagnostics = getattr(self.rt.ui, "last_pickup_diagnostics", {})
                 if frame is not None:
                     from datetime import datetime
-                    from daily.settings import ROOT
+                    from app_paths import DATA_ROOT
                     try:
-                        folder = ROOT / "logs/navigation"
+                        folder = DATA_ROOT / "logs/navigation"
                         folder.mkdir(parents=True, exist_ok=True)
                         file = folder / (datetime.now().strftime("%Y%m%d-%H%M%S-%f")+"-pickup.png")
                         x, y, w, h = diagnostics["roi"]

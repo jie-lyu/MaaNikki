@@ -10,7 +10,7 @@ from maa.custom_action import CustomAction
 from daily import run_state
 from daily.runtime import Executors, parameters
 from .daily_tasks import DailyRun
-from daily.settings import ROOT
+from app_paths import DATA_ROOT
 from collection.realm_goals import parse_realm_queue
 
 
@@ -26,7 +26,7 @@ class RunCoordinationAction(CustomAction):
                 try:
                     from account_state import AccountState
                     from collection import statistics
-                    statistics.upload(AccountState(ROOT, uid), ROOT)
+                    statistics.upload(AccountState(DATA_ROOT, uid), DATA_ROOT)
                 except Exception:
                     pass
                 energy = context.get_node_data("MaaNikki_RealmEnergy") or {}

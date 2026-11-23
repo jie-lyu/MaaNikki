@@ -12,7 +12,6 @@ import cv2
 import numpy as np
 
 from account_state import AccountState, game_day
-from daily.settings import ROOT
 from tall_window import clamp_capture_park_point, safe_capture_y_range, tall_window, window_hwnd
 
 

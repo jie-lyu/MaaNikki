@@ -16,9 +16,10 @@ import time
 from threading import Timer
 
 
-ROOT = Path(__file__).resolve().parents[1]
-REPORT = ROOT / "logs/startup" / (datetime.now().strftime("%Y%m%d-%H%M%S-%f")+"-launch.json")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from app_paths import DATA_ROOT, RESOURCE_ROOT
+
+REPORT = DATA_ROOT / "logs/startup" / (datetime.now().strftime("%Y%m%d-%H%M%S-%f")+"-launch.json")
 from runtime_threads import configure_worker_threads
 
 configure_worker_threads(2)
@@ -41,7 +42,7 @@ def resolve_focus_lost_mode(options=None) -> str:
     mapping = {"Pause": "pause", "Return": "return", "Background": "background"}
     sources = [options] if isinstance(options, dict) else []
     try:
-        cfg = mxu_config(ROOT) or {}
+        cfg = mxu_config(DATA_ROOT) or {}
         if isinstance(cfg.get("globalOptionValues"), dict):
             sources.append(cfg["globalOptionValues"])
     except Exception:
@@ -65,7 +66,7 @@ def resolve_task_hud_mode(options=None) -> str:
     mapping = {"Adaptive": "adaptive", "Always": "always", "ReasonOnly": "reason_only"}
     sources = [options] if isinstance(options, dict) else []
     try:
-        cfg = mxu_config(ROOT) or {}
+        cfg = mxu_config(DATA_ROOT) or {}
         if isinstance(cfg.get("globalOptionValues"), dict):
             sources.append(cfg["globalOptionValues"])
     except Exception:
@@ -486,7 +487,7 @@ class LauncherRuntime:
         # DirectML OCR can initialize in a corrupted state during launcher startup and
         # emit "_ _" for every detected box; CPU inference is fast and deterministic.
         self.resource.use_cpu()
-        if not self.resource.post_bundle(ROOT / "resource").wait().succeeded:
+        if not self.resource.post_bundle(RESOURCE_ROOT / "resource").wait().succeeded:
             raise RuntimeError("无法加载启动器识别所需的项目资源。")
         self.controller = Win32Controller(
             hwnd, MaaWin32ScreencapMethodEnum.PrintWindow,
@@ -635,11 +636,11 @@ class LauncherRuntime:
 
 
 def launch_game(program, timeout, record, *, background=False):
-    os.environ["MAAFW_BINARY_PATH"] = str(ROOT / "maafw")
+    os.environ["MAAFW_BINARY_PATH"] = str(RESOURCE_ROOT / "maafw")
     from maa.library import Library
     from maa.tasker import Tasker
-    Library.open(ROOT / "maafw")
-    Tasker.set_log_dir(str(ROOT / "logs/startup/framework"))
+    Library.open(RESOURCE_ROOT / "maafw")
+    Tasker.set_log_dir(str(DATA_ROOT / "logs/startup/framework"))
     Tasker.set_save_on_error(False)
     windows = LauncherWindows(program.parent)
     hwnd = windows.find()
@@ -835,7 +836,7 @@ def launch_game(program, timeout, record, *, background=False):
     record["launcher_restarts"] = launcher_restarts
     if last_image is not None:
         from diagnostics import save_image
-        folder = ROOT / "logs/startup"
+        folder = DATA_ROOT / "logs/startup"
         folder.mkdir(parents=True, exist_ok=True)
         name = datetime.now().strftime("%Y%m%d-%H%M%S-%f")+"-launcher.png"
         save_image(folder / name, last_image, full_frame=False)
@@ -873,14 +874,14 @@ def _connect_game_controller(hwnd, background: bool):
 
 def prepare_game(timeout, record, options=None):
     """Keep the batch disconnected until hot updates and restarts are complete."""
-    os.environ["MAAFW_BINARY_PATH"] = str(ROOT / "maafw")
+    os.environ["MAAFW_BINARY_PATH"] = str(RESOURCE_ROOT / "maafw")
     from maa.library import Library
     from maa.resource import Resource
     from maa.tasker import Tasker
     from registration import local_registration
 
-    Library.open(ROOT / "maafw")
-    Tasker.set_log_dir(str(ROOT / "logs/startup/framework"))
+    Library.open(RESOURCE_ROOT / "maafw")
+    Tasker.set_log_dir(str(DATA_ROOT / "logs/startup/framework"))
     Tasker.set_save_on_error(False)
     focus_mode = resolve_focus_lost_mode(options)
     hud_mode = resolve_task_hud_mode(options)
@@ -903,7 +904,7 @@ def prepare_game(timeout, record, options=None):
         with startup_step(record, "load_game_resource"):
             resource = Resource()
             resource.use_cpu()
-            if not resource.post_bundle(ROOT / "resource").wait().succeeded:
+            if not resource.post_bundle(RESOURCE_ROOT / "resource").wait().succeeded:
                 raise RuntimeError("无法加载进入游戏所需的资源。")
             with local_registration(resource) as handlers:
                 from action import start_game as _start_game

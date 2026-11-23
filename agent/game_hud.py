@@ -12,13 +12,13 @@ import time
 
 import numpy as np
 
+from app_paths import RESOURCE_ROOT
 from client_config import node_action_params
 from message_log import write_message
 from overlay_style import (
     Win32WakeEvent,
     MXU_CONFIG_FILE,
     PROC,
-    ROOT_DIR,
     BitmapInfo,
     Blend,
     Paint,
@@ -122,7 +122,7 @@ def _entry_labels() -> dict[str, str]:
     if _TASK_ENTRY_LABELS is not None:
         return _TASK_ENTRY_LABELS
     labels: dict[str, str] = {}
-    tasks_dir = ROOT_DIR / "tasks"
+    tasks_dir = RESOURCE_ROOT / "tasks"
     if tasks_dir.is_dir():
         for path in tasks_dir.glob("*.json"):
             try:

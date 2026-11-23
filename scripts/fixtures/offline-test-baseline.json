@@ -8,6 +8,21 @@
    "known_failures": [],
    "skips": []
   },
+  "test_app_paths.py": {
+   "tests": [
+    "DataPathTests.test_older_overlay_is_ignored",
+    "DataPathTests.test_overlay_under_data_root_and_builtin_under_resource_root",
+    "DataPathTests.test_single_root_behaves_as_before",
+    "LayoutGuardTests.test_agent_modules_take_roots_from_app_paths",
+    "LayoutGuardTests.test_client_passes_roots_to_every_python_process",
+    "RootResolutionTests.test_blank_values_fall_back",
+    "RootResolutionTests.test_defaults_to_install_directory",
+    "RootResolutionTests.test_install_directory_keeps_its_spelling",
+    "RootResolutionTests.test_separate_data_root"
+   ],
+   "known_failures": [],
+   "skips": []
+  },
   "test_clicks.py": {
    "tests": [
     "ClickTests.test_calendar_reuses_current_page_without_input",

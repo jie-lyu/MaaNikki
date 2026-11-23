@@ -7,13 +7,13 @@ from ctypes import wintypes as w
 import json
 import math
 import os
-from pathlib import Path
 import threading
 import time
 
 import cv2
 import numpy as np
 
+from app_paths import DATA_ROOT, RESOURCE_ROOT
 from message_log import write_message
 from overlay_style import (
     FONT_FAMILY,
@@ -37,7 +37,7 @@ from overlay_style import (
 from vision import read_image
 
 
-NAV_ROOT = Path(__file__).resolve().parents[2] / "resource/navigation"
+NAV_ROOT = RESOURCE_ROOT / "resource/navigation"
 
 ACTION_LABELS = {
     "": "途经",
@@ -1498,8 +1498,7 @@ class MinimapHudSurface:
         return len(self.dirty_boxes)
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-MXU_CONFIG_FILE = ROOT_DIR / "config/mxu-MaaNikki.json"
+MXU_CONFIG_FILE = DATA_ROOT / "config/mxu-MaaNikki.json"
 _CASE_TO_MODE = {
     "Full": "full",
     "MinimapOnly": "minimap",

@@ -14,7 +14,7 @@ from file_io import write_json
 
 from .route_test import RouteTest
 from .runtime import RESOURCE, Runtime
-from .settings import ROOT
+from app_paths import DATA_ROOT
 from .startup import focus_game
 from map_mask.matching import BigMapMatcher, MinimapMatcher, bigmap_pose
 from map_mask.service import BIGMAP_SCALES
@@ -26,7 +26,7 @@ from navigation.vision import Locator, Pose
 from task_control import TaskStopped, active_session
 
 
-RECORDING_FILE = ROOT / "config/route_recording.json"
+RECORDING_FILE = DATA_ROOT / "config/route_recording.json"
 MAX_SAMPLES = 20000
 # Sampling only has to outline the route; the editor simplifies it afterwards.
 SAMPLE_INTERVAL = .2

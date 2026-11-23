@@ -12,10 +12,10 @@ from ctypes import wintypes
 from dataclasses import dataclass
 import json
 import math
-from pathlib import Path
 from threading import Lock
 import time
 
+from app_paths import DATA_ROOT
 from client_config import mxu_config, node_action_params
 from file_io import write_json
 from game_view import ALLOWED_FRAME_SIZES, is_clipped_game_frame
@@ -24,8 +24,7 @@ from start_game import game_window
 from task_control import active_session
 
 
-ROOT = Path(__file__).resolve().parents[1]
-HANDOFF_FILE = ROOT / "logs" / "startup" / "window_restore.json"
+HANDOFF_FILE = DATA_ROOT / "logs" / "startup" / "window_restore.json"
 
 GWL_STYLE = -16
 GWL_EXSTYLE = -20
@@ -189,7 +188,7 @@ def is_auto_adjust_resolution_enabled(context=None, options=None) -> bool:
             if case_name in ("Yes", "No"):
                 return case_name == "Yes"
     try:
-        cfg = mxu_config(ROOT) or {}
+        cfg = mxu_config(DATA_ROOT) or {}
         opt = (cfg.get("globalOptionValues") or {}).get("AutoAdjustResolution")
         if isinstance(opt, dict):
             if opt.get("type") == "switch" and opt.get("value") not in ("", None):

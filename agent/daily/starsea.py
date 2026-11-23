@@ -8,7 +8,7 @@ from task_control import task_time as time
 from datetime import datetime
 import cv2
 from vision import prepared_template
-from .settings import ROOT
+from app_paths import DATA_ROOT
 from adventure_report import try_record_adventure_entry
 from navigation.models import NavigationError, Point, load_route, maps
 from navigation.geometry import route_distance
@@ -132,7 +132,7 @@ class Starsea:
         if not self.events:
             return
         try:
-            directory = ROOT / "logs/navigation"
+            directory = DATA_ROOT / "logs/navigation"
             directory.mkdir(parents=True, exist_ok=True)
             file = directory / (datetime.now().strftime("%Y%m%d-%H%M%S-%f")+"-starsea.json")
             write_json(file, {"operation": operation, "events": self.events})
@@ -632,7 +632,7 @@ class Starsea:
                     return self.report_collection_statistics()
                 if teleporter.last_frame is not None:
                     try:
-                        folder = ROOT / "logs/navigation"
+                        folder = DATA_ROOT / "logs/navigation"
                         folder.mkdir(parents=True, exist_ok=True)
                         path = folder / (datetime.now().strftime("%Y%m%d-%H%M%S-%f")+"-crystal-map.png")
                         from diagnostics import save_image
@@ -678,7 +678,7 @@ class Starsea:
                 }
                 if gained_items:
                     try_record_adventure_entry(
-                        ROOT,
+                        DATA_ROOT,
                         self.rt,
                         category="starsea",
                         task="crystals",

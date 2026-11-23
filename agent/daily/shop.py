@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import cv2
 
-from .settings import ROOT
+from app_paths import DATA_ROOT
 from account_state import AccountState, period_key
 
 
 class ShopWorkflow:
     def __init__(self, runtime):
         self.rt, self.ui = runtime, runtime.ui
-        self.account = AccountState.for_runtime(ROOT, runtime)
+        self.account = AccountState.for_runtime(DATA_ROOT, runtime)
         self.period = period_key(self.TASK)
         self.completed = self.account.completed_items(self.TASK, self.period)
 

@@ -7,7 +7,7 @@ from account_state import AccountState
 from collection.backpack import rescan_backpack
 from collection.material_pursuit import load_catalogs, record_material_history
 from daily.runtime import Runtime, parameters
-from daily.settings import ROOT
+from app_paths import DATA_ROOT
 from registration import agent_action
 from task_control import TaskStopped
 from wardrobe.renewal_scanner import RenewalScanner
@@ -18,7 +18,7 @@ from wardrobe.scanner import WardrobeScanner
 class WardrobeReadAction(CustomAction):
     def run(self, context, argv):
         rt = Runtime(context)
-        folder = ROOT / "logs/wardrobe" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        folder = DATA_ROOT / "logs/wardrobe" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         folder.mkdir(parents=True, exist_ok=True)
         scanner = None
         try:
@@ -106,7 +106,7 @@ class BackpackReadAction(CustomAction):
         rt = Runtime(context)
         try:
             rt.log("背包读取开始。")
-            account = AccountState.for_runtime(ROOT, rt)
+            account = AccountState.for_runtime(DATA_ROOT, rt)
             crafting, scoring = load_catalogs()
             inv = rescan_backpack(rt, account, crafting)
             if inv is None:

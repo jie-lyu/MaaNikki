@@ -7,7 +7,8 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from .runtime import parameters
-from .settings import ROOT, foreground_inputs
+from app_paths import DATA_ROOT
+from .settings import foreground_inputs
 from .startup import focus_game
 from navigation.ability import ability_matches
 from navigation.controller import BackgroundInput, ForegroundInput
@@ -41,7 +42,7 @@ def run_fishing(runtime, inputs, *, passive=False, max_cast_count=None, use_rhyt
         runtime.navigation_inputs = previous
         result.update(kind=fishing.kind, materials=fishing.materials, events=events)
         try:
-            folder = ROOT / "logs/fishing"
+            folder = DATA_ROOT / "logs/fishing"
             folder.mkdir(parents=True, exist_ok=True)
             filename = datetime.now().strftime("%Y%m%d-%H%M%S-%f")+".json"
             write_json(folder / filename, result)

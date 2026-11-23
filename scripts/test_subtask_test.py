@@ -36,7 +36,7 @@ class SubtaskTests(unittest.TestCase):
         inputs.foreground.return_value = True
         inputs.focus_details.return_value = {"game_hwnd": 42, "foreground_hwnd": 42}
         with patch.dict(os.environ, {"PI_MAANIKKI_DEV_MODE": "1"}), \
-                patch("daily.subtask_test.ROOT", Path(directory)), \
+                patch("daily.subtask_test.DATA_ROOT", Path(directory)), \
                 patch("daily.subtask_test.TestInputs", return_value=inputs), \
                 patch("daily.subtask_test.inputs_allowed", return_value=True), \
                 patch("daily.subtask_test.focus_game"):
@@ -87,7 +87,7 @@ class SubtaskTests(unittest.TestCase):
             rt = self.runner(mode)
             with tempfile.TemporaryDirectory() as directory, \
                     patch.dict(os.environ, {"PI_MAANIKKI_DEV_MODE": "1"}), \
-                    patch("daily.subtask_test.ROOT", Path(directory)), \
+                    patch("daily.subtask_test.DATA_ROOT", Path(directory)), \
                     patch("daily.subtask_test.TestInputs") as inputs:
                 self.assertFalse(rt.run_test(key))
                 inputs.assert_not_called()
@@ -134,7 +134,7 @@ class SubtaskTests(unittest.TestCase):
         inputs.foreground.return_value = True
         with tempfile.TemporaryDirectory() as directory, \
                 patch.dict(os.environ, {"PI_MAANIKKI_DEV_MODE": "1"}), \
-                patch("daily.subtask_test.ROOT", Path(directory)), \
+                patch("daily.subtask_test.DATA_ROOT", Path(directory)), \
                 patch("daily.subtask_test.TestInputs", return_value=inputs), \
                 patch("daily.subtask_test.inputs_allowed", return_value=True), \
                 patch("daily.subtask_test.focus_game", side_effect=NavigationError("前台未稳定")):

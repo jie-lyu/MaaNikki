@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import cv2
-from daily.settings import ROOT
+from app_paths import DATA_ROOT
 from adventure_report import try_record_adventure_entry
 
 
@@ -84,7 +84,7 @@ class Mailbox:
             return self.fail("领取后未能确认全部附件已领取")
         self.rt.log("邮箱附件已全部领取。")
         try_record_adventure_entry(
-            ROOT,
+            DATA_ROOT,
             self.rt,
             category="daily",
             task="mailbox",

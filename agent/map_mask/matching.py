@@ -8,13 +8,13 @@ from itertools import combinations
 import cv2
 import numpy as np
 
-from daily.settings import ROOT
+from app_paths import DATA_ROOT
 from navigation.frames import minimap_sample
 from navigation.matching import luma, match_map
 from navigation.models import NavigationError
 
 
-SIFT_CACHE_DIR = ROOT / "cache/map-mask"
+SIFT_CACHE_DIR = DATA_ROOT / "cache/map-mask"
 
 
 def _fit_scale_residual(tiles, scale):

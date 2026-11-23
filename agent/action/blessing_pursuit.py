@@ -8,7 +8,7 @@ from maa.custom_action import CustomAction
 from registration import agent_action
 from task_control import TaskStopped
 from daily.runtime import Executors, parameters
-from daily.settings import ROOT
+from app_paths import DATA_ROOT
 from collection.pursuit import FiveStarPursuit
 from collection.decompose import DuplicateDecomposer, LowRarityDecomposer
 from collection.inventory_workflow import FiveStarInventory
@@ -52,7 +52,7 @@ def glow_shortfall(rt, role: dict, organize_mode: str = "auto") -> bool:
         if not targets:
             return False
     try:
-        order, protected, _ = InventoryStore(ROOT, catalog, rt).load_organization()
+        order, protected, _ = InventoryStore(DATA_ROOT, catalog, rt).load_organization()
     except (OSError, ValueError, KeyError, TypeError):
         return True
     if order.get("pending_operation") is not None or (order.get("recovery") or {}).get("slots"):
@@ -78,7 +78,7 @@ def fallback_realm(context, rt, node):
 
 def organization_issue(rt, catalog):
     try:
-        InventoryStore(ROOT, catalog, rt).load_organization()
+        InventoryStore(DATA_ROOT, catalog, rt).load_organization()
     except (OSError, ValueError, KeyError, TypeError) as error:
         return str(error)
     return None
@@ -88,7 +88,7 @@ def organization_issue(rt, catalog):
 class BlessingPursuitAction(CustomAction):
     def run(self, context, argv):
         rt = Executors(context)
-        folder = ROOT / "logs/blessing-pursuit" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        folder = DATA_ROOT / "logs/blessing-pursuit" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         folder.mkdir(parents=True, exist_ok=True)
         pursuit = None
         try:
@@ -143,10 +143,10 @@ class BlessingPursuitAction(CustomAction):
             decompose = parameters(context, "MaaNikki_Pursuit_DecomposeOption").get("enabled") is True
             auto_bling = parameters(context, "MaaNikki_Pursuit_BlingOption").get("enabled") is not False
             share = stats_enabled(
-                ROOT,
+                DATA_ROOT,
                 parameters(context, "MaaNikki_Pursuit_StatsOption").get("enabled") is not False,
             )
-            role_state = AccountState.for_runtime(ROOT, rt).load()
+            role_state = AccountState.for_runtime(DATA_ROOT, rt).load()
             flow = FiveStarPursuit(pursuit, decompose_duplicates=decompose, auto_bling=auto_bling,
                                   chance_priority=True, share_statistics=share,
                                   farm_only=farm_only, reserve_bling=reserve_bling,
@@ -211,7 +211,7 @@ class BlessingPursuitAction(CustomAction):
                     pursuit.log_progress("本轮结束" if pursuit.report.get("complete") else "本轮中断")
                     pursuit.record_history()
                     if pursuit.share_statistics:
-                        upload(pursuit.store.account, ROOT, catalog_version=pursuit.catalog["version"])
+                        upload(pursuit.store.account, DATA_ROOT, catalog_version=pursuit.catalog["version"])
                     # Save confirmed keepers and scoped recovery independently
                     # of stale, untracked material quantities.
                     if pursuit.prepared and "inventory" not in pursuit.report:
@@ -228,7 +228,7 @@ class BlessingMaintainAction(CustomAction):
 
     def run(self, context, argv):
         rt = Executors(context)
-        folder = ROOT / "logs/blessing-maintain" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        folder = DATA_ROOT / "logs/blessing-maintain" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         folder.mkdir(parents=True, exist_ok=True)
         pursuit = None
         try:
@@ -249,8 +249,8 @@ class BlessingMaintainAction(CustomAction):
                 result = organize_inventory(rt, catalog, allow_unlock=False, read_only=False)
                 if result["published"]:
                     try:
-                        _, protected, _ = InventoryStore(ROOT, catalog, rt).load_organization()
-                        AccountState.for_runtime(ROOT, rt).update(
+                        _, protected, _ = InventoryStore(DATA_ROOT, catalog, rt).load_organization()
+                        AccountState.for_runtime(DATA_ROOT, rt).update(
                             lambda data: data["observations"]
                             .setdefault("collection_history", {})
                             .__setitem__(str(game_day()), {"owned": len(protected)})
@@ -287,7 +287,7 @@ class BlessingMaintainAction(CustomAction):
             pursuit = FiveStarInventory(rt, catalog, folder)
             pursuit.reserve_bling = reserve_bling
             pursuit.share_statistics = stats_enabled(
-                ROOT,
+                DATA_ROOT,
                 parameters(context, "MaaNikki_Pursuit_StatsOption").get("enabled") is not False,
             )
             pursuit.prepare(f"manual_{mode}")
@@ -363,7 +363,7 @@ class BlessingMaintainAction(CustomAction):
                     pursuit.log_progress("本轮结束" if pursuit.report.get("complete") else "本轮中断")
                     pursuit.record_history()
                     if pursuit.share_statistics:
-                        upload(pursuit.store.account, ROOT, catalog_version=pursuit.catalog["version"])
+                        upload(pursuit.store.account, DATA_ROOT, catalog_version=pursuit.catalog["version"])
                     if pursuit.prepared and "inventory" not in pursuit.report:
                         pursuit.checkpoint()
                     else:

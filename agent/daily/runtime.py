@@ -12,7 +12,8 @@ import cv2
 from contextlib import contextmanager, nullcontext
 
 from .planner import Card
-from .settings import ROOT, foreground_inputs
+from app_paths import DATA_ROOT, RESOURCE_ROOT
+from .settings import foreground_inputs
 from client_config import node_action_params as parameters
 from game_keys import GameKeys
 from performance import count, measure
@@ -20,7 +21,7 @@ from message_log import write_message
 from game_view import ALLOWED_FRAME_SIZES, is_clipped_game_frame, require_game_frame
 
 
-RESOURCE = ROOT / "resource"
+RESOURCE = RESOURCE_ROOT / "resource"
 
 
 class Runtime:
@@ -810,7 +811,7 @@ class Runtime:
         if observed is None:
             self._frame_incomplete = True
             raise ValueError("未能识别左下角 UID，请确认游戏画面完整")
-        AccountState.bind(ROOT, observed)
+        AccountState.bind(DATA_ROOT, observed)
         self._account_uid = observed
         self._account_generation = self._focus_generation
         self._account_pause_generation = self._pause_generation
@@ -1235,7 +1236,7 @@ class Runtime:
             )
             if frame is not None and frame.shape[:2] == (720, 1280):
                 try:
-                    folder = ROOT / 'logs' / 'navigation'
+                    folder = DATA_ROOT / 'logs' / 'navigation'
                     folder.mkdir(parents=True, exist_ok=True)
                     roi = ([830, 105, 440, 600] if selection_view else
                            [240, 180, 590, 365] if map_view else [54, 14, 134, 134])
@@ -1290,7 +1291,7 @@ class Runtime:
         telemetry = None
         if active_route is not None:
             telemetry = record_route_telemetry(
-                ROOT,
+                DATA_ROOT,
                 active_route,
                 pending["events"],
                 executor=pending["executor"],
@@ -1299,7 +1300,7 @@ class Runtime:
                 stage=pending["stage"],
                 crystal=crystal,
             )
-        folder = ROOT / "logs" / "navigation"
+        folder = DATA_ROOT / "logs" / "navigation"
         try:
             folder.mkdir(parents=True, exist_ok=True)
             write_json(
@@ -1751,7 +1752,7 @@ class Executors(Runtime):
         child = Executors(clone)
         game = Gameplay(child)
         policy = load_realm_policy(child)
-        account = AccountState.for_runtime(ROOT, child)
+        account = AccountState.for_runtime(DATA_ROOT, child)
         state = cache if cache is not None else {}
 
         try:

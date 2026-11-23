@@ -13,7 +13,8 @@ from maa.custom_action import CustomAction
 
 from daily.planner import bell_notice, classify, select_energy, select_free
 from daily.runtime import Executors, parameters
-from daily.settings import ROOT, realm_settings
+from app_paths import DATA_ROOT
+from daily.settings import realm_settings
 from daily import run_state
 from adventure_report import try_record_adventure_entry
 
@@ -55,7 +56,7 @@ class DailyRun(Executors):
             clone.override_pipeline(overrides)
         inspect_rt = Executors(clone)
         policy = load_realm_policy(inspect_rt)
-        account = AccountState.for_runtime(ROOT, inspect_rt)
+        account = AccountState.for_runtime(DATA_ROOT, inspect_rt)
         crafting, scoring = load_catalogs()
 
         badges = self._energy_cache.get("double_badges")
@@ -258,7 +259,7 @@ class DailyRun(Executors):
                 self.diagnostic("daily_score", "无法可靠读取日常积分", details={
                     "mode": self.mode, "roi": [x, y, w, h], "reads": self.score_reads[-8:]})
             try:
-                directory = ROOT / "logs/daily"
+                directory = DATA_ROOT / "logs/daily"
                 directory.mkdir(parents=True, exist_ok=True)
                 name = f"{self.mode}-score-{datetime.now():%Y%m%d-%H%M%S-%f}.png"
                 from diagnostics import save_image
@@ -382,7 +383,7 @@ class DailyRun(Executors):
         return predicted
 
     def save_report(self, score):
-        directory = ROOT / "logs" / "daily"
+        directory = DATA_ROOT / "logs" / "daily"
         stamp = datetime.now()
         unexpected = self.has_unexpected_failure()
         operation_failed = (score is None or self.rewards_ok is False or self.handoff_ok is False
@@ -404,7 +405,7 @@ class DailyRun(Executors):
         if score is not None:
             reward_hint = " · 已领奖" if self.rewards_ok else ""
             try_record_adventure_entry(
-                ROOT,
+                DATA_ROOT,
                 self,
                 category="daily",
                 task=self.mode,

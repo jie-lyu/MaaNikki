@@ -37,7 +37,7 @@ from collection.statistics import is_enabled as stats_enabled, upload
 from daily import run_state
 from daily.gameplay import Gameplay
 from daily.runtime import Executors, parameters
-from daily.settings import ROOT
+from app_paths import DATA_ROOT
 from daily.ui import expected_text, fields
 from task_control import TaskStopped
 
@@ -129,7 +129,7 @@ def load_realm_policy(rt) -> dict:
         "reserve_bling": reserve_bling,
         "decompose": parameters(context, "MaaNikki_Pursuit_DecomposeOption").get("enabled") is True,
         "share_stats": stats_enabled(
-            ROOT,
+            DATA_ROOT,
             parameters(context, "MaaNikki_Pursuit_StatsOption").get("enabled") is not False,
         ),
     }
@@ -343,7 +343,7 @@ def run_shared_bless_collection(
 
     effective_mode = run_mode or ("double_bless" if farm_only else "zhaoxi_bless")
     folder_root = "logs/blessing-pursuit" if (full_workflow or effective_mode == "double_bless") else "logs/daily-bless"
-    folder = ROOT / folder_root / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    folder = DATA_ROOT / folder_root / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     folder.mkdir(parents=True, exist_ok=True)
     pursuit = FiveStarInventory(rt, catalog, folder)
     pursuit.reserve_bling = int(policy.get("reserve_bling", 0) or 0)
@@ -439,7 +439,7 @@ def run_shared_bless_collection(
                 pursuit.log_progress("双倍插队结束" if pursuit.report.get("complete") else "双倍插队阶段完成")
             pursuit.record_history()
             if pursuit.share_statistics:
-                upload(pursuit.store.account, ROOT, catalog_version=pursuit.catalog["version"])
+                upload(pursuit.store.account, DATA_ROOT, catalog_version=pursuit.catalog["version"])
             if pursuit.prepared and "inventory" not in pursuit.report:
                 pursuit.checkpoint()
             else:
@@ -575,7 +575,7 @@ def _run_double_jihua(
                 rt.log(f"限时双倍插队 · 超级激化：获得 {meta.get('name', target_label)} +{gained}。")
         item_name = meta.get("name") or target_label
         try_record_adventure_entry(
-            ROOT,
+            DATA_ROOT,
             rt,
             category="realm",
             task="double_jihua",
@@ -701,7 +701,7 @@ def _run_double_jihua(
                 normal_runs = max(0, actual_runs - double_runs)
                 gained = double_runs * (base_drop * 2) + normal_runs * base_drop
                 try_record_adventure_entry(
-                    ROOT,
+                    DATA_ROOT,
                     rt,
                     category="realm",
                     task="double_jihua",
@@ -775,7 +775,7 @@ def _run_double_bless(
             spent_energy = cur_energy - energy_after
             actual_runs = max(1, spent_energy // 40)
             try_record_adventure_entry(
-                ROOT,
+                DATA_ROOT,
                 rt,
                 category="realm",
                 task="double_bless",
@@ -925,7 +925,7 @@ def _run_double_monster(
             gained = 0
             meta = {}
         try_record_adventure_entry(
-            ROOT,
+            DATA_ROOT,
             rt,
             category="realm",
             task="double_monster",
@@ -1034,7 +1034,7 @@ def _run_double_monster(
                 normal_runs = max(0, total_runs - double_runs)
                 gained = double_runs * (base_drop * 2) + normal_runs * base_drop
                 try_record_adventure_entry(
-                    ROOT,
+                    DATA_ROOT,
                     rt,
                     category="realm",
                     task="double_monster",
@@ -1071,7 +1071,7 @@ def run_double_priority(rt) -> DoubleRunSummary:
 
     queue_goals = config["queue_goals"]
     organize = config["organize"]
-    account = AccountState.for_runtime(ROOT, rt)
+    account = AccountState.for_runtime(DATA_ROOT, rt)
     role = account.load()
     crafting, scoring = load_catalogs()
 

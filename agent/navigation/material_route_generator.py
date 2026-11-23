@@ -17,6 +17,7 @@ from typing import Iterable
 import cv2
 import numpy as np
 
+from app_paths import DATA_ROOT
 from map_mask.pearpal import API, WORLDS, decode, localized_text, request
 
 MAP_TO_WORLD = {v: k for k, v in WORLDS.items()}
@@ -347,10 +348,11 @@ class PearPalMaterialCatalog:
     """Fetches and caches all open-world material spawners and 3D spire elevations."""
 
     def __init__(self, root: Path):
+        """root is the resource root; the downloaded catalog is cached under the data root."""
         from data_paths import data_path
         self.root = root
-        self.builtin_path = data_path("resource/navigation/materials_catalog_v1.json", root)
-        self.cache_path = root / "cache/map-mask/materials_catalog_v1.json"
+        self.builtin_path = data_path("resource/navigation/materials_catalog_v1.json", resource_root=root)
+        self.cache_path = DATA_ROOT / "cache/map-mask/materials_catalog_v1.json"
         self.checkpoints_path = root / "resource/navigation/checkpoints.json"
         self.catalogs: dict[str, dict] = {}
         self.name_to_ids: dict[str, list[str]] = {}
@@ -703,7 +705,7 @@ class TerrainWalkabilityGrid:
                 self.obs_mask[gy0 : gy1 + 1, gx0 : gx1 + 1] = True
 
         # 2. Historical multi-unstuck poses from debug/route_telemetry/*.jsonl
-        telem_dir = self.root / "debug/route_telemetry"
+        telem_dir = DATA_ROOT / "debug/route_telemetry"
         if not telem_dir.is_dir():
             return
         spire_coords: list[tuple[float, float]] = []

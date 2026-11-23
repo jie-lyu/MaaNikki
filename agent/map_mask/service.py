@@ -12,7 +12,7 @@ import numpy as np
 from maa.define import MaaWin32ScreencapMethodEnum
 
 from daily.runtime import RESOURCE
-from daily.settings import ROOT
+from app_paths import DATA_ROOT
 from daily.ui import fields
 from diagnostics import FailureEvidence
 from file_io import write_json
@@ -63,7 +63,7 @@ REGIONS = {
 # animation passes through the navigation scale (.47775) before enlarging a
 # further 1.0827x; that transient scale cannot track the final map viewport.
 BIGMAP_SCALES = {"miraland": .44125}
-STATE_FILE = ROOT / "cache/map-mask/state.json"
+STATE_FILE = DATA_ROOT / "cache/map-mask/state.json"
 
 
 def _load_state():
@@ -169,7 +169,7 @@ class MapMask:
         self.window = None
         self.thread = threading.Thread(target=self._run, name="map-mask-matching", daemon=True)
         try:
-            self.data = PearPal(ROOT)
+            self.data = PearPal(DATA_ROOT)
             self.window = OverlayWindow(hwnd, exclude_from_capture=not window_capture,
                                         tutorial_provider=self.data.tutorial, hud_sink=hud_sink)
             self.thread.start()

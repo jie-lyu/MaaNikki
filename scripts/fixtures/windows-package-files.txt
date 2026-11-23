@@ -32,6 +32,7 @@ agent/action/subtask_test.py
 agent/action/wardrobe.py
 agent/action/weekly_challenge.py
 agent/adventure_report.py
+agent/app_paths.py
 agent/client_config.py
 agent/collection/__init__.py
 agent/collection/backpack.py

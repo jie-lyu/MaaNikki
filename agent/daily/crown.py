@@ -7,7 +7,7 @@ import cv2
 
 from account_state import period_key
 from .runtime import Runtime, parameters
-from .settings import ROOT
+from app_paths import DATA_ROOT
 from adventure_report import try_record_adventure_entry
 
 
@@ -547,7 +547,7 @@ class Crown(Runtime):
             final, total = self.read_progress(account)
             self.log(f"巅峰赛本期星数：{current} → {final}/{total} 星，完成目标 {target} 星。")
             try_record_adventure_entry(
-                ROOT,
+                DATA_ROOT,
                 self,
                 category="crown",
                 task="crown",

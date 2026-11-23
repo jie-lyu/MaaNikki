@@ -7,15 +7,15 @@ import ctypes
 from ctypes import wintypes as w
 import json
 import math
-from pathlib import Path
 import time
 
 import cv2
 import numpy as np
 
+from app_paths import DATA_ROOT
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-MXU_CONFIG_FILE = ROOT_DIR / "config/mxu-MaaNikki.json"
+
+MXU_CONFIG_FILE = DATA_ROOT / "config/mxu-MaaNikki.json"
 FONT_FAMILY = "Microsoft YaHei"
 PROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, w.HWND, w.UINT, w.WPARAM, w.LPARAM)
 

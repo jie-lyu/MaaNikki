@@ -257,6 +257,25 @@ pub fn emit_config_changed(app: &AppHandle) {
     }
 }
 
+/// 把只读资源根目录和可写数据根目录传给 agent 及其 Python 子进程。
+/// agent 从 `MAANIKKI_RESOURCE_ROOT` 读取 interface.json、resource/、tasks/、maafw/，
+/// 向 `MAANIKKI_DATA_ROOT` 写入 config/、logs/、debug/、cache/、data_overlay/。
+/// Windows 上两者都是程序目录（便携式部署），与 agent 自行推导的目录相同。
+pub fn apply_agent_root_env(cmd: &mut std::process::Command) {
+    match get_exe_directory() {
+        Ok(dir) => {
+            cmd.env("MAANIKKI_RESOURCE_ROOT", dir);
+        }
+        Err(e) => log::warn!("无法确定资源目录，agent 将自行推导: {}", e),
+    }
+    match get_app_data_dir() {
+        Ok(dir) => {
+            cmd.env("MAANIKKI_DATA_ROOT", dir);
+        }
+        Err(e) => log::warn!("无法确定数据目录，agent 将自行推导: {}", e),
+    }
+}
+
 /// 获取应用数据目录
 /// - macOS: ~/Library/Application Support/MXU/
 /// - Windows/Linux: exe 所在目录（保持便携式部署）

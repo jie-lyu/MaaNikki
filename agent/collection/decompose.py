@@ -3,7 +3,7 @@ import json
 import re
 
 from daily.runtime import parameters
-from daily.settings import ROOT
+from app_paths import DATA_ROOT, RESOURCE_ROOT
 from adventure_report import try_record_adventure_entry
 from task_control import ForegroundChanged, task_time as time
 from .scanner import FocusRetryBudget, IncompleteObservation, RescanSlot, clean_text
@@ -21,7 +21,7 @@ class LowRarityDecomposer:
         # An already-running app may retain the pipeline loaded before this
         # parameter-only node was added. Read its shipped layout as the base;
         # loaded task overrides still take precedence. No resource reload/input.
-        pipeline = json.loads((ROOT / "resource/pipeline/blessing_pursuit.json").read_text(encoding="utf-8"))
+        pipeline = json.loads((RESOURCE_ROOT / "resource/pipeline/blessing_pursuit.json").read_text(encoding="utf-8"))
         definition = pipeline.get(node, {})
         defaults = definition.get("custom_action_param", {})
         if not isinstance(defaults, dict):
@@ -371,7 +371,7 @@ class LowRarityDecomposer:
         finally:
             if summary["copies"] > 0 or summary["particles"] > 0:
                 try_record_adventure_entry(
-                    ROOT,
+                    DATA_ROOT,
                     self.rt,
                     category="blessing",
                     task="decompose",
@@ -461,7 +461,7 @@ class DuplicateDecomposer(LowRarityDecomposer):
         self.rt.log(f"重复闪光分解完成：分解 {summary['copies']} 件，获得 {summary['particles']} 闪光粒子。")
         if summary["copies"] > 0 or summary["particles"] > 0:
             try_record_adventure_entry(
-                ROOT,
+                DATA_ROOT,
                 self.rt,
                 category="blessing",
                 task="decompose",

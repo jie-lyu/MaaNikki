@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 
 from daily.runtime import parameters
-from daily.settings import ROOT
+from app_paths import RESOURCE_ROOT
 from .blessing import summarize_scan
 from .icons import IconMatcher
 from .details import COLOR_OCR_THRESHOLD, HEADER, VerifiedVariants, tooltip_facts
@@ -83,7 +83,7 @@ class InventoryScanner:
         self._scroll_diagnostics = {}
         self._ready_frame, self._ready_generation = None, None
         self._page_frame, self._tooltip_roi = None, None
-        self.matcher = IconMatcher(ROOT / "resource/image/blessing", catalog,
+        self.matcher = IconMatcher(RESOURCE_ROOT / "resource/image/blessing", catalog,
                                    threshold=self.layout.get("icon_threshold", .72),
                                    margin=self.layout.get("icon_margin", .035),
                                    color_threshold=self.layout.get("color_threshold", .80),

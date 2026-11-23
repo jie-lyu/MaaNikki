@@ -2,20 +2,19 @@ from __future__ import annotations
 
 import copy
 import json
-from pathlib import Path
+from app_paths import DATA_ROOT, RESOURCE_ROOT
 from client_config import active_controller, active_instance, supports_foreground_inputs, task_options, read_json
 
 
-ROOT = Path(__file__).resolve().parents[2]
-TASKS = ROOT / "tasks"
+TASKS = RESOURCE_ROOT / "tasks"
 
 
 def foreground_inputs() -> bool:
-    return supports_foreground_inputs(active_controller(ROOT))
+    return supports_foreground_inputs(active_controller(DATA_ROOT))
 
 
 def saved_task(name: str) -> dict | None:
-    saved = active_instance(ROOT)
+    saved = active_instance(DATA_ROOT)
     if saved is None:
         return None
     task = next((item for item in saved[1].get("tasks", []) if item.get("taskName") == name), None)

@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
+from app_paths import DATA_ROOT
 from file_io import write_json
 from pathlib import Path
 import time
@@ -99,7 +100,7 @@ def action_profile(action):
     if _ACTIVE.get() is not None:
         yield None
         return
-    profile = Performance(action, Path(__file__).resolve().parents[1] / "logs/performance")
+    profile = Performance(action, DATA_ROOT / "logs/performance")
     token = _ACTIVE.set(profile)
     try:
         yield profile

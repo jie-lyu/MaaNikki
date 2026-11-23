@@ -17,7 +17,8 @@ from task_control import ForegroundChanged, active_session, task_time as time
 
 from .route_test import RouteTest
 from .runtime import RESOURCE, Runtime
-from .settings import ROOT, foreground_inputs as inputs_allowed
+from app_paths import DATA_ROOT
+from .settings import foreground_inputs as inputs_allowed
 from .startup import focus_game
 from adventure_report import try_record_adventure_entry
 from navigation.controller import BackgroundInput, ForegroundInput
@@ -1806,7 +1807,7 @@ class MinigameBlingRun(Runtime):
                 except Exception:
                     pass
             try:
-                folder = ROOT / "logs/minigame_bling"
+                folder = DATA_ROOT / "logs/minigame_bling"
                 folder.mkdir(parents=True, exist_ok=True)
                 stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
                 wins = int(stats["completed_rounds"] or 0)
@@ -1838,7 +1839,7 @@ class MinigameBlingRun(Runtime):
                         detail_parts.append(f"净收益 {net_bling:,} 噗灵")
                     detail = " · ".join(detail_parts)
                     try_record_adventure_entry(
-                        ROOT,
+                        DATA_ROOT,
                         self,
                         category="minigame",
                         task="minigame_bling",

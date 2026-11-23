@@ -15,7 +15,7 @@ import numpy as np
 
 from account_state import AccountState, GAME_TIMEZONE
 from adventure_report import try_record_adventure_entry
-from daily.settings import ROOT
+from app_paths import DATA_ROOT
 from data_paths import data_path
 
 
@@ -139,7 +139,7 @@ def _fetch_qqbot_codes(now: datetime, known_expired: set[str]) -> list[str]:
 
 
 def _load_local_catalog_codes(now: datetime, known_expired: set[str]) -> list[str]:
-    path = data_path("resource/data/redeem_codes.json", ROOT)
+    path = data_path("resource/data/redeem_codes.json")
     if not path.is_file():
         return []
     try:
@@ -340,7 +340,7 @@ class RedeemCodes:
 
     def __init__(self, runtime):
         self.rt, self.ui = runtime, runtime.ui
-        self.account = AccountState.for_runtime(ROOT, runtime)
+        self.account = AccountState.for_runtime(DATA_ROOT, runtime)
         self.last_use_at = 0.0
 
     def fail(self, reason: str) -> bool:
@@ -605,7 +605,7 @@ class RedeemCodes:
 
             if redeemed_count > 0:
                 try_record_adventure_entry(
-                    ROOT,
+                    DATA_ROOT,
                     self.rt,
                     category="daily",
                     task="redeem_codes",

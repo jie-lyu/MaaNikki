@@ -9,7 +9,7 @@ from registration import agent_action
 from task_control import TaskStopped
 from daily.exploration import Exploration
 from daily.crown import Crown
-from daily.settings import ROOT
+from app_paths import DATA_ROOT
 from account_state import AccountState
 
 
@@ -41,7 +41,7 @@ class CrownAction(CustomAction):
         rt = Crown(context)
         completed = False
         try:
-            account = AccountState.for_runtime(ROOT, rt)
+            account = AccountState.for_runtime(DATA_ROOT, rt)
             target = rt.target_stars()
             progress = account.crown_progress()
             if account.complete("crown", target_stars=target):

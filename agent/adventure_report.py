@@ -201,7 +201,7 @@ def lookup_monster_drop(root: Path, level_name: str) -> tuple[str, str, int] | N
     if not level:
         return None
     try:
-        catalog_path = data_path("resource/data/crafting_catalog.json", Path(root))
+        catalog_path = data_path("resource/data/crafting_catalog.json", data_root=Path(root))
         if not catalog_path.is_file():
             return None
         mtime = catalog_path.stat().st_mtime

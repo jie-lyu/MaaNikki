@@ -13,7 +13,8 @@ from maa.custom_action import CustomAction
 from client_config import parse_custom_param
 from registration import agent_action
 from task_control import GameWindowClosed, TaskStopped, active_session, task_time as time
-from daily.runtime import Executors, ROOT
+from app_paths import DATA_ROOT
+from daily.runtime import Executors
 from daily.ui import find_expired_notice_confirm_box
 from game_view import ALLOWED_FRAME_SIZES, GameFrameSizeError, is_clipped_game_frame, require_game_frame
 
@@ -482,7 +483,7 @@ class StartGameAction(CustomAction):
         def incomplete(reason="尚未完成进入游戏"):
             self.stop_reason = reason
             if not runtime.stopped:
-                folder = ROOT / "logs/startup"
+                folder = DATA_ROOT / "logs/startup"
                 folder.mkdir(parents=True, exist_ok=True)
                 name = datetime.now().strftime("%Y%m%d-%H%M%S-%f")+"-enter"
                 record = {
@@ -510,7 +511,7 @@ class StartGameAction(CustomAction):
                 if uid is None and runtime.pause(.15):
                     uid = runtime.read_account_uid(runtime.capture())
                 if uid:
-                    AccountState.bind(ROOT, uid)
+                    AccountState.bind(DATA_ROOT, uid)
                     runtime._account_uid = uid
                     runtime._account_generation = runtime._focus_generation
                     runtime._account_pause_generation = runtime._pause_generation

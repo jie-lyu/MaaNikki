@@ -5,7 +5,7 @@ from copy import deepcopy
 from datetime import datetime
 from uuid import uuid4
 
-from daily.settings import ROOT
+from app_paths import DATA_ROOT
 from task_control import ForegroundChanged
 from .blessing import SLOTS
 from .inventory_workflow import FiveStarInventory
@@ -166,7 +166,7 @@ class DailyUpgrade(FiveStarInventory):
 
     def run(self):
         self.split_original = None
-        self.share_statistics = stats_enabled(ROOT)
+        self.share_statistics = stats_enabled(DATA_ROOT)
         self.report.update(mode="daily_upgrade", workflow="daily_upgrade", phase="find_candidate")
         try:
             try:
@@ -240,7 +240,7 @@ class DailyUpgrade(FiveStarInventory):
         finally:
             try:
                 if self.share_statistics:
-                    upload(self.store.account, ROOT, catalog_version=self.catalog["version"])
+                    upload(self.store.account, DATA_ROOT, catalog_version=self.catalog["version"])
                 self.checkpoint()
             except (OSError, ValueError):
                 pass
@@ -256,7 +256,7 @@ def upgrade_once(runtime):
     import json
 
     from data_paths import data_path
-    folder = ROOT / "logs/daily-upgrade" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    folder = DATA_ROOT / "logs/daily-upgrade" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     folder.mkdir(parents=True, exist_ok=True)
     catalog = json.loads(data_path("resource/data/blessing_catalog.json").read_text(encoding="utf-8"))
     try:

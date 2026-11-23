@@ -1,15 +1,14 @@
 """Runtime wiring shared by daily routes, route trials and local approaches."""
 from __future__ import annotations
 
-from pathlib import Path
 
+from app_paths import DATA_ROOT
 from client_config import mxu_config, node_action_params
 from overlay_style import should_exclude_from_capture
 from task_control import active_session
 from .engine import Navigator
 from .overlay import RouteMinimapOverlay, resolve_route_overlay_config
 
-_ROOT = Path(__file__).resolve().parents[2]
 
 
 def resolve_navigation_steering_mode(context=None) -> str:
@@ -22,7 +21,7 @@ def resolve_navigation_steering_mode(context=None) -> str:
         except Exception:
             pass
     try:
-        cfg = mxu_config(_ROOT)
+        cfg = mxu_config(DATA_ROOT)
         opt = ((cfg or {}).get("globalOptionValues") or {}).get("NavigationSteeringMode")
         if isinstance(opt, dict) and opt.get("caseName") == "Camera":
             return "camera"
