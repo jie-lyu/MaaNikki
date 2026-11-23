@@ -1,5 +1,5 @@
 {
- "source": "Windows CI run 45159836136 (phase 1 at 1039b44, PR merge commit b6e98fc): every suite present then produced exactly these outcomes on Windows. Added after 1039b44 and so far recorded on macOS only: test_app_paths.py, test_host.py, test_host_imports.py, test_window_layout.py, test_game_target.cjs and the selector test in test_windows_contract.cjs; HostImportTests.test_win32_overlay_backend_imports is skipped off Windows. Refresh from the offline-test-results artifact when Windows outcomes change.",
+ "source": "Windows CI run 45159836136 (phase 1 at 1039b44, PR merge commit b6e98fc): every suite present then produced exactly these outcomes on Windows. Added after 1039b44 and so far recorded on macOS only: test_app_paths.py, test_host.py, test_host_imports.py, test_window_layout.py, test_file_io.py, test_game_target.cjs and the selector test in test_windows_contract.cjs; HostImportTests.test_win32_overlay_backend_imports is skipped off Windows. Refresh from the offline-test-results artifact when Windows outcomes change.",
  "suites": {
   "test_agent_pause.py": {
    "tests": [
@@ -224,6 +224,15 @@
     "TimeoutMessageTests.test_timeout_message_not_hung",
     "TimeoutMessageTests.test_timeout_message_observation_unknown",
     "TimeoutMessageTests.test_timeout_recycled_hwnd_reports_unknown"
+   ],
+   "known_failures": [],
+   "skips": []
+  },
+  "test_file_io.py": {
+   "tests": [
+    "ExclusiveFileLockTests.test_account_and_report_locks_keep_their_paths",
+    "ExclusiveFileLockTests.test_creates_the_lock_file_with_one_byte_and_is_reusable",
+    "ExclusiveFileLockTests.test_excludes_another_process_until_released"
    ],
    "known_failures": [],
    "skips": []
