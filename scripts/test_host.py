@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import json
 import os
 import sys
 import unittest
@@ -438,6 +439,40 @@ class MacOSPreviewPathTests(unittest.TestCase):
                 patch("tall_window.ensure_16_9_window", side_effect=AssertionError("resized")):
             with self.assertRaises(GameFrameSizeError):
                 rt.capture()
+
+
+class TaskAllowlistTests(unittest.TestCase):
+    def test_windows_runs_every_task_and_macos_only_the_preview_allowlist(self):
+        import glob
+        entries = [task["entry"] for path in glob.glob(str(ROOT / "tasks/*.json"))
+                   for task in json.loads(Path(path).read_text(encoding="utf-8")).get("task", [])]
+        with backend("win32"):
+            self.assertTrue(all(host.task_entry_supported(entry) for entry in entries + ["MaaNikki_GameKeysRead", None]))
+        with backend("macos"):
+            self.assertEqual([entry for entry in entries if host.task_entry_supported(entry)], ["MaaNikki_Mailbox"])
+            self.assertFalse(host.task_entry_supported("MaaNikki_GameKeysRead"))
+            self.assertFalse(host.task_entry_supported(None))
+
+    def test_unsupported_entry_is_refused_before_any_task_code(self):
+        import registration
+        ran = []
+        token = registration._LOCAL_REGISTRATION.set(True)
+        try:
+            @registration.agent_action("test.allowlist_gate")
+            class Probe:
+                def run(self, context, argv):
+                    ran.append(argv.node_name)
+                    return True
+        finally:
+            registration._LOCAL_REGISTRATION.reset(token)
+        context = Mock()
+        argv = SimpleNamespace(task_detail=SimpleNamespace(task_id=7, entry="MaaNikki_Fishing"), node_name="MaaNikki_Fishing")
+        with backend("macos"):
+            self.assertFalse(Probe().run(context, argv))
+        self.assertEqual(ran, [])
+        message = context.run_task.call_args.args[1]["MaaNikki_Daily_Message"]["focus"]["Node.Action.Starting"]
+        self.assertIn("MaaNikki_Fishing", message)
+        self.assertIn("暂不支持当前系统", message)
 
 
 class SelectionTests(unittest.TestCase):

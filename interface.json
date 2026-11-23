@@ -39,6 +39,18 @@
         "mouse": "Seize",
         "keyboard": "Seize"
       }
+    },
+    {
+      "name": "nikki_macos",
+      "label": "无限暖暖（Mac 测试预览）",
+      "description": "连接无限暖暖 Mac 客户端窗口。测试预览：游戏需使用全屏窗口模式，放在外接 16:9 显示器上并保持在前台；首次使用需授予「屏幕录制」和「辅助功能」权限。",
+      "type": "MacOS",
+      "display_short_side": 720,
+      "macos": {
+        "title_regex": "^\\s*(Infinity\\s*Nikki|无限暖暖|無限暖暖)\\s*$",
+        "screencap": "DisplayWindow",
+        "input": "Hybrid"
+      }
     }
   ],
   "resource": [

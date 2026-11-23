@@ -9,6 +9,13 @@ from host import Capabilities
 CAPABILITIES = Capabilities("macos", foreground_input=True)
 
 
+# Pipeline entries of the tasks the preview runs, checked by the agent before any task code runs
+# (agent/registration.py), so saved presets, scheduled runs and feature entries are refused alike.
+# Each is added only after it passed on a real Mac (docs/macos-support-plan.md, task order).
+PREVIEW_TASK_ENTRIES = frozenset({
+    "MaaNikki_Mailbox",
+})
+
 # interface.json names of the patched control unit's methods (client/src/types/maa.ts maps them).
 SCREENCAP_NAME = "DisplayWindow"
 INPUT_NAME = "Hybrid"

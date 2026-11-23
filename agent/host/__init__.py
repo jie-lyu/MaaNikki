@@ -189,6 +189,17 @@ def controller_supports_foreground_input(controller) -> bool:
     return False
 
 
+def task_entry_supported(entry) -> bool:
+    """Whether this desktop's backend may run the task whose pipeline entry is ``entry``.
+
+    Win32 runs every task, as before. macOS runs only the preview's allowlist.
+    """
+    if platform_backend() == "macos":
+        from host.macos import PREVIEW_TASK_ENTRIES
+        return entry in PREVIEW_TASK_ENTRIES
+    return True
+
+
 def background_input_class():
     """Window-targeted input class for this desktop; raises NavigationError where there is none."""
     if platform_backend() != "win32":

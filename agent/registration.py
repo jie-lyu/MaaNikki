@@ -6,7 +6,7 @@ from threading import Event
 import traceback
 from performance import action_profile
 from game_view import ALLOWED_FRAME_SIZES, is_clipped_game_frame
-from host import capabilities, platform_backend
+from host import capabilities, platform_backend, task_entry_supported
 from message_log import message_scope
 from task_control import TaskStopped, task_session
 
@@ -60,6 +60,17 @@ def agent_action(name, *, stop_on_failure=False):
         @wraps(run)
         def guarded(self, context, argv):
             task_id = getattr(getattr(argv, "task_detail", None), "task_id", 0)
+            entry = getattr(getattr(argv, "task_detail", None), "entry", None)
+            if not task_entry_supported(entry):
+                # Before any task code, input or capture: a saved preset, a schedule or a feature
+                # entry may ask for a task this desktop's backend does not support yet.
+                try:
+                    context.run_task("MaaNikki_Daily_Message", {
+                        "MaaNikki_Daily_Message": {"focus": {
+                            "Node.Action.Starting": f"{entry} 暂不支持当前系统（Mac 测试预览只开放已验证的任务），已跳过。"}}})
+                except Exception:
+                    traceback.print_exc()
+                return False
             succeeded = False
             with action_profile(argv.node_name) as profile, message_scope(argv.node_name):
                 try:
