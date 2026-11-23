@@ -1,0 +1,1004 @@
+diff --git a/source/MaaMacOSControlUnit/Base/CaptureGeometry.cpp b/source/MaaMacOSControlUnit/Base/CaptureGeometry.cpp
+new file mode 100644
+index 0000000..6579457
+--- /dev/null
++++ b/source/MaaMacOSControlUnit/Base/CaptureGeometry.cpp
+@@ -0,0 +1,49 @@
++#include "CaptureGeometry.h"
++
++MAA_CTRL_UNIT_NS_BEGIN
++
++std::optional<WindowState> query_window(uint32_t window_id)
++{
++    if (window_id == 0) {
++        return std::nullopt;
++    }
++
++    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, window_id);
++    if (!list) {
++        return std::nullopt;
++    }
++
++    std::optional<WindowState> result;
++    if (CFArrayGetCount(list) > 0) {
++        auto info = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(list, 0));
++        WindowState state;
++
++        auto number = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowNumber));
++        uint32_t found_id = 0;
++        if (number) {
++            CFNumberGetValue(number, kCFNumberSInt32Type, &found_id);
++        }
++
++        auto pid = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowOwnerPID));
++        if (pid) {
++            CFNumberGetValue(pid, kCFNumberIntType, &state.pid);
++        }
++
++        auto bounds = static_cast<CFDictionaryRef>(CFDictionaryGetValue(info, kCGWindowBounds));
++        if (bounds) {
++            CGRectMakeWithDictionaryRepresentation(bounds, &state.bounds);
++        }
++
++        auto on_screen = static_cast<CFBooleanRef>(CFDictionaryGetValue(info, kCGWindowIsOnscreen));
++        state.on_screen = on_screen && CFBooleanGetValue(on_screen);
++
++        if (found_id == window_id && state.pid > 0) {
++            result = state;
++        }
++    }
++
++    CFRelease(list);
++    return result;
++}
++
++MAA_CTRL_UNIT_NS_END
+diff --git a/source/MaaMacOSControlUnit/Base/CaptureGeometry.h b/source/MaaMacOSControlUnit/Base/CaptureGeometry.h
+new file mode 100644
+index 0000000..e886438
+--- /dev/null
++++ b/source/MaaMacOSControlUnit/Base/CaptureGeometry.h
+@@ -0,0 +1,64 @@
++#pragma once
++
++#include <mutex>
++#include <optional>
++
++#include <ApplicationServices/ApplicationServices.h>
++
++#include "Common/Conf.h"
++
++MAA_CTRL_UNIT_NS_BEGIN
++
++// Where the last captured frame sits on the desktop. Written by the
++// display-window screencap after every frame and read by the hybrid input,
++// so a click maps back through the same origin and scale as the frame it was
++// computed from, and each offset is applied exactly once.
++struct CaptureFrame
++{
++    uint32_t window_id = 0;
++    pid_t pid = -1;
++    CGDirectDisplayID display_id = 0;
++    CGRect window_bounds = CGRectZero; // CGWindowList bounds at capture time, global points
++    CGRect captured_rect = CGRectZero; // captured area, global points (top-left origin)
++    double scale = 0;                  // frame pixels per point
++    int width = 0;                     // frame size in pixels
++    int height = 0;
++};
++
++class CaptureGeometry
++{
++public:
++    void publish(const CaptureFrame& frame)
++    {
++        std::lock_guard lock(mutex_);
++        frame_ = frame;
++    }
++
++    void invalidate()
++    {
++        std::lock_guard lock(mutex_);
++        frame_.reset();
++    }
++
++    std::optional<CaptureFrame> latest() const
++    {
++        std::lock_guard lock(mutex_);
++        return frame_;
++    }
++
++private:
++    mutable std::mutex mutex_;
++    std::optional<CaptureFrame> frame_;
++};
++
++// CGWindowList view of one window: owner pid, global bounds in points, on-screen flag.
++struct WindowState
++{
++    pid_t pid = -1;
++    CGRect bounds = CGRectZero;
++    bool on_screen = false;
++};
++
++std::optional<WindowState> query_window(uint32_t window_id);
++
++MAA_CTRL_UNIT_NS_END
+diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.h b/source/MaaMacOSControlUnit/Input/HybridInput.h
+new file mode 100644
+index 0000000..60d7d94
+--- /dev/null
++++ b/source/MaaMacOSControlUnit/Input/HybridInput.h
+@@ -0,0 +1,71 @@
++#pragma once
++
++#include <memory>
++#include <set>
++
++#include "Base/CaptureGeometry.h"
++#include "Base/UnitBase.h"
++#include "Common/Conf.h"
++
++#include <ApplicationServices/ApplicationServices.h>
++
++MAA_CTRL_UNIT_NS_BEGIN
++
++// Input profile selected by MaaMacOSInputMethod_GlobalEvent | MaaMacOSInputMethod_PostToPid,
++// each event kind on the path that a game accepts:
++//
++// - keys and text are posted to the window's process (works in the foreground and the background);
++// - absolute mouse events go through the global HID stream (games ignore posted clicks), at the
++//   desktop point that the last captured frame maps the pixel to, and never activate the window;
++// - relative mouse movement is a mouse-moved event with delta fields posted to the process.
++//
++// Clicks need a frame from DisplayWindowScreencap: before each press the window must still exist
++// with the geometry of that frame, its process must own the frontmost window and the point must lie
++// inside the frame. Otherwise nothing is sent. Releases are always sent. Held keys and buttons are
++// released by inactive() and on destruction.
++class HybridInput : public InputBase
++{
++public:
++    HybridInput(uint32_t window_id, std::shared_ptr<CaptureGeometry> geometry);
++    virtual ~HybridInput() override;
++
++public: // from InputBase
++    virtual MaaControllerFeature get_features() const override;
++
++    virtual bool click(int x, int y) override;
++    virtual bool swipe(int x1, int y1, int x2, int y2, int duration) override;
++
++    virtual bool touch_down(int contact, int x, int y, int pressure) override;
++    virtual bool touch_move(int contact, int x, int y, int pressure) override;
++    virtual bool touch_up(int contact) override;
++
++    virtual bool click_key(int key) override;
++    virtual bool input_text(const std::string& text) override;
++
++    virtual bool key_down(int key) override;
++    virtual bool key_up(int key) override;
++
++    virtual bool scroll(int dx, int dy) override;
++
++    bool relative_move(int dx, int dy);
++    void release_all();
++
++private:
++    std::optional<CGPoint> checked_point(int x, int y, const char* action);
++    std::optional<pid_t> foreground_pid(const char* action);
++    std::optional<pid_t> target_pid(const char* action);
++
++    bool post_mouse(CGEventType type, CGPoint location, CGMouseButton button);
++    bool post_key(pid_t pid, CGKeyCode key, bool down);
++
++    uint32_t window_id_ = 0;
++    std::shared_ptr<CaptureGeometry> geometry_;
++
++    pid_t last_pid_ = -1;
++    std::set<int> held_keys_;
++    std::set<int> held_contacts_;
++    CGPoint last_point_ = CGPointZero;
++    CGPoint saved_cursor_ = { NAN, NAN };
++};
++
++MAA_CTRL_UNIT_NS_END
+diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
+new file mode 100644
+index 0000000..2837a81
+--- /dev/null
++++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
+@@ -0,0 +1,370 @@
++#include "HybridInput.h"
++
++#include "InputUtils.h"
++#include "MaaUtils/Logger.h"
++
++#include <cmath>
++#include <tuple>
++#include <unistd.h>
++#include <vector>
++
++MAA_CTRL_UNIT_NS_BEGIN
++
++namespace
++{
++
++pid_t frontmost_window_pid()
++{
++    // The owner of the first on-screen normal-layer window is the active application. NSWorkspace
++    // would need a running main run loop in this process to stay current.
++    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
++    if (!list) {
++        return -1;
++    }
++    pid_t pid = -1;
++    for (CFIndex i = 0; i < CFArrayGetCount(list); ++i) {
++        auto info = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(list, i));
++        int layer = -1;
++        auto layer_ref = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowLayer));
++        if (layer_ref) {
++            CFNumberGetValue(layer_ref, kCFNumberIntType, &layer);
++        }
++        if (layer != 0) {
++            continue;
++        }
++        auto pid_ref = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowOwnerPID));
++        if (pid_ref) {
++            CFNumberGetValue(pid_ref, kCFNumberIntType, &pid);
++        }
++        break;
++    }
++    CFRelease(list);
++    return pid;
++}
++
++// Windows of other processes stacked above the target that contain the point. Logged for now:
++// which of them actually intercept clicks (Dock, menu bar, click-through overlays) is measured on
++// the real game before it becomes a rule.
++void log_windows_above(uint32_t window_id, pid_t pid, CGPoint point)
++{
++    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenAboveWindow, window_id);
++    if (!list) {
++        return;
++    }
++    for (CFIndex i = 0; i < CFArrayGetCount(list); ++i) {
++        auto info = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(list, i));
++        pid_t owner = -1;
++        int layer = 0;
++        double alpha = 1;
++        CGRect bounds = CGRectZero;
++        if (auto ref = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowOwnerPID))) {
++            CFNumberGetValue(ref, kCFNumberIntType, &owner);
++        }
++        if (auto ref = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowLayer))) {
++            CFNumberGetValue(ref, kCFNumberIntType, &layer);
++        }
++        if (auto ref = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowAlpha))) {
++            CFNumberGetValue(ref, kCFNumberDoubleType, &alpha);
++        }
++        if (auto ref = static_cast<CFDictionaryRef>(CFDictionaryGetValue(info, kCGWindowBounds))) {
++            CGRectMakeWithDictionaryRepresentation(ref, &bounds);
++        }
++        if (owner == pid || !CGRectContainsPoint(bounds, point)) {
++            continue;
++        }
++        std::string owner_name;
++        if (auto ref = static_cast<CFStringRef>(CFDictionaryGetValue(info, kCGWindowOwnerName))) {
++            char buffer[256] = {};
++            if (CFStringGetCString(ref, buffer, sizeof(buffer), kCFStringEncodingUTF8)) {
++                owner_name = buffer;
++            }
++        }
++        LogInfo << "window above target at click point" << VAR(owner) << VAR(owner_name) << VAR(layer) << VAR(alpha) << VAR(bounds.origin.x)
++                << VAR(bounds.origin.y) << VAR(bounds.size.width) << VAR(bounds.size.height);
++    }
++    CFRelease(list);
++}
++
++} // namespace
++
++HybridInput::HybridInput(uint32_t window_id, std::shared_ptr<CaptureGeometry> geometry)
++    : window_id_(window_id)
++    , geometry_(std::move(geometry))
++{
++    if (auto window = query_window(window_id_)) {
++        last_pid_ = window->pid;
++    }
++}
++
++HybridInput::~HybridInput()
++{
++    release_all();
++}
++
++MaaControllerFeature HybridInput::get_features() const
++{
++    return MaaControllerFeature_UseMouseDownAndUpInsteadOfClick | MaaControllerFeature_UseKeyboardDownAndUpInsteadOfClick;
++}
++
++std::optional<pid_t> HybridInput::target_pid(const char* action)
++{
++    auto window = query_window(window_id_);
++    if (!window) {
++        LogError << "target window is gone, not sending" << VAR(action) << VAR(window_id_);
++        return std::nullopt;
++    }
++    last_pid_ = window->pid;
++    return window->pid;
++}
++
++std::optional<pid_t> HybridInput::foreground_pid(const char* action)
++{
++    auto pid = target_pid(action);
++    if (!pid) {
++        return std::nullopt;
++    }
++    pid_t front = frontmost_window_pid();
++    if (front != *pid) {
++        LogError << "target is not the frontmost application, not sending" << VAR(action) << VAR(*pid) << VAR(front);
++        return std::nullopt;
++    }
++    return pid;
++}
++
++std::optional<CGPoint> HybridInput::checked_point(int x, int y, const char* action)
++{
++    auto frame = geometry_->latest();
++    if (!frame || frame->window_id != window_id_ || frame->scale <= 0) {
++        LogError << "no captured frame to map the point through, not sending" << VAR(action);
++        return std::nullopt;
++    }
++    if (x < 0 || y < 0 || x >= frame->width || y >= frame->height) {
++        LogError << "point outside the captured frame, not sending" << VAR(action) << VAR(x) << VAR(y) << VAR(frame->width)
++                 << VAR(frame->height);
++        return std::nullopt;
++    }
++    auto window = query_window(window_id_);
++    if (!window || !window->on_screen || window->pid != frame->pid
++        || !CGRectEqualToRect(CGRectIntegral(window->bounds), CGRectIntegral(frame->window_bounds))) {
++        LogError << "window changed since the last frame, not sending" << VAR(action) << VAR(window.has_value());
++        return std::nullopt;
++    }
++    if (!foreground_pid(action)) {
++        return std::nullopt;
++    }
++    // Frame pixel -> global point: one origin, one scale, the same ones the frame was cropped with.
++    CGPoint point = CGPointMake(frame->captured_rect.origin.x + x / frame->scale, frame->captured_rect.origin.y + y / frame->scale);
++    log_windows_above(window_id_, frame->pid, point);
++    return point;
++}
++
++bool HybridInput::post_mouse(CGEventType type, CGPoint location, CGMouseButton button)
++{
++    CGEventRef event = CGEventCreateMouseEvent(nullptr, type, location, button);
++    if (!event) {
++        LogError << "failed to create mouse event";
++        return false;
++    }
++    CGEventPost(kCGHIDEventTap, event);
++    CFRelease(event);
++    return true;
++}
++
++bool HybridInput::post_key(pid_t pid, CGKeyCode key, bool down)
++{
++    CGEventRef event = CGEventCreateKeyboardEvent(nullptr, key, down);
++    if (!event) {
++        LogError << "failed to create keyboard event";
++        return false;
++    }
++    CGEventPostToPid(pid, event);
++    CFRelease(event);
++    return true;
++}
++
++bool HybridInput::click(int x, int y)
++{
++    LogError << "use touch_down/touch_up (UseMouseDownAndUpInsteadOfClick)" << VAR(x) << VAR(y);
++    return false;
++}
++
++bool HybridInput::swipe(int x1, int y1, int x2, int y2, int duration)
++{
++    LogError << "use touch_down/touch_move/touch_up (UseMouseDownAndUpInsteadOfClick)" << VAR(x1) << VAR(y1) << VAR(x2) << VAR(y2)
++             << VAR(duration);
++    return false;
++}
++
++bool HybridInput::touch_down(int contact, int x, int y, int pressure)
++{
++    std::ignore = pressure;
++
++    MouseEventInfo info;
++    if (!contact_to_mouse_down_info(contact, info)) {
++        LogError << "contact out of range" << VAR(contact);
++        return false;
++    }
++    auto point = checked_point(x, y, "touch_down");
++    if (!point) {
++        return false;
++    }
++
++    if (held_contacts_.empty()) {
++        CGEventRef current = CGEventCreate(nullptr);
++        if (current) {
++            saved_cursor_ = CGEventGetLocation(current);
++            CFRelease(current);
++        }
++    }
++    if (!post_mouse(info.event_type, *point, info.mouse_button)) {
++        return false;
++    }
++    held_contacts_.insert(contact);
++    last_point_ = *point;
++    return true;
++}
++
++bool HybridInput::touch_move(int contact, int x, int y, int pressure)
++{
++    std::ignore = pressure;
++
++    MouseEventInfo info;
++    if (!contact_to_mouse_move_info(contact, info)) {
++        LogError << "contact out of range" << VAR(contact);
++        return false;
++    }
++    auto point = checked_point(x, y, "touch_move");
++    if (!point) {
++        return false;
++    }
++    if (!post_mouse(info.event_type, *point, info.mouse_button)) {
++        return false;
++    }
++    last_point_ = *point;
++    return true;
++}
++
++bool HybridInput::touch_up(int contact)
++{
++    MouseEventInfo info;
++    if (!contact_to_mouse_up_info(contact, info)) {
++        LogError << "contact out of range" << VAR(contact);
++        return false;
++    }
++    // Released where it was pressed, whatever the window or the user's cursor did since.
++    bool ok = post_mouse(info.event_type, last_point_, info.mouse_button);
++    held_contacts_.erase(contact);
++    if (held_contacts_.empty() && !std::isnan(saved_cursor_.x)) {
++        CGWarpMouseCursorPosition(saved_cursor_);
++        saved_cursor_ = { NAN, NAN };
++    }
++    return ok;
++}
++
++bool HybridInput::click_key(int key)
++{
++    LogError << "use key_down/key_up (UseKeyboardDownAndUpInsteadOfClick)" << VAR(key);
++    return false;
++}
++
++bool HybridInput::input_text(const std::string& text)
++{
++    auto pid = target_pid("input_text");
++    if (!pid) {
++        return false;
++    }
++    std::vector<UniChar> chars;
++    if (!text_to_unichars(text, chars)) {
++        LogError << "failed to convert text" << VAR(text);
++        return false;
++    }
++    for (bool down : { true, false }) {
++        CGEventRef event = CGEventCreateKeyboardEvent(nullptr, 0, down);
++        if (!event) {
++            LogError << "failed to create keyboard event";
++            return false;
++        }
++        CGEventKeyboardSetUnicodeString(event, chars.size(), chars.data());
++        CGEventPostToPid(*pid, event);
++        CFRelease(event);
++        usleep(10000);
++    }
++    return true;
++}
++
++bool HybridInput::key_down(int key)
++{
++    if (key < 0 || key > 0xFFFF) {
++        LogError << "key code out of range" << VAR(key);
++        return false;
++    }
++    auto pid = target_pid("key_down");
++    if (!pid || !post_key(*pid, static_cast<CGKeyCode>(key), true)) {
++        return false;
++    }
++    held_keys_.insert(key);
++    return true;
++}
++
++bool HybridInput::key_up(int key)
++{
++    if (key < 0 || key > 0xFFFF) {
++        LogError << "key code out of range" << VAR(key);
++        return false;
++    }
++    held_keys_.erase(key);
++    // A release goes to the last known process even if the window has just closed.
++    pid_t pid = last_pid_;
++    if (auto current = query_window(window_id_)) {
++        pid = current->pid;
++    }
++    if (pid <= 0) {
++        LogError << "no target process for key_up" << VAR(key);
++        return false;
++    }
++    return post_key(pid, static_cast<CGKeyCode>(key), false);
++}
++
++bool HybridInput::scroll(int dx, int dy)
++{
++    // No captured point to scroll at has been validated for this profile yet; refuse rather than
++    // send a wheel event to whatever lies under a stale position.
++    LogError << "scroll is not supported by the hybrid input" << VAR(dx) << VAR(dy);
++    return false;
++}
++
++bool HybridInput::relative_move(int dx, int dy)
++{
++    auto pid = foreground_pid("relative_move");
++    if (!pid) {
++        return false;
++    }
++    CGEventRef current = CGEventCreate(nullptr);
++    CGPoint location = current ? CGEventGetLocation(current) : CGPointZero;
++    if (current) {
++        CFRelease(current);
++    }
++    // Posted to the process, the cursor stays where it is and the game turns the camera.
++    CGEventRef event = CGEventCreateMouseEvent(nullptr, kCGEventMouseMoved, location, kCGMouseButtonLeft);
++    if (!event) {
++        LogError << "failed to create mouse-moved event";
++        return false;
++    }
++    CGEventSetIntegerValueField(event, kCGMouseEventDeltaX, dx);
++    CGEventSetIntegerValueField(event, kCGMouseEventDeltaY, dy);
++    CGEventPostToPid(*pid, event);
++    CFRelease(event);
++    return true;
++}
++
++void HybridInput::release_all()
++{
++    for (int contact : std::set<int>(held_contacts_)) {
++        touch_up(contact);
++    }
++    for (int key : std::set<int>(held_keys_)) {
++        key_up(key);
++    }
++}
++
++MAA_CTRL_UNIT_NS_END
+diff --git a/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.cpp b/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.cpp
+index 1d30e69..2967d44 100644
+--- a/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.cpp
++++ b/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.cpp
+@@ -4,8 +4,10 @@
+ #include "MaaUtils/Logger.h"
+ 
+ #include "Input/GlobalEventInput.h"
++#include "Input/HybridInput.h"
+ #include "Input/PostToPidInput.h"
+ #include "MacOS/MacOSAppLifecycle.h"
++#include "Screencap/DisplayWindowScreencap.h"
+ #include "Screencap/ScreenCaptureKitScreencap.h"
+ 
+ MAA_CTRL_UNIT_NS_BEGIN
+@@ -20,6 +22,8 @@ MacOSControlUnitMgr::MacOSControlUnitMgr(uint32_t window_id, MaaMacOSScreencapMe
+ bool MacOSControlUnitMgr::connect()
+ {
+     connected_ = false;
++    hybrid_input_ = nullptr;
++    geometry_->invalidate();
+ 
+     switch (screencap_method_) {
+     case MaaMacOSScreencapMethod_ScreenCaptureKit:
+@@ -32,6 +36,15 @@ bool MacOSControlUnitMgr::connect()
+             return false;
+         }
+         break;
++    case MaaMacOSScreencapMethod_DisplayWindow:
++        if (__builtin_available(macOS 14.0, *)) {
++            screencap_ = std::make_shared<DisplayWindowScreencap>(window_id_, geometry_);
++        }
++        else {
++            LogError << "macOS 14.0 or later required for ScreenCaptureKit";
++            return false;
++        }
++        break;
+     case MaaMacOSScreencapMethod_None:
+         LogWarn << "No screencap method specified, screencap will not work";
+         break;
+@@ -47,6 +60,14 @@ bool MacOSControlUnitMgr::connect()
+     case MaaMacOSInputMethod_PostToPid:
+         input_ = std::make_shared<PostToPidInput>(window_id_);
+         break;
++    case MaaMacOSInputMethod_Hybrid:
++        if (screencap_method_ != MaaMacOSScreencapMethod_DisplayWindow) {
++            LogError << "Hybrid input maps clicks through DisplayWindow frames; use both together" << VAR(screencap_method_);
++            return false;
++        }
++        hybrid_input_ = std::make_shared<HybridInput>(window_id_, geometry_);
++        input_ = hybrid_input_;
++        break;
+     case MaaMacOSInputMethod_None:
+         LogWarn << "No input method specified, input will not work";
+         break;
+@@ -159,6 +180,9 @@ bool MacOSControlUnitMgr::touch_up(int contact)
+ 
+ bool MacOSControlUnitMgr::relative_move(int dx, int dy)
+ {
++    if (hybrid_input_) {
++        return hybrid_input_->relative_move(dx, dy);
++    }
+     (void)dx;
+     (void)dy;
+     LogWarn << "relative_move not supported on macOS controller";
+@@ -217,6 +241,9 @@ bool MacOSControlUnitMgr::scroll(int dx, int dy)
+ 
+ bool MacOSControlUnitMgr::inactive()
+ {
++    if (hybrid_input_) {
++        hybrid_input_->release_all();
++    }
+     return true;
+ }
+ 
+@@ -227,6 +254,7 @@ json::object MacOSControlUnitMgr::get_info() const
+     info["window_id"] = window_id_;
+     info["screencap_method"] = static_cast<int64_t>(screencap_method_);
+     info["input_method"] = static_cast<int64_t>(input_method_);
++    info["maanikki_patch"] = kMaaNikkiPatchLevel;
+     return info;
+ }
+ 
+diff --git a/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.h b/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.h
+index 4d8be65..22ddd7f 100644
+--- a/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.h
++++ b/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.h
+@@ -2,6 +2,7 @@
+ 
+ #include <filesystem>
+ 
++#include "Base/CaptureGeometry.h"
+ #include "Base/UnitBase.h"
+ #include "MaaControlUnit/ControlUnitAPI.h"
+ #include "MaaFramework/MaaDef.h"
+@@ -55,6 +56,18 @@ private:
+     bool connected_ = false;
+     std::shared_ptr<InputBase> input_ = nullptr;
+     std::shared_ptr<ScreencapBase> screencap_ = nullptr;
++
++    // MaaNikki profile: frames from DisplayWindowScreencap tell HybridInput where a pixel is on the desktop.
++    std::shared_ptr<CaptureGeometry> geometry_ = std::make_shared<CaptureGeometry>();
++    std::shared_ptr<class HybridInput> hybrid_input_ = nullptr;
+ };
+ 
++// Values beyond the official enums, understood only by this build. A stock unit rejects them
++// ("Unknown ... method") and then captures or sends nothing, instead of silently behaving differently.
++inline constexpr MaaMacOSScreencapMethod MaaMacOSScreencapMethod_DisplayWindow = 1ULL << 1;
++inline constexpr MaaMacOSInputMethod MaaMacOSInputMethod_Hybrid = MaaMacOSInputMethod_GlobalEvent | MaaMacOSInputMethod_PostToPid;
++
++// Reported in get_info() so the agent can tell this build from the official unit.
++inline constexpr int kMaaNikkiPatchLevel = 1;
++
+ MAA_CTRL_UNIT_NS_END
+diff --git a/source/MaaMacOSControlUnit/Screencap/DisplayWindowScreencap.h b/source/MaaMacOSControlUnit/Screencap/DisplayWindowScreencap.h
+new file mode 100644
+index 0000000..8c9e621
+--- /dev/null
++++ b/source/MaaMacOSControlUnit/Screencap/DisplayWindowScreencap.h
+@@ -0,0 +1,49 @@
++#pragma once
++
++#include <memory>
++#include <mutex>
++
++#include "Base/CaptureGeometry.h"
++#include "Base/UnitBase.h"
++
++#include "Common/Conf.h"
++
++MAA_CTRL_UNIT_NS_BEGIN
++
++// Captures one window as composited on its display, cropped to the part of
++// the window that lies on that display, at the display's native pixels.
++//
++// The window-only ScreenCaptureKit filter requests the window's point size
++// and includes its title bar; for a window whose title bar is pushed above
++// the top of the screen it squeezes the frame. Filtering the display down to
++// this window and cropping with sourceRect gives exactly the visible window
++// content, without the Dock, the menu bar or other windows.
++//
++// The shareable-content lookup and the filter are cached. Each capture
++// compares the window bounds, the display bounds and the display mode with
++// the cached values through CGWindowList / CGDisplay (cheap) and rebuilds
++// only when one of them changed.
++class DisplayWindowScreencap : public ScreencapBase
++{
++public:
++    DisplayWindowScreencap(uint32_t window_id, std::shared_ptr<CaptureGeometry> geometry);
++    virtual ~DisplayWindowScreencap() override;
++
++public: // from ScreencapBase
++    virtual std::optional<cv::Mat> screencap() override;
++
++private:
++    struct Target;
++
++    bool target_still_valid(const WindowState& window) const;
++    bool rebuild_target(const WindowState& window);
++    void reset_target();
++
++    uint32_t window_id_ = 0;
++    std::shared_ptr<CaptureGeometry> geometry_;
++
++    std::mutex mutex_;
++    std::unique_ptr<Target> target_;
++};
++
++MAA_CTRL_UNIT_NS_END
+diff --git a/source/MaaMacOSControlUnit/Screencap/DisplayWindowScreencap.mm b/source/MaaMacOSControlUnit/Screencap/DisplayWindowScreencap.mm
+new file mode 100644
+index 0000000..36c9717
+--- /dev/null
++++ b/source/MaaMacOSControlUnit/Screencap/DisplayWindowScreencap.mm
+@@ -0,0 +1,251 @@
++#include "DisplayWindowScreencap.h"
++
++#include "MaaUtils/Logger.h"
++#include <opencv2/core.hpp>
++#include <opencv2/imgproc.hpp>
++
++#include <CoreMedia/CoreMedia.h>
++#include <CoreVideo/CoreVideo.h>
++#include <ScreenCaptureKit/ScreenCaptureKit.h>
++
++#include <cmath>
++
++MAA_CTRL_UNIT_NS_BEGIN
++
++cv::Mat image_from_sample_buffer(CMSampleBufferRef sample_buffer); // ScreenCaptureKitScreencap.mm
++
++namespace
++{
++
++constexpr int64_t kTimeoutNs = 5 * NSEC_PER_SEC;
++
++bool same_rect(CGRect a, CGRect b)
++{
++    return CGRectEqualToRect(CGRectIntegral(a), CGRectIntegral(b));
++}
++
++struct DisplayMode
++{
++    size_t pixel_width = 0;
++    size_t pixel_height = 0;
++
++    bool operator==(const DisplayMode&) const = default;
++};
++
++DisplayMode display_mode(CGDirectDisplayID display_id)
++{
++    DisplayMode mode;
++    CGDisplayModeRef ref = CGDisplayCopyDisplayMode(display_id);
++    if (ref) {
++        mode.pixel_width = CGDisplayModeGetPixelWidth(ref);
++        mode.pixel_height = CGDisplayModeGetPixelHeight(ref);
++        CGDisplayModeRelease(ref);
++    }
++    return mode;
++}
++
++} // namespace
++
++// Objective-C objects are retained here and released in reset_target() (the unit builds without ARC).
++struct DisplayWindowScreencap::Target
++{
++    SCContentFilter* filter = nil;
++    SCStreamConfiguration* config = nil;
++    CaptureFrame frame;
++    CGRect display_bounds = CGRectZero;
++    DisplayMode mode;
++};
++
++DisplayWindowScreencap::DisplayWindowScreencap(uint32_t window_id, std::shared_ptr<CaptureGeometry> geometry)
++    : window_id_(window_id)
++    , geometry_(std::move(geometry))
++{
++}
++
++DisplayWindowScreencap::~DisplayWindowScreencap()
++{
++    std::lock_guard lock(mutex_);
++    reset_target();
++}
++
++void DisplayWindowScreencap::reset_target()
++{
++    if (target_) {
++        [target_->filter release];
++        [target_->config release];
++        target_.reset();
++    }
++    if (geometry_) {
++        geometry_->invalidate();
++    }
++}
++
++bool DisplayWindowScreencap::target_still_valid(const WindowState& window) const
++{
++    if (!target_) {
++        return false;
++    }
++    const auto& cached = target_->frame;
++    return window.pid == cached.pid && same_rect(window.bounds, cached.window_bounds)
++           && same_rect(CGDisplayBounds(cached.display_id), target_->display_bounds) && display_mode(cached.display_id) == target_->mode;
++}
++
++bool DisplayWindowScreencap::rebuild_target(const WindowState& window)
++{
++    reset_target();
++
++    // The handler must not touch `this`: after a timeout it may run once the unit is gone.
++    const uint32_t wanted_id = window_id_;
++    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
++    __block SCWindow* found_window = nil;
++    __block SCDisplay* found_display = nil;
++
++    [SCShareableContent getShareableContentExcludingDesktopWindows:YES
++                                               onScreenWindowsOnly:YES
++                                                 completionHandler:^(SCShareableContent* content, NSError* error) {
++                                                     if (error || !content) {
++                                                         dispatch_semaphore_signal(semaphore);
++                                                         return;
++                                                     }
++                                                     for (SCWindow* candidate in content.windows) {
++                                                         if (candidate.windowID == wanted_id) {
++                                                             found_window = [candidate retain];
++                                                             break;
++                                                         }
++                                                     }
++                                                     if (found_window) {
++                                                         // The display holding the largest part of the window.
++                                                         CGFloat best = 0;
++                                                         for (SCDisplay* display in content.displays) {
++                                                             CGRect overlap = CGRectIntersection(display.frame, found_window.frame);
++                                                             CGFloat area = CGRectIsNull(overlap) ? 0 : overlap.size.width * overlap.size.height;
++                                                             if (area > best) {
++                                                                 best = area;
++                                                                 [found_display release];
++                                                                 found_display = [display retain];
++                                                             }
++                                                         }
++                                                     }
++                                                     dispatch_semaphore_signal(semaphore);
++                                                 }];
++
++    bool signalled = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, kTimeoutNs)) == 0;
++    dispatch_release(semaphore);
++    if (!signalled) {
++        // The handler may still run and retain objects; they leak rather than race.
++        LogError << "shareable content lookup timed out" << VAR(window_id_);
++        return false;
++    }
++    if (!found_window || !found_display) {
++        LogError << "window or its display not found in shareable content" << VAR(window_id_) << VAR(found_window != nil)
++                 << VAR(found_display != nil);
++        [found_window release];
++        [found_display release];
++        return false;
++    }
++
++    CGRect display_frame = found_display.frame;
++    CGRect visible = CGRectIntersection(found_window.frame, display_frame);
++    SCContentFilter* filter = [[SCContentFilter alloc] initWithDisplay:found_display includingWindows:@[ found_window ]];
++    double scale = 0;
++    if (@available(macOS 14.0, *)) {
++        scale = filter.pointPixelScale;
++    }
++
++    auto target = std::make_unique<Target>();
++    target->filter = filter;
++    target->config = [[SCStreamConfiguration alloc] init];
++    target->config.sourceRect = CGRectOffset(visible, -display_frame.origin.x, -display_frame.origin.y);
++    target->config.width = static_cast<size_t>(std::lround(visible.size.width * scale));
++    target->config.height = static_cast<size_t>(std::lround(visible.size.height * scale));
++    target->config.pixelFormat = kCVPixelFormatType_32BGRA;
++    target->config.colorSpaceName = kCGColorSpaceSRGB;
++    target->config.showsCursor = NO;
++
++    target->frame.window_id = window_id_;
++    target->frame.pid = window.pid;
++    target->frame.display_id = found_display.displayID;
++    target->frame.window_bounds = window.bounds;
++    target->frame.captured_rect = visible;
++    target->frame.scale = scale;
++    target->frame.width = static_cast<int>(target->config.width);
++    target->frame.height = static_cast<int>(target->config.height);
++    target->display_bounds = CGDisplayBounds(found_display.displayID);
++    target->mode = display_mode(found_display.displayID);
++
++    LogInfo << "capture target" << VAR(window_id_) << VAR(target->frame.display_id) << VAR(found_window.frame.origin.x)
++            << VAR(found_window.frame.origin.y) << VAR(found_window.frame.size.width) << VAR(found_window.frame.size.height)
++            << VAR(window.bounds.origin.x) << VAR(window.bounds.origin.y) << VAR(window.bounds.size.width) << VAR(window.bounds.size.height)
++            << VAR(visible.origin.x) << VAR(visible.origin.y) << VAR(visible.size.width) << VAR(visible.size.height) << VAR(scale)
++            << VAR(target->frame.width) << VAR(target->frame.height);
++
++    [found_window release];
++    [found_display release];
++
++    if (target->frame.width <= 0 || target->frame.height <= 0) {
++        LogError << "window has no visible area on its display" << VAR(window_id_);
++        [target->filter release];
++        [target->config release];
++        return false;
++    }
++
++    target_ = std::move(target);
++    return true;
++}
++
++std::optional<cv::Mat> DisplayWindowScreencap::screencap()
++{
++    std::lock_guard lock(mutex_);
++
++    auto window = query_window(window_id_);
++    if (!window || !window->on_screen) {
++        LogError << "target window is gone or off screen" << VAR(window_id_);
++        reset_target();
++        return std::nullopt;
++    }
++    if (!target_still_valid(*window) && !rebuild_target(*window)) {
++        return std::nullopt;
++    }
++    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
++    __block cv::Mat captured;
++    __block bool ok = false;
++
++    if (@available(macOS 14.0, *)) {
++        [SCScreenshotManager captureSampleBufferWithFilter:target_->filter
++                                             configuration:target_->config
++                                         completionHandler:^(CMSampleBufferRef sample_buffer, NSError* error) {
++                                             if (!error && sample_buffer) {
++                                                 captured = image_from_sample_buffer(sample_buffer);
++                                                 ok = !captured.empty();
++                                             }
++                                             dispatch_semaphore_signal(semaphore);
++                                         }];
++    }
++
++    bool signalled = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, kTimeoutNs)) == 0;
++    dispatch_release(semaphore);
++    if (!signalled || !ok) {
++        LogError << "capture failed" << VAR(window_id_) << VAR(signalled);
++        reset_target();
++        return std::nullopt;
++    }
++    if (captured.cols != target_->frame.width || captured.rows != target_->frame.height) {
++        LogError << "capture size differs from the request" << VAR(captured.cols) << VAR(captured.rows) << VAR(target_->frame.width)
++                 << VAR(target_->frame.height);
++        reset_target();
++        return std::nullopt;
++    }
++
++    // The window may have moved while the frame was taken; publish only a frame whose geometry still holds.
++    auto after = query_window(window_id_);
++    if (!after || !target_still_valid(*after)) {
++        LogWarn << "window geometry changed during capture, dropping the frame" << VAR(window_id_);
++        reset_target();
++        return std::nullopt;
++    }
++
++    geometry_->publish(target_->frame);
++    return captured;
++}
++
++MAA_CTRL_UNIT_NS_END
