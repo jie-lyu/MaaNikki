@@ -25,6 +25,7 @@ from runtime_threads import configure_utf8_streams, configure_worker_threads
 configure_worker_threads(2)
 from file_io import write_json
 from client_config import mxu_config
+from host.win32.launch import LauncherWindows, ensure_unminimized, focus_window, game_window
 
 configure_utf8_streams()
 
@@ -79,25 +80,6 @@ def resolve_task_hud_mode(options=None) -> str:
     return "adaptive"
 
 
-def ensure_unminimized(hwnd) -> bool:
-    """Ensure a window is not minimized without stealing foreground focus."""
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    user32.IsWindow.argtypes = [wintypes.HWND]
-    user32.IsWindow.restype = wintypes.BOOL
-    user32.IsIconic.argtypes = [wintypes.HWND]
-    user32.IsIconic.restype = wintypes.BOOL
-    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-    if not user32.IsWindow(hwnd):
-        return False
-    if user32.IsIconic(hwnd):
-        user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
-        time.sleep(0.15)
-        if user32.IsIconic(hwnd):
-            user32.ShowWindow(hwnd, 9)  # SW_RESTORE fallback
-            time.sleep(0.15)
-    return bool(user32.IsWindow(hwnd) and not user32.IsIconic(hwnd))
-
-
 def save_record(record):
     try:
         REPORT.parent.mkdir(parents=True, exist_ok=True)
@@ -130,112 +112,6 @@ def startup_step(record, stage):
         yield
     finally:
         timer.cancel()
-
-
-def focus_window(hwnd):
-    """Activate once at startup, then verify without repeatedly stealing focus."""
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    user32.IsWindow.argtypes = [wintypes.HWND]
-    user32.IsWindow.restype = wintypes.BOOL
-    user32.IsIconic.argtypes = [wintypes.HWND]
-    user32.IsIconic.restype = wintypes.BOOL
-    user32.GetForegroundWindow.argtypes = []
-    user32.GetForegroundWindow.restype = wintypes.HWND
-    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-    user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
-    user32.AttachThreadInput.restype = wintypes.BOOL
-    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-    user32.BringWindowToTop.argtypes = [wintypes.HWND]
-    user32.BringWindowToTop.restype = wintypes.BOOL
-    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-    user32.SetForegroundWindow.restype = wintypes.BOOL
-    kernel32.GetCurrentThreadId.argtypes = []
-    kernel32.GetCurrentThreadId.restype = wintypes.DWORD
-    if not user32.IsWindow(hwnd):
-        return False
-    if user32.GetForegroundWindow() == hwnd and not user32.IsIconic(hwnd):
-        return True
-
-    current_thread = kernel32.GetCurrentThreadId()
-
-    def activate():
-        foreground_thread = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
-        target_thread = user32.GetWindowThreadProcessId(hwnd, None)
-        attached = []
-        try:
-            # The helper is launched in the background. Share the foreground input
-            # queue during activation so Windows can grant it foreground access.
-            for thread in dict.fromkeys((foreground_thread, target_thread)):
-                if thread and thread != current_thread and user32.AttachThreadInput(current_thread, thread, True):
-                    attached.append(thread)
-            if user32.IsIconic(hwnd):
-                user32.ShowWindow(hwnd, 9)  # SW_RESTORE; preserve maximized windows.
-            user32.BringWindowToTop(hwnd)
-            user32.SetForegroundWindow(hwnd)
-        finally:
-            for thread in reversed(attached):
-                user32.AttachThreadInput(current_thread, thread, False)
-
-    activate()
-    deadline, stable_since, last_attempt = time.monotonic()+3, None, time.monotonic()
-    while time.monotonic() < deadline:
-        if not user32.IsWindow(hwnd):
-            return False
-        now = time.monotonic()
-        if user32.GetForegroundWindow() == hwnd and not user32.IsIconic(hwnd):
-            stable_since = now if stable_since is None else stable_since
-            if now-stable_since >= .15:
-                return True
-        else:
-            stable_since = None
-            if now-last_attempt >= .5:
-                activate()
-                last_attempt = now
-        time.sleep(.05)
-    return False
-
-
-def game_window():
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-    user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
-    user32.EnumWindows.restype = wintypes.BOOL
-    user32.IsWindowVisible.argtypes = [wintypes.HWND]
-    user32.IsWindowVisible.restype = wintypes.BOOL
-    user32.IsIconic.argtypes = [wintypes.HWND]
-    user32.IsIconic.restype = wintypes.BOOL
-    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-    user32.GetWindowTextW.restype = ctypes.c_int
-    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-    user32.GetClassNameW.restype = ctypes.c_int
-    user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-    user32.GetClientRect.restype = wintypes.BOOL
-    found = []
-
-    @callback_type
-    def visit(hwnd, _):
-        title = ctypes.create_unicode_buffer(257)
-        class_name = ctypes.create_unicode_buffer(257)
-        if (user32.IsWindowVisible(hwnd)
-                and user32.GetClassNameW(hwnd, class_name, len(class_name))
-                and class_name.value == "UnrealWindow"
-                and user32.GetWindowTextW(hwnd, title, len(title))
-                and re.fullmatch(r"\s*(Infinity\s*Nikki|无限暖暖|無限暖暖)\s*", title.value)):
-            rect = wintypes.RECT()
-            if user32.IsIconic(hwnd):
-                # Minimized Unreal windows may report an empty client area.
-                found.append(int(hwnd))
-            elif user32.GetClientRect(hwnd, ctypes.byref(rect)):
-                width, height = rect.right-rect.left, rect.bottom-rect.top
-                if width >= 640 and height >= 360:
-                    found.append(int(hwnd))
-        return True
-
-    if not user32.EnumWindows(visit, 0):
-        raise OSError("无法枚举游戏窗口。")
-    return found[0] if found else None
 
 
 def resolve_program(value):
@@ -382,74 +258,6 @@ def classify_launcher_modal(items, *, min_score: float = 0.6):
             return "launcher_updating", None
 
     return None
-
-
-class LauncherWindows:
-    def __init__(self, folder):
-        self.folder = folder.resolve()
-        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
-        self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        self.callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-        self.user32.EnumWindows.argtypes = [self.callback_type, wintypes.LPARAM]
-        self.user32.EnumWindows.restype = wintypes.BOOL
-        self.user32.IsWindow.argtypes = [wintypes.HWND]
-        self.user32.IsWindow.restype = wintypes.BOOL
-        self.user32.IsWindowVisible.argtypes = [wintypes.HWND]
-        self.user32.IsWindowVisible.restype = wintypes.BOOL
-        self.user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-        self.user32.GetClientRect.restype = wintypes.BOOL
-        self.user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-        self.user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-        self.user32.GetForegroundWindow.restype = wintypes.HWND
-        self.user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-        self.user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-        self.user32.SetForegroundWindow.restype = wintypes.BOOL
-        self.user32.IsIconic.argtypes = [wintypes.HWND]
-        self.user32.IsIconic.restype = wintypes.BOOL
-        self.kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        self.kernel32.OpenProcess.restype = wintypes.HANDLE
-        self.kernel32.QueryFullProcessImageNameW.argtypes = [
-            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
-        self.kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
-        self.kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        self.kernel32.CloseHandle.restype = wintypes.BOOL
-
-    def find(self):
-        found = []
-
-        @self.callback_type
-        def visit(hwnd, _):
-            rect = wintypes.RECT()
-            if not (self.user32.IsWindowVisible(hwnd) and self.user32.GetClientRect(hwnd, ctypes.byref(rect))):
-                return True
-            width, height = rect.right-rect.left, rect.bottom-rect.top
-            if width < 640 or height < 360:
-                return True
-            pid = wintypes.DWORD()
-            self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            process = self.kernel32.OpenProcess(0x1000, False, pid.value)
-            if process:
-                try:
-                    name, length = ctypes.create_unicode_buffer(32768), wintypes.DWORD(32768)
-                    if self.kernel32.QueryFullProcessImageNameW(process, 0, name, ctypes.byref(length)):
-                        path = Path(name.value)
-                        if (path.name.lower() in {"xstarter.exe", "launcher.exe"}
-                                and path.is_relative_to(self.folder)):
-                            found.append((width*height, int(hwnd)))
-                finally:
-                    self.kernel32.CloseHandle(process)
-            return True
-
-        if not self.user32.EnumWindows(visit, 0):
-            raise OSError("无法查找官方启动器窗口。")
-        return max(found)[1] if found else None
-
-    def foreground(self, hwnd):
-        return self.user32.GetForegroundWindow() == hwnd and not self.user32.IsIconic(hwnd)
-
-    def focus(self, hwnd):
-        if not focus_window(hwnd):
-            raise RuntimeError("未能自动将官方启动器切到前台，请检查窗口状态和权限后重试。")
 
 
 class LauncherRuntime:

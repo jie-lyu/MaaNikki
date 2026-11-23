@@ -19,7 +19,7 @@ from app_paths import DATA_ROOT
 from file_io import write_json
 from game_view import ALLOWED_FRAME_SIZES, is_clipped_game_frame
 from message_log import write_message
-from start_game import game_window
+from host.win32.launch import game_window
 from task_control import active_session
 from tall_window import (
     BASE_CAPTURE_HEIGHT,

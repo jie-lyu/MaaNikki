@@ -2,10 +2,7 @@ from __future__ import annotations
 
 from file_io import write_json
 
-import ctypes
-from ctypes import wintypes
 from datetime import datetime
-import os
 import re
 import time as wall_time
 
@@ -143,99 +140,6 @@ def _inspect_startup_screen(runtime, frame) -> dict:
     if state["restart_box"] is None and not state["update_dialog"]:
         state["notice_confirm_box"] = find_expired_notice_confirm_box(rows)
     return state
-_WM_NULL = 0x0000
-_SMTO_BLOCK = 0x0001
-_SMTO_ABORTIFHUNG = 0x0002
-_ERROR_TIMEOUT = 1460
-_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-_STILL_ACTIVE = 259
-_U32 = None
-_K32 = None
-
-
-def _startup_user32():
-    global _U32
-    if os.name != "nt":
-        return None
-    if _U32 is None:
-        u32 = ctypes.WinDLL("user32", use_last_error=True)
-        u32.IsWindow.argtypes = [wintypes.HWND]
-        u32.IsWindow.restype = wintypes.BOOL
-        u32.IsHungAppWindow.argtypes = [wintypes.HWND]
-        u32.IsHungAppWindow.restype = wintypes.BOOL
-        u32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-        u32.GetWindowThreadProcessId.restype = wintypes.DWORD
-        u32.SendMessageTimeoutW.argtypes = [
-            wintypes.HWND,
-            wintypes.UINT,
-            wintypes.WPARAM,
-            wintypes.LPARAM,
-            wintypes.UINT,
-            wintypes.UINT,
-            ctypes.POINTER(ctypes.c_size_t),
-        ]
-        u32.SendMessageTimeoutW.restype = ctypes.c_ssize_t
-        _U32 = u32
-    return _U32
-
-
-def _startup_kernel32():
-    global _K32
-    if os.name != "nt":
-        return None
-    if _K32 is None:
-        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        k32.OpenProcess.restype = wintypes.HANDLE
-        k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-        k32.GetExitCodeProcess.restype = wintypes.BOOL
-        k32.CloseHandle.argtypes = [wintypes.HANDLE]
-        k32.CloseHandle.restype = wintypes.BOOL
-        _K32 = k32
-    return _K32
-
-
-def _is_window_process_alive(u32, hwnd) -> bool:
-    if u32 is None or not hwnd or not u32.IsWindow(hwnd):
-        return False
-    k32 = _startup_kernel32()
-    if k32 is None:
-        return True
-    pid = wintypes.DWORD(0)
-    u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-    if not pid.value:
-        return True
-    proc = k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
-    if not proc:
-        return bool(u32.IsWindow(hwnd))
-    try:
-        code = wintypes.DWORD(0)
-        if k32.GetExitCodeProcess(proc, ctypes.byref(code)):
-            return code.value == _STILL_ACTIVE and bool(u32.IsWindow(hwnd))
-        return bool(u32.IsWindow(hwnd))
-    finally:
-        k32.CloseHandle(proc)
-
-
-def _is_window_unresponsive(u32, hwnd) -> bool:
-    if u32 is None or not hwnd:
-        return False
-    if u32.IsHungAppWindow(hwnd):
-        return True
-    ctypes.set_last_error(0)
-    msg_res = ctypes.c_size_t(0)
-    ok = u32.SendMessageTimeoutW(
-        hwnd,
-        _WM_NULL,
-        0,
-        0,
-        _SMTO_BLOCK | _SMTO_ABORTIFHUNG,
-        80,
-        ctypes.byref(msg_res),
-    )
-    if ok != 0:
-        return False
-    return ctypes.get_last_error() == _ERROR_TIMEOUT and bool(u32.IsWindow(hwnd))
 
 
 @agent_action("nikki.start_game", stop_on_failure=True)
@@ -262,6 +166,8 @@ class StartGameAction(CustomAction):
             raise
 
     def _run_startup(self, context, argv, wall_started_at):
+        # Win32 window probes; the start task only runs with the Windows controller.
+        from host.win32.launch import _is_window_process_alive, _is_window_unresponsive, _startup_user32
         runtime = Executors(context)
         options = parse_custom_param(argv.custom_action_param)
         raw_timeout = options.get("timeout", 900)

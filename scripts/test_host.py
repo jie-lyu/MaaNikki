@@ -236,6 +236,38 @@ class Win32InputTests(unittest.TestCase):
         self.assertIs(watcher.keys, inputs.native.physical_keys.return_value)
 
 
+class LaunchTests(unittest.TestCase):
+    def test_start_game_window_helpers_live_in_the_backend(self):
+        import start_game
+        from host.win32 import launch, window_layout
+        for name in ("LauncherWindows", "ensure_unminimized", "focus_window", "game_window"):
+            self.assertIs(getattr(start_game, name), getattr(launch, name))
+        self.assertIs(window_layout.game_window, launch.game_window)
+
+    def test_ensure_unminimized_restores_without_activating_first(self):
+        from host.win32 import launch
+        user32 = Mock()
+        user32.IsWindow.return_value = True
+        state = {"iconic": True}
+        user32.IsIconic.side_effect = lambda hwnd: state["iconic"]
+
+        def show(hwnd, command):
+            if command == 4:  # SW_SHOWNOACTIVATE
+                state["iconic"] = False
+        user32.ShowWindow.side_effect = show
+        with patch("host.win32.launch.ctypes.WinDLL", create=True, return_value=user32), \
+                patch("host.win32.launch.time.sleep"):
+            self.assertTrue(launch.ensure_unminimized(0x10))
+        self.assertEqual([call.args for call in user32.ShowWindow.call_args_list], [(0x10, 4)])
+
+    def test_startup_probes_without_a_window_binding(self):
+        from host.win32 import launch
+        if os.name != "nt":
+            self.assertIsNone(launch._startup_user32())
+        self.assertFalse(launch._is_window_process_alive(None, 0x10))
+        self.assertFalse(launch._is_window_process_alive(Mock(), 0))
+
+
 class ForegroundInputDelegationTests(unittest.TestCase):
     def make(self, user32, **kwargs):
         from navigation.controller import ForegroundInput
