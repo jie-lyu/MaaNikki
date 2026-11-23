@@ -1008,9 +1008,9 @@ pub async fn start_tasks_impl(
         for (idx, task) in tasks.iter().enumerate() {
             debug!("[start_tasks] Preparing task {}: entry={}", idx, task.entry);
 
-            if let Some(reason) = super::utils::platform_refuses_task(&task.entry) {
+            if let Some(reason) = refusals[idx].as_ref() {
                 warn!("[start_tasks] Refusing task on this platform: {}", task.entry);
-                emit_agent_output(&app, &instance_id, "stderr", &reason);
+                emit_agent_output(&app, &instance_id, "stderr", reason);
                 if let Some(sel_id) = &task.selected_task_id {
                     instance
                         .task_run_state

@@ -26,6 +26,7 @@ mod diagnostic_upload;
 pub mod download;
 pub mod file_ops;
 mod library_diagnostics;
+mod mac_connection;
 pub mod maa_agent;
 pub mod maa_core;
 pub mod maa_library;

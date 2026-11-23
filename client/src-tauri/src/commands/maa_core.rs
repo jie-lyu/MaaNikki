@@ -326,21 +326,41 @@ fn update_instance_controller(
     controller: maa_framework::controller::Controller,
     new_config: super::types::ControllerConfig,
 ) -> Result<(), String> {
+    let mut retiring = None;
     let cleanup_key = {
         let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
         let instance = instances.get_mut(instance_id).ok_or("Instance not found")?;
 
         let old_config = instance.controller_config.clone();
-        instance.start_generation = instance.start_generation.wrapping_add(1);
-        instance.controller = Some(controller);
+        let involves_macos = matches!(new_config, ControllerConfig::MacOS { .. })
+            || matches!(old_config, Some(ControllerConfig::MacOS { .. }));
+        if involves_macos {
+            // 旧的 Mac 连接交给后台退役（确认松开、丢弃），绝不在持有实例锁时析构原生句柄。
+            retiring = Some(super::mac_connection::attach(
+                super::mac_connection::ConnectionSlots {
+                    controller: &mut instance.controller,
+                    tasker: &mut instance.tasker,
+                    stopped: &mut instance.controller_stopped,
+                    generation: &mut instance.start_generation,
+                },
+                controller,
+                |old, new| old.raw() == new.raw(),
+            ));
+        } else {
+            instance.start_generation = instance.start_generation.wrapping_add(1);
+            instance.controller = Some(controller);
+            instance.controller_stopped = false;
+            instance.tasker = None;
+        }
         instance.controller_config = Some(new_config.clone());
-        instance.controller_stopped = false;
-        instance.tasker = None;
 
         old_config
             .filter(|old| *old != new_config)
             .map(|old| (instance_id.to_string(), old))
     };
+    if let Some((old_controller, old_tasker)) = retiring {
+        retire_macos_handles_in_background(instance_id, old_controller, old_tasker);
+    }
 
     if let Some(old_key) = cleanup_key {
         if let Ok(mut pool) = state.controller_pool.lock() {
@@ -1396,15 +1416,15 @@ pub fn run_task_impl(
     }
     let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
     let instance = instances.get_mut(instance_id).ok_or("Instance not found")?;
-    instance.start_generation = instance.start_generation.wrapping_add(1);
-
-    let resource = instance.resource.as_ref().ok_or("Resource not loaded")?;
-    // 已停止的 Mac 连接正在确认松开、即将释放，不再接收任务；重新连接后再运行。
+    // 已停止的 Mac 连接正在退役，不再接收任务；拒绝时不改变代数，以免取消正在进行的释放。
     if instance.controller_stopped
         && matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. }))
     {
         return Err("Mac 控制器已停止，请重新连接后再运行。".to_string());
     }
+    instance.start_generation = instance.start_generation.wrapping_add(1);
+
+    let resource = instance.resource.as_ref().ok_or("Resource not loaded")?;
     let controller = instance
         .controller
         .as_ref()
@@ -1599,6 +1619,53 @@ fn confirm_macos_release(controller: &Controller) -> bool {
     ) == Some(true)
 }
 
+/// 在后台退役一个 Mac 连接：确认控制模块松开了全部输入（有期限），然后丢弃句柄。不阻塞调用方。
+fn retire_macos_handles_in_background(instance_id: &str, controller: Option<Controller>, tasker: Option<Tasker>) {
+    if controller.is_none() && tasker.is_none() {
+        return;
+    }
+    let instance_id = instance_id.to_string();
+    let _ = std::thread::Builder::new()
+        .name(format!("retire-macos-{}", instance_id))
+        .spawn(move || {
+            let confirmed = controller.as_ref().map_or(true, confirm_macos_release);
+            if !confirmed {
+                warn!(
+                    "[ControllerRelease] retired macOS controller did not confirm releasing held input for instance {}",
+                    instance_id
+                );
+            }
+            drop(tasker);
+            drop(controller);
+        });
+}
+
+/// 运行结束（完成、失败或停止收尾）时把 Mac 连接标记为不可用并移出连接池，下次运行一律重新连接。
+/// 必须在通知前端运行结束之前调用，避免紧接着的重新启动复用这个正在退役的控制器。
+pub fn mark_macos_connection_finished(state: &Arc<MaaState>, instance_id: &str) {
+    let key = {
+        let Ok(mut instances) = state.instances.lock() else {
+            return;
+        };
+        let Some(instance) = instances.get_mut(instance_id) else {
+            return;
+        };
+        let Some(config @ ControllerConfig::MacOS { .. }) = instance.controller_config.clone() else {
+            return;
+        };
+        super::mac_connection::mark_run_finished(super::mac_connection::ConnectionSlots {
+            controller: &mut instance.controller,
+            tasker: &mut instance.tasker,
+            stopped: &mut instance.controller_stopped,
+            generation: &mut instance.start_generation,
+        });
+        (instance_id.to_string(), config)
+    };
+    let evicted = state.controller_pool.lock().ok().and_then(|mut pool| pool.remove(&key));
+    // 池中的只是同一个控制器的另一份引用，实例仍持有它，这里丢弃不会触发原生析构。
+    drop(evicted);
+}
+
 /// 在单独线程里丢弃句柄，最多等待 `deadline`；超过期限返回 false，丢弃在后台继续完成。
 fn dispose_with_deadline<T: Send + 'static>(handles: T, deadline: Duration) -> bool {
     let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -1618,6 +1685,19 @@ fn try_release_controller_handles(
     only_if_desktop: bool,
     expected_generation: Option<u64>,
 ) -> Result<DesktopReleaseOutcome, String> {
+    // Mac：先移出连接池，再取走实例句柄，期间的重新连接只能新建连接。
+    let macos_key = state.instances.lock().ok().and_then(|instances| {
+        instances.get(instance_id).and_then(|instance| match &instance.controller_config {
+            Some(config @ ControllerConfig::MacOS { .. }) => Some((instance_id.to_string(), config.clone())),
+            _ => None,
+        })
+    });
+    let mut pre_evicted = Vec::new();
+    if let Some(key) = macos_key {
+        if let Ok(mut pool) = state.controller_pool.lock() {
+            pre_evicted.extend(pool.remove(&key));
+        }
+    }
     let (dropped_tasker, dropped_controller, exact_key, released_generation) = {
         let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
         let Some(instance) = instances.get_mut(instance_id) else {
@@ -1703,7 +1783,7 @@ fn try_release_controller_handles(
             .map_or(true, confirm_macos_release);
         // 原生析构会等待控制器自己的工作线程，没有期限；放到单独线程，调用方只等到期限为止。
         let disposed = dispose_with_deadline(
-            (dropped_tasker, dropped_controller, pooled_controllers),
+            (dropped_tasker, dropped_controller, pooled_controllers, pre_evicted),
             MACOS_RELEASE_CONFIRM_TIMEOUT,
         );
         if !confirmed || !disposed {

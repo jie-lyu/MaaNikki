@@ -152,6 +152,7 @@ pub fn handle_task_callback(
         };
         if aborted_remaining {
             super::telemetry::on_run_finished(instance_id);
+            super::maa_core::mark_macos_connection_finished(maa_state, instance_id);
             emit_state_changed(app, instance_id, "task-progress");
             emit_state_changed(app, instance_id, "tasks-completed");
             if let Err(e) = super::maa_agent::stop_agent_impl(maa_state, instance_id) {
@@ -227,6 +228,10 @@ pub fn handle_task_callback(
     }
 
     // 通知前端刷新状态
+    if all_done {
+        // 先让 Mac 连接不可用，再通知运行结束：紧接着的重新启动只能新建连接。
+        super::maa_core::mark_macos_connection_finished(maa_state, instance_id);
+    }
     emit_state_changed(app, instance_id, "task-progress");
     if all_done {
         emit_state_changed(app, instance_id, "tasks-completed");
