@@ -18,7 +18,7 @@ let cachedDataPath: string | null = null;
 
 /**
  * 获取应用数据目录
- * - macOS: ~/Library/Application Support/MXU/
+ * - macOS: ~/Library/Application Support/MaaNikki/
  * - Windows/Linux: exe 所在目录
  *
  * 结果会被缓存，多次调用不会重复请求

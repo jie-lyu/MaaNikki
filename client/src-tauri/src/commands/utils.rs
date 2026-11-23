@@ -276,8 +276,12 @@ pub fn apply_agent_root_env(cmd: &mut std::process::Command) {
     }
 }
 
+/// macOS 数据目录名，使用 MaaNikki 自己的目录，不与其他基于 MXU 的应用共用 `MXU`。
+#[cfg(target_os = "macos")]
+const MACOS_DATA_DIR_NAME: &str = "MaaNikki";
+
 /// 获取应用数据目录
-/// - macOS: ~/Library/Application Support/MXU/
+/// - macOS: ~/Library/Application Support/MaaNikki/
 /// - Windows/Linux: exe 所在目录（保持便携式部署）
 pub fn get_app_data_dir() -> Result<PathBuf, String> {
     #[cfg(target_os = "macos")]
@@ -286,7 +290,7 @@ pub fn get_app_data_dir() -> Result<PathBuf, String> {
         let path = PathBuf::from(home)
             .join("Library")
             .join("Application Support")
-            .join("MXU");
+            .join(MACOS_DATA_DIR_NAME);
         Ok(path)
     }
 
