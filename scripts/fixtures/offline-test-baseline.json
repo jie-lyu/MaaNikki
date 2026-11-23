@@ -391,6 +391,7 @@
     "SelectionTests.test_unreadable_info_and_invalid_window",
     "SelectionTests.test_win32_capabilities",
     "Win32InputTests.test_force_releases_bypass_the_agent_channel",
+    "Win32InputTests.test_mouse_guard_lives_in_the_backend",
     "Win32InputTests.test_physical_keys_read_the_high_bit_of_async_key_state",
     "Win32InputTests.test_press_and_relative_move_use_send_input_without_moving_the_cursor",
     "Win32InputTests.test_route_recorder_polls_keys_through_the_input_backend",

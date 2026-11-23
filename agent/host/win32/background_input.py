@@ -337,7 +337,7 @@ class BackgroundInput(ForegroundInput):
         enabled: bool = True,
         lease_ms: int = 450,
     ):
-        from mouse_guard import guarded_borrowed_cursor
+        from host.win32.mouse_guard import guarded_borrowed_cursor
 
         clip_rect = (
             self._clickable_screen_bounds(margin_px=2, check_work_area=True)

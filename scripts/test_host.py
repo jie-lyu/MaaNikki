@@ -222,6 +222,13 @@ class Win32InputTests(unittest.TestCase):
         self.assertFalse(keys.down(32))  # only the "pressed since last call" bit
         self.assertFalse(keys.down(65))
 
+    def test_mouse_guard_lives_in_the_backend(self):
+        import importlib.util
+        from host.win32 import mouse_guard
+        self.assertTrue(callable(mouse_guard.guarded_borrowed_cursor))
+        self.assertTrue(callable(mouse_guard.yield_for_user_mouse))
+        self.assertIsNone(importlib.util.find_spec("mouse_guard"))
+
     def test_route_recorder_polls_keys_through_the_input_backend(self):
         from daily.route_studio import KeyWatcher
         inputs = SimpleNamespace(native=Mock())

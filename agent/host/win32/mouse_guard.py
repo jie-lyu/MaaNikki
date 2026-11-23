@@ -1,4 +1,4 @@
-"""Native mouse-input interception and pre-borrow user-activity yielding for background mode."""
+"""Native mouse-input interception and pre-borrow user-activity yielding for background mode (moved from agent/mouse_guard.py)."""
 from __future__ import annotations
 
 import atexit

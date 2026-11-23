@@ -583,7 +583,7 @@ class LauncherRuntime:
         res_out = ctypes.c_size_t(0)
         u32.SendMessageTimeoutW(self.hwnd, 0x0006, 1, 0, 0x0002, 500, ctypes.byref(res_out))
 
-        from mouse_guard import guarded_borrowed_cursor
+        from host.win32.mouse_guard import guarded_borrowed_cursor
 
         sx, sy = int(pt.x), int(pt.y)
         with guarded_borrowed_cursor(
