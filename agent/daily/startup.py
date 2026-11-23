@@ -1,6 +1,8 @@
 """Shared foreground startup for ordinary routes and developer tests."""
 from task_control import task_time as time
 
+from host import native_key
+
 from navigation.models import NavigationError
 
 
@@ -17,7 +19,7 @@ def focus_game(runtime, inputs):
         # Seize activates the connected window on key-up too. Releasing Alt
         # avoids the old cursor warp to the top-left during scene startup.
         runtime.invalidate_frame()
-        if not runtime.controller.post_key_up(18).wait().succeeded:
+        if not runtime.controller.post_key_up(native_key(18)).wait().succeeded:
             raise NavigationError("未能自动聚焦游戏，请检查窗口连接和前台输入设置。")
     deadline, stable_since = time.monotonic()+3, None
     while time.monotonic() < deadline and not runtime.stopped:

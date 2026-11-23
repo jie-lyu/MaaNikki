@@ -19,9 +19,20 @@ from game_keys import GameKeys
 from performance import count, measure
 from message_log import write_message
 from game_view import ALLOWED_FRAME_SIZES, is_clipped_game_frame, require_game_frame
+from host import native_key
 
 
 RESOURCE = RESOURCE_ROOT / "resource"
+# Pipeline actions whose "key" goes to the controller unchanged; host.native_key translates it.
+NATIVE_KEY_ACTIONS = frozenset({"ClickKey", "KeyDown", "KeyUp", "LongPressKey"})
+
+
+def native_key_fields(action, fields):
+    """Fields of a pipeline action with its key ids turned into the connected controller's codes."""
+    if action not in NATIVE_KEY_ACTIONS or "key" not in fields:
+        return fields
+    key = fields["key"]
+    return {**fields, "key": [native_key(item) for item in key] if isinstance(key, list) else native_key(key)}
 
 
 class Runtime:
@@ -439,6 +450,7 @@ class Runtime:
         if window_only and not inputs.foreground():
             # Never dispatch fallback Seize actions when the game is unfocused.
             inputs.check(require_foreground=True)
+        fields = native_key_fields(action, fields)
         with measure("input.action"):
             result = self.context.run_action("MaaNikki_Daily_Action", pipeline_override={
                 "MaaNikki_Daily_Action": {"action": action, **fields}})
@@ -671,7 +683,7 @@ class Runtime:
     def release_key(self, key):
         session = active_session()
         if session is None:
-            self.controller.post_key_up(key).wait()
+            self.controller.post_key_up(native_key(key)).wait()
         else:
             for inputs in list(session.inputs):
                 inputs.release_key(key)

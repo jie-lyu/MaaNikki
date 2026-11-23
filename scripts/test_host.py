@@ -165,6 +165,161 @@ class OverlayThemeTests(unittest.TestCase):
             self.assertIsNotNone(overlay_style.resolve_overlay_theme())
 
 
+GOOD_MAC_INFO = {"type": "macos", "window_id": 4242, "screencap_method": 2, "input_method": 3, "maanikki_patch": 1}
+
+
+class FakeQuartz:
+    """host.macos.quartz without the window server."""
+
+    def __init__(self, *, pid=700, title="Infinity Nikki  ", bundle="com.papegames.infinitynikki", front=700):
+        from host.macos.quartz import WindowInfo
+        self.WindowInfo = WindowInfo
+        self.windows = {4242: WindowInfo(4242, pid, title, (0.0, 0.0, 1920.0, 1080.0), True)}
+        self.bundle, self.front, self.posted = bundle, front, []
+
+    def window(self, window_id):
+        return self.windows.get(window_id)
+
+    def bundle_identifier(self, pid):
+        return self.bundle
+
+    def front_pid(self):
+        return self.front
+
+    def process_path(self, pid):
+        return "/Applications/Other.app/Contents/MacOS/Other"
+
+    def post_key(self, pid, keycode, *, down):
+        self.posted.append((pid, keycode, down))
+        return True
+
+
+class MacOSBackendTests(unittest.TestCase):
+    def mac_target(self, quartz, info=GOOD_MAC_INFO):
+        from host.macos import target as module
+        with patch.dict(sys.modules, {"host.macos.quartz": quartz}), patch("host.macos.quartz", quartz, create=True):
+            return module.MacOSTarget(info)
+
+    def test_key_table_keeps_unmapped_apart_from_key_code_zero(self):
+        from host.macos.keys import UnmappedKey, VK_TO_MACOS, translate
+        self.assertEqual(translate(0x41), 0)       # A is kVK_ANSI_A = 0
+        self.assertEqual(translate(0x4D), 46)      # M, measured on the device
+        self.assertEqual(translate(0x57), 13)      # W, measured on the device
+        self.assertEqual(translate(27), 53)        # Esc
+        self.assertEqual(translate(18), 58)        # Alt -> Option
+        for vk in (0, 45, 91, 255, 0x41 + 0.0, None, "A"):  # Insert and the Windows key have no Mac key
+            with self.subTest(vk=vk), self.assertRaises(UnmappedKey):
+                translate(vk)
+        letters = [VK_TO_MACOS[vk] for vk in range(0x41, 0x5B)]
+        self.assertEqual(len(set(letters)), 26)
+
+    def test_native_key_is_unchanged_on_windows_and_translated_on_macos(self):
+        with patch.object(host, "platform_backend", return_value="win32"):
+            self.assertEqual([host.native_key(k) for k in (18, 77, 45, 999)], [18, 77, 45, 999])
+        with patch.object(host, "platform_backend", return_value="macos"):
+            self.assertEqual(host.native_key(77), 46)
+            with self.assertRaisesRegex(NavigationError, "没有对应的键位"):
+                host.native_key(45)
+
+    def test_runtime_native_actions_carry_controller_key_codes(self):
+        from daily.runtime import native_key_fields
+        with patch.object(host, "platform_backend", return_value="macos"):
+            self.assertEqual(native_key_fields("ClickKey", {"key": 27}), {"key": 53})
+            self.assertEqual(native_key_fields("KeyDown", {"key": [17, 65]}), {"key": [59, 0]})
+            self.assertEqual(native_key_fields("LongPressKey", {"key": 87, "duration": 5}), {"key": 13, "duration": 5})
+            self.assertEqual(native_key_fields("Click", {"target": [1, 2]}), {"target": [1, 2]})
+        with patch.object(host, "platform_backend", return_value="win32"):
+            fields = {"key": 27}
+            self.assertEqual(native_key_fields("ClickKey", fields), {"key": 27})
+
+    def test_foreground_input_sends_controller_codes_and_tracks_key_ids(self):
+        from navigation.controller import ForegroundInput
+        from game_keys import Binding
+        controller = Mock()
+        controller.post_key_down.return_value.wait.return_value.succeeded = True
+        controller.post_key_up.return_value.wait.return_value.succeeded = True
+        fake_target = Mock(handle=1, capture_requires_foreground=False)
+        fake_target.foreground.return_value = True
+        with patch.object(host, "platform_backend", return_value="macos"), \
+                patch("navigation.controller.connect_target", return_value=fake_target), \
+                patch("task_control.active_session", return_value=None):
+            inputs = ForegroundInput(controller, lambda: False)
+            inputs._down(Binding("key", 87))
+            self.assertEqual(inputs.held, {87})
+            controller.post_key_down.assert_called_once_with(13)
+            inputs.release()
+            controller.post_key_up.assert_called_once_with(13)
+
+    def test_controller_info_must_come_from_the_patched_unit(self):
+        from host.macos.target import check_controller_info
+        self.assertEqual(check_controller_info(GOOD_MAC_INFO), 4242)
+        cases = {
+            "官方 Mac 控制模块": {**GOOD_MAC_INFO, "maanikki_patch": None},
+            "截图或输入方式": {**GOOD_MAC_INFO, "input_method": 2},
+            "没有有效的 Mac 游戏窗口": {**GOOD_MAC_INFO, "window_id": 0},
+        }
+        for message, info in cases.items():
+            with self.subTest(message=message), self.assertRaisesRegex(NavigationError, message):
+                check_controller_info(info)
+        for info in ({"type": "win32", "hwnd": 1}, None, {**GOOD_MAC_INFO, "window_id": "1"}):
+            with self.subTest(info=info), self.assertRaises(NavigationError):
+                check_controller_info(info)
+
+    def test_target_verifies_bundle_id_and_trimmed_title(self):
+        target = self.mac_target(FakeQuartz())
+        self.assertEqual((target.handle, target.pid), (4242, 700))
+        for quartz, message in ((FakeQuartz(bundle="com.example.other"), "不是游戏客户端"),
+                                (FakeQuartz(title=""), "不是无限暖暖"),
+                                (FakeQuartz(title="无限暖暖 启动器"), "不是无限暖暖")):
+            with self.subTest(message=message), self.assertRaisesRegex(NavigationError, message):
+                self.mac_target(quartz)
+        closed = FakeQuartz()
+        closed.windows.clear()
+        from navigation.models import GameWindowClosed
+        with self.assertRaises(GameWindowClosed):
+            self.mac_target(closed)
+
+    def test_target_focus_and_existence(self):
+        quartz = FakeQuartz()
+        target = self.mac_target(quartz)
+        self.assertTrue(target.exists() and target.foreground() and not target.minimized())
+        quartz.front = 1
+        self.assertFalse(target.foreground())
+        self.assertFalse(target.bring_to_foreground(Mock()))  # never activates the game itself
+        quartz.front = 700
+        quartz.windows[4242] = quartz.WindowInfo(4242, 700, "Infinity Nikki", (0.0, 0.0, 1920.0, 1080.0), False)
+        self.assertTrue(target.minimized() and not target.foreground())
+        quartz.windows[4242] = quartz.WindowInfo(4242, 901, "Infinity Nikki", (0.0, 0.0, 1920.0, 1080.0), True)
+        self.assertFalse(target.exists())  # the id now belongs to another process
+
+    def test_input_releases_by_posting_to_the_game_process(self):
+        quartz = FakeQuartz()
+        target = self.mac_target(quartz)
+        native = target.input()
+        native.force_key_up(87)
+        native.force_key_up(45)  # unmapped: nothing to release
+        self.assertEqual(quartz.posted, [(700, 13, False)])
+        self.assertFalse(native.press_mouse(0) or native.post_window_key(87, down=True) or native.relative_move(1, 0))
+        with self.assertRaisesRegex(NavigationError, "路线录制"):
+            native.physical_keys()
+
+    def test_macos_capabilities_and_saved_controller_rule(self):
+        capabilities = host.capabilities("macos")
+        self.assertEqual(capabilities.backend, "macos")
+        self.assertTrue(capabilities.foreground_input)
+        self.assertFalse(any((capabilities.background_input, capabilities.overlay, capabilities.tall_window,
+                              capabilities.work_area_bounds, capabilities.launch_game, capabilities.close_game,
+                              capabilities.clipboard, capabilities.credential_store)))
+        import client_config
+        mac = {"type": "MacOS", "macos": {"screencap": "DisplayWindow", "input": "Hybrid"}}
+        with patch.object(host, "platform_backend", return_value="macos"):
+            self.assertTrue(client_config.supports_foreground_inputs(mac))
+            for controller in ({"type": "MacOS", "macos": {"screencap": "ScreenCaptureKit", "input": "PostToPid"}},
+                               {"type": "Win32", "win32": {"mouse": "Seize", "keyboard": "Seize"}}, None):
+                with self.subTest(controller=controller):
+                    self.assertFalse(client_config.supports_foreground_inputs(controller))
+
+
 class SelectionTests(unittest.TestCase):
     def test_backend_follows_platform_and_controller_type(self):
         with patch.object(host.os, "name", "nt"):
@@ -172,10 +327,15 @@ class SelectionTests(unittest.TestCase):
             self.assertEqual(host.controller_backend({"type": "win32", "hwnd": 1}), "win32")
             self.assertIsNone(host.controller_backend({"type": "macos"}))
             self.assertIsNone(host.controller_backend(None))
-        with patch.object(host.os, "name", "posix"):
+        with patch.object(host.os, "name", "posix"), patch.object(host.sys, "platform", "linux"):
             self.assertIsNone(host.platform_backend())
             self.assertIsNone(host.controller_backend({"type": "win32", "hwnd": 1}))
             self.assertEqual(host.capabilities(host.platform_backend()), host.UNSUPPORTED)
+            self.assertIsNone(host.overlay_backend())
+        with patch.object(host.os, "name", "posix"), patch.object(host.sys, "platform", "darwin"):
+            self.assertEqual(host.platform_backend(), "macos")
+            self.assertEqual(host.controller_backend({"type": "macos", "window_id": 1}), "macos")
+            self.assertIsNone(host.controller_backend({"type": "win32", "hwnd": 1}))
             self.assertIsNone(host.overlay_backend())
 
     def test_optional_adapters_follow_capabilities(self):

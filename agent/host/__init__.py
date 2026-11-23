@@ -22,13 +22,19 @@ Optional adapters (overlay windows, launching and closing the game,
 credential storage) are reached through ``overlay_backend()`` and similar
 accessors only where a capability says they exist.
 
-Backends live in subpackages (``host.win32``) and are imported lazily, so
-importing task code never loads another platform's backend.
+Backends live in subpackages (``host.win32``, ``host.macos``) and are imported
+lazily, so importing task code never loads another platform's backend.
+
+Keys: Win32 virtual-key integers are the key id everywhere. ``native_key()`` is
+the one place that turns one into what the connected controller expects
+(unchanged on Win32, host/macos/keys.py on macOS); call it exactly where a key
+is handed to the controller or to a pipeline action.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import sys
 from typing import Protocol
 
 
@@ -111,14 +117,36 @@ class Geometry(Protocol):
 
 def platform_backend() -> str | None:
     """Backend for this process's desktop, or None when there is none."""
-    return "win32" if os.name == "nt" else None
+    if os.name == "nt":
+        return "win32"
+    if sys.platform == "darwin":
+        return "macos"
+    return None
 
 
 def controller_backend(info) -> str | None:
     """Backend that can drive a controller described by Controller.info, or None."""
-    if platform_backend() == "win32" and isinstance(info, dict) and info.get("type") == "win32":
-        return "win32"
+    backend = platform_backend()
+    kind = info.get("type") if isinstance(info, dict) else None
+    if (backend, kind) in {("win32", "win32"), ("macos", "macos")}:
+        return backend
     return None
+
+
+def native_key(key: int) -> int:
+    """The connected controller's code for one of the agent's Win32 virtual keys.
+
+    Unchanged on Win32. On macOS the single table in host/macos/keys.py; a key without a macOS
+    counterpart raises NavigationError instead of becoming 0 (which is the A key there).
+    """
+    if platform_backend() != "macos":
+        return key
+    from host.macos.keys import UnmappedKey, translate
+    try:
+        return translate(key)
+    except UnmappedKey as error:
+        from navigation.models import NavigationError
+        raise NavigationError(str(error)) from None
 
 
 def connect_target(controller) -> Target:
@@ -128,12 +156,16 @@ def connect_target(controller) -> Target:
     Raises NavigationError when this host cannot drive that controller.
     """
     from navigation.models import NavigationError
-    if platform_backend() != "win32":
+    backend = platform_backend()
+    if backend not in ("win32", "macos"):
         raise NavigationError("前台导航仅支持 Windows 游戏窗口。")
     try:
         info = controller.info
     except (OSError, RuntimeError, ValueError, TypeError, AttributeError) as error:
         raise NavigationError("无法读取当前连接的游戏窗口，请重新连接后再试。") from error
+    if backend == "macos":
+        from host.macos.target import MacOSTarget
+        return MacOSTarget(info)
     from host.win32.target import Win32Target
     return Win32Target(info)
 
@@ -143,8 +175,12 @@ def controller_supports_foreground_input(controller) -> bool:
 
     The rule belongs to the backend for this desktop; without one, never.
     """
-    if platform_backend() == "win32":
+    backend = platform_backend()
+    if backend == "win32":
         from host.win32 import supports_foreground_inputs
+        return supports_foreground_inputs(controller)
+    if backend == "macos":
+        from host.macos import supports_foreground_inputs
         return supports_foreground_inputs(controller)
     return False
 
@@ -194,6 +230,9 @@ def credential_store():
 def capabilities(backend: str | None) -> Capabilities:
     if backend == "win32":
         from host.win32 import CAPABILITIES
+        return CAPABILITIES
+    if backend == "macos":
+        from host.macos import CAPABILITIES
         return CAPABILITIES
     return UNSUPPORTED
 

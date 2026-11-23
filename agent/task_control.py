@@ -10,6 +10,7 @@ import traceback
 from weakref import WeakSet
 
 from client_config import node_action_params
+from host import native_key
 from navigation.models import GameWindowClosed, NavigationError
 from game_view import GameFrameSizeError, require_game_frame
 from message_log import write_message
@@ -486,7 +487,7 @@ class ForegroundSession:
             self.started = True
             # Keep automatic startup focus only for foreground runs.
             if not bg_active and not adapter.foreground():
-                if not adapter.controller.post_key_up(18).wait().succeeded:
+                if not adapter.controller.post_key_up(native_key(18)).wait().succeeded:
                     raise NavigationError("未能自动聚焦游戏，请检查窗口连接。")
         if not self._background_observation and adapter.hung():
             hung_begin = wall_time.monotonic()

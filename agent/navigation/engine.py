@@ -4,6 +4,7 @@ import math
 from dataclasses import replace
 from statistics import median
 from task_control import task_time as time
+from host import native_key
 from .models import NavigationError, NavigationStuckError, Point, Route
 from .geometry import project_segment, segment_distance
 from .vision import Locator, Pose
@@ -552,7 +553,7 @@ class Navigator:
     def _ensure_cursor_released(self):
         if self._cursor_released or getattr(self.inputs, "window_only", False):
             return
-        if not self.inputs.controller.post_click_key(18).wait().succeeded:
+        if not self.inputs.controller.post_click_key(native_key(18)).wait().succeeded:
             raise NavigationError("未能解除游戏光标模式，尚未开始移动。")
         self._cursor_released = True
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from task_control import task_time as time
 
-from host import background_input_class, connect_target
+from host import background_input_class, connect_target, native_key
 from .models import GameWindowClosed, NavigationError
 from game_keys import Binding, GameKeys, MACRO_KEYS
 
@@ -152,7 +152,7 @@ class ForegroundInput:
         try:
             if self.foreground():
                 try:
-                    released = self.controller.post_key_up(key).wait().succeeded
+                    released = self.controller.post_key_up(native_key(key)).wait().succeeded
                 except (OSError, RuntimeError, ValueError):
                     released = False
                 if not released:
@@ -225,7 +225,7 @@ class ForegroundInput:
             self.mouse_down(binding.code)
             return
         self.held.add(binding.code)
-        if not self.controller.post_key_down(binding.code).wait().succeeded:
+        if not self.controller.post_key_down(native_key(binding.code)).wait().succeeded:
             raise NavigationError("宏按键输入失败。")
 
     def key_up(self, key):
@@ -239,7 +239,7 @@ class ForegroundInput:
             return
         if binding.code not in self.held:
             return
-        if not self.controller.post_key_up(binding.code).wait().succeeded:
+        if not self.controller.post_key_up(native_key(binding.code)).wait().succeeded:
             raise NavigationError("宏按键释放失败。")
         self.held.discard(binding.code)
 
@@ -249,7 +249,7 @@ class ForegroundInput:
             if binding.code in self.buttons:
                 self.mouse_up(binding.code)
         elif binding.code in self.held:
-            if not self.controller.post_key_up(binding.code).wait().succeeded:
+            if not self.controller.post_key_up(native_key(binding.code)).wait().succeeded:
                 raise NavigationError("按键释放失败。")
             self.held.discard(binding.code)
 
