@@ -1,0 +1,2473 @@
+{
+  "interface_version": 2,
+  "name": "MaaNikki",
+  "mirrorchyan_rid": "MaaNikki",
+  "mirrorchyan_multiplatform": true,
+  "github": "https://github.com/architect9331/MaaNikki",
+  "controller": [
+    {
+      "name": "nikki_windows",
+      "type": "Win32",
+      "permission_required": true,
+      "display_short_side": 720,
+      "win32": {
+        "class_regex": "^UnrealWindow$",
+        "window_regex": "^\\s*(Infinity\\s*Nikki|无限暖暖|無限暖暖)\\s*$",
+        "screencap": "FramePool",
+        "screencap_fallbacks": [
+          "DXGI_DesktopDup_Window",
+          "ScreenDC"
+        ],
+        "mouse": "Seize",
+        "keyboard": "Seize"
+      }
+    }
+  ],
+  "resource": [
+    {
+      "name": "main_resource",
+      "path": [
+        "./resource"
+      ]
+    }
+  ],
+  "agent": {
+    "child_exec": "./python/python.exe",
+    "child_args": [
+      "./agent/main.py"
+    ]
+  },
+  "pretask": [
+    {
+      "name": "start_game",
+      "group": [
+        "launch_close"
+      ],
+      "controller": [
+        "nikki_windows"
+      ],
+      "exec": "./python/python.exe",
+      "args": [
+        "./agent/start_game.py"
+      ],
+      "option": [
+        "StartGameProgram",
+        "StartGameTimeout"
+      ],
+      "entry": "MaaNikki_StartGame",
+      "required": true,
+      "default_check": true,
+      "cancel_on_stop": true
+    }
+  ],
+  "global_option": [
+    "AutoAdjustResolution",
+    "NavigationSteeringMode",
+    "FocusLostBehavior",
+    "RouteOverlayMode",
+    "TaskHudMode",
+    "GameKeysMove",
+    "GameKeysPages",
+    "GameKeysAbilities",
+    "GameKeysActions",
+    "FishingCastCount",
+    "FishingAbilityPlan",
+    "FishingRhythms"
+  ],
+  "setting": [
+    {
+      "name": "runtime_behavior",
+      "option": [
+        "AutoAdjustResolution",
+        "NavigationSteeringMode",
+        "FocusLostBehavior",
+        "RouteOverlayMode",
+        "TaskHudMode"
+      ],
+      "default_expand": true
+    },
+    {
+      "name": "game_keys",
+      "option": [
+        "GameKeysMove",
+        "GameKeysPages",
+        "GameKeysAbilities",
+        "GameKeysActions"
+      ],
+      "default_expand": false
+    }
+  ],
+  "group": [
+    {
+      "name": "daily",
+      "default_expand": true
+    },
+    {
+      "name": "periodic",
+      "default_expand": true
+    },
+    {
+      "name": "launch_close",
+      "default_expand": true
+    },
+    {
+      "name": "developer",
+      "default_expand": true
+    },
+    {
+      "name": "developer_zhaoxi",
+      "default_expand": true
+    },
+    {
+      "name": "developer_xinghai",
+      "default_expand": true
+    }
+  ],
+  "task": [
+    {
+      "name": "persistent_abilities",
+      "entry": "MaaNikki_PersistentAbilities",
+      "group": [
+        "daily"
+      ],
+      "default_check": false,
+      "option": [
+        "PersistentAbilities",
+        "PersistentPerAbilityPlan"
+      ]
+    },
+    {
+      "name": "dig",
+      "entry": "MaaNikki_Dig",
+      "group": [
+        "daily"
+      ],
+      "default_check": true,
+      "option": [
+        "DigRepeat"
+      ]
+    },
+    {
+      "name": "zhaoxi",
+      "entry": "MaaNikki_Zhaoxi",
+      "group": [
+        "daily"
+      ],
+      "default_check": true,
+      "option": [
+        "ZhaoxiAbilityPlan",
+        "ZhaoxiEnergy",
+        "ZhaoxiPhoto",
+        "ZhaoxiClaim"
+      ]
+    },
+    {
+      "name": "realm_challenge",
+      "entry": "MaaNikki_RealmChallenge",
+      "group": [
+        "daily"
+      ],
+      "default_check": true,
+      "option": [
+        "RealmQueue",
+        "DoubleEnabled",
+        "DoubleTypes",
+        "DoubleWeeklyPriority",
+        "WeeklyTargets",
+        "DoubleJihuaMode",
+        "DoubleBlessMode",
+        "MonsterTargetMode",
+        "RealmTypes",
+        "JihuaTarget",
+        "BlessTarget",
+        "MonsterTarget",
+        "CollectionWorkflow",
+        "CollectionReserveBling",
+        "CollectionBling",
+        "CollectionDecompose",
+        "CollectionOrganize",
+        "JihuaMaterialMode"
+      ]
+    },
+    {
+      "name": "starlight_crystals",
+      "entry": "MaaNikki_CollectStarlightCrystals",
+      "group": [
+        "daily"
+      ],
+      "default_check": true,
+      "option": [
+        "StarlightCrystalTasks"
+      ]
+    },
+    {
+      "name": "xinghai",
+      "entry": "MaaNikki_Xinghai",
+      "group": [
+        "daily"
+      ],
+      "default_check": true,
+      "option": [
+        "XinghaiTask_bell",
+        "XinghaiTask_animal_three",
+        "XinghaiTask_photo",
+        "XinghaiTask_place",
+        "XinghaiTask_like",
+        "XinghaiTask_music",
+        "XinghaiTask_chat",
+        "XinghaiTask_animal_one",
+        "XinghaiTask_bottle_photo",
+        "XinghaiTask_meteor",
+        "XinghaiTask_wing_photo",
+        "XinghaiTask_delivery",
+        "XinghaiTask_bubble",
+        "XinghaiForceCrystal",
+        "XinghaiTask_bottle",
+        "XinghaiChatText",
+        "XinghaiPhoto",
+        "XinghaiClaim"
+      ]
+    },
+    {
+      "name": "home",
+      "entry": "MaaNikki_Home",
+      "group": [
+        "daily"
+      ],
+      "default_check": true,
+      "option": [
+        "HomeAbilityPlan"
+      ]
+    },
+    {
+      "name": "monthly_pass",
+      "entry": "MaaNikki_MonthlyPass",
+      "group": [
+        "daily"
+      ],
+      "default_check": true,
+      "option": [
+        "MonthlyPages"
+      ],
+      "pipeline_override_sha256": "ab9598c9f3742b20"
+    },
+    {
+      "name": "mailbox",
+      "entry": "MaaNikki_Mailbox",
+      "group": [
+        "daily"
+      ],
+      "default_check": true
+    },
+    {
+      "name": "redeem_codes",
+      "entry": "MaaNikki_RedeemCodes",
+      "group": [
+        "daily"
+      ],
+      "default_check": true,
+      "option": [
+        "RedeemCodesOnline",
+        "RedeemCodesExtra"
+      ]
+    },
+    {
+      "name": "weekly_free_gifts",
+      "entry": "MaaNikki_WeeklyFreeGifts",
+      "group": [
+        "periodic"
+      ],
+      "default_check": true
+    },
+    {
+      "name": "monthly_crystal_exchange",
+      "entry": "MaaNikki_MonthlyCrystalExchange",
+      "group": [
+        "periodic"
+      ],
+      "default_check": true
+    },
+    {
+      "name": "crown",
+      "entry": "MaaNikki_Crown",
+      "group": [
+        "periodic"
+      ],
+      "default_check": true,
+      "option": [
+        "CrownTargetStars",
+        "CrownRewards"
+      ]
+    },
+    {
+      "name": "open_world_collect",
+      "entry": "MaaNikki_OpenWorldCollect",
+      "group": [
+        "daily",
+        "periodic"
+      ],
+      "default_check": false,
+      "option": [
+        "OpenWorldRoutes",
+        "OpenWorldGingerbreadSummon",
+        "OpenWorldQuietWindow",
+        "TaskRouteOverlay"
+      ]
+    },
+    {
+      "name": "minigame_bling",
+      "entry": "MaaNikki_MinigameBling",
+      "group": [
+        "daily",
+        "periodic"
+      ],
+      "default_check": false,
+      "option": [
+        "MinigameBlingTarget",
+        "MinigameBlingCameraAssist",
+        "MinigameBlingStartMode",
+        "MinigameBlingBackground"
+      ]
+    },
+    {
+      "name": "custom_route",
+      "entry": "MaaNikki_RouteRun",
+      "group": [
+        "periodic"
+      ],
+      "default_check": false,
+      "option": [
+        "CustomRouteFile",
+        "TaskRouteOverlay"
+      ]
+    },
+    {
+      "name": "close_game",
+      "entry": "MaaNikki_CloseGame",
+      "group": [
+        "launch_close"
+      ],
+      "default_check": false,
+      "option": [
+        "ForceCloseOnTimeout",
+        "CloseLauncher"
+      ]
+    },
+    {
+      "name": "route_test",
+      "entry": "MaaNikki_RouteTest",
+      "group": [
+        "developer"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": [
+        "RouteTestMode"
+      ]
+    },
+    {
+      "name": "dev_zhaoxi_jihua",
+      "entry": "MaaNikki_SubtaskTest_zhaoxi_jihua",
+      "group": [
+        "developer_zhaoxi"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": [
+        "JihuaTarget",
+        "JihuaMaterialMode"
+      ]
+    },
+    {
+      "name": "dev_zhaoxi_bless",
+      "entry": "MaaNikki_SubtaskTest_zhaoxi_bless",
+      "group": [
+        "developer_zhaoxi"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": [
+        "BlessTarget"
+      ]
+    },
+    {
+      "name": "dev_zhaoxi_monster",
+      "entry": "MaaNikki_SubtaskTest_zhaoxi_monster",
+      "group": [
+        "developer_zhaoxi"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": [
+        "MonsterTarget"
+      ]
+    },
+    {
+      "name": "dev_zhaoxi_plant",
+      "entry": "MaaNikki_SubtaskTest_zhaoxi_plant",
+      "group": [
+        "developer_zhaoxi"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": []
+    },
+    {
+      "name": "dev_zhaoxi_insect",
+      "entry": "MaaNikki_SubtaskTest_zhaoxi_insect",
+      "group": [
+        "developer_zhaoxi"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": [
+        "ZhaoxiAbilityPlan"
+      ]
+    },
+    {
+      "name": "dev_zhaoxi_fight",
+      "entry": "MaaNikki_SubtaskTest_zhaoxi_fight",
+      "group": [
+        "developer_zhaoxi"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": []
+    },
+    {
+      "name": "dev_zhaoxi_photo",
+      "entry": "MaaNikki_SubtaskTest_zhaoxi_photo",
+      "group": [
+        "developer_zhaoxi"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": [
+        "ZhaoxiPhoto"
+      ]
+    },
+    {
+      "name": "dev_xinghai_photo",
+      "entry": "MaaNikki_SubtaskTest_xinghai_photo",
+      "group": [
+        "developer_xinghai"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": [
+        "XinghaiPhoto"
+      ]
+    },
+    {
+      "name": "dev_xinghai_place",
+      "entry": "MaaNikki_SubtaskTest_xinghai_place",
+      "group": [
+        "developer_xinghai"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": []
+    },
+    {
+      "name": "dev_xinghai_music",
+      "entry": "MaaNikki_SubtaskTest_xinghai_music",
+      "group": [
+        "developer_xinghai"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": []
+    },
+    {
+      "name": "dev_xinghai_chat",
+      "entry": "MaaNikki_SubtaskTest_xinghai_chat",
+      "group": [
+        "developer_xinghai"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": []
+    },
+    {
+      "name": "dev_xinghai_like",
+      "entry": "MaaNikki_SubtaskTest_xinghai_like",
+      "group": [
+        "developer_xinghai"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": []
+    },
+    {
+      "name": "dev_xinghai_bottle",
+      "entry": "MaaNikki_SubtaskTest_xinghai_bottle",
+      "group": [
+        "developer_xinghai"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": []
+    },
+    {
+      "name": "dev_xinghai_delivery",
+      "entry": "MaaNikki_SubtaskTest_xinghai_delivery",
+      "group": [
+        "developer_xinghai"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": []
+    },
+    {
+      "name": "dev_xinghai_bottle_photo",
+      "entry": "MaaNikki_SubtaskTest_xinghai_bottle_photo",
+      "group": [
+        "developer_xinghai"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": [
+        "XinghaiPhoto"
+      ]
+    },
+    {
+      "name": "dev_xinghai_crystal",
+      "entry": "MaaNikki_SubtaskTest_xinghai_crystal",
+      "group": [
+        "developer_xinghai"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": []
+    },
+    {
+      "name": "dev_xinghai_meteor",
+      "entry": "MaaNikki_SubtaskTest_xinghai_meteor",
+      "group": [
+        "developer_xinghai"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": []
+    },
+    {
+      "name": "dev_xinghai_bell",
+      "entry": "MaaNikki_SubtaskTest_xinghai_bell",
+      "group": [
+        "developer_xinghai"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": []
+    },
+    {
+      "name": "dev_xinghai_wing_photo",
+      "entry": "MaaNikki_SubtaskTest_xinghai_wing_photo",
+      "group": [
+        "developer_xinghai"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": [
+        "XinghaiPhoto"
+      ]
+    },
+    {
+      "name": "dev_xinghai_bubble",
+      "entry": "MaaNikki_SubtaskTest_xinghai_bubble",
+      "group": [
+        "developer_xinghai"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": []
+    },
+    {
+      "name": "dev_xinghai_animal_three",
+      "entry": "MaaNikki_SubtaskTest_xinghai_animal_three",
+      "group": [
+        "developer_xinghai"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": []
+    },
+    {
+      "name": "dev_xinghai_animal_one",
+      "entry": "MaaNikki_SubtaskTest_xinghai_animal_one",
+      "group": [
+        "developer_xinghai"
+      ],
+      "developer_only": true,
+      "default_check": false,
+      "option": []
+    }
+  ],
+  "option": {
+    "AutoAdjustResolution": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "d847287df42b4e3f"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "ea43cdd282a3a0c1"
+        }
+      ]
+    },
+    "NavigationSteeringMode": {
+      "type": "select",
+      "default_case": "Wasd",
+      "cases": [
+        {
+          "name": "Wasd",
+          "pipeline_override_sha256": "cd30bd79cd379851"
+        },
+        {
+          "name": "Camera",
+          "pipeline_override_sha256": "73733fb528cc765d"
+        }
+      ]
+    },
+    "FocusLostBehavior": {
+      "type": "select",
+      "default_case": "Pause",
+      "cases": [
+        {
+          "name": "Pause",
+          "pipeline_override_sha256": "40cf5891fc191b60"
+        },
+        {
+          "name": "Return",
+          "pipeline_override_sha256": "d4d251578855a5f4"
+        },
+        {
+          "name": "Background",
+          "pipeline_override_sha256": "be8f289bfba914d5"
+        }
+      ]
+    },
+    "RouteOverlayMode": {
+      "type": "select",
+      "default_case": "Full",
+      "cases": [
+        {
+          "name": "Full",
+          "pipeline_override_sha256": "9dea51ad284bcef1"
+        },
+        {
+          "name": "MinimapOnly",
+          "pipeline_override_sha256": "17ed5938a1121c69"
+        },
+        {
+          "name": "Off",
+          "pipeline_override_sha256": "2b95c4b386f1dc5c"
+        }
+      ]
+    },
+    "TaskHudMode": {
+      "type": "select",
+      "default_case": "Adaptive",
+      "cases": [
+        {
+          "name": "Adaptive",
+          "pipeline_override_sha256": "350a3d00d0820b8d"
+        },
+        {
+          "name": "Always",
+          "pipeline_override_sha256": "8e7ccfaf6c9c25b8"
+        },
+        {
+          "name": "ReasonOnly",
+          "pipeline_override_sha256": "11593b5af850fc94"
+        }
+      ]
+    },
+    "GameKeysMove": {
+      "type": "input",
+      "inputs": [
+        {
+          "name": "forward",
+          "default": "W",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "backward",
+          "default": "S",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "left",
+          "default": "A",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "right",
+          "default": "D",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "jump",
+          "default": "Space",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "falling",
+          "default": "Q",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "bell",
+          "default": "X",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "ability_derive_1",
+          "default": "G",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "ability_derive_2",
+          "default": "T",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "sub_ability",
+          "default": "R",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        }
+      ],
+      "pipeline_override_sha256": "d6bdb626bec9d740"
+    },
+    "GameKeysPages": {
+      "type": "input",
+      "inputs": [
+        {
+          "name": "map",
+          "default": "M",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "backpack",
+          "default": "B",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "photo",
+          "default": "P",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "dress",
+          "default": "C",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "calendar",
+          "default": "L",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "monthly",
+          "default": "J",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "item",
+          "default": "Z",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "shop",
+          "default": "H",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "chat",
+          "default": "Enter",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        }
+      ],
+      "pipeline_override_sha256": "4196698ae2333a43"
+    },
+    "GameKeysAbilities": {
+      "type": "input",
+      "inputs": [
+        {
+          "name": "ability_1",
+          "default": "1",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "ability_2",
+          "default": "2",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "ability_3",
+          "default": "3",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "ability_4",
+          "default": "4",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "ability_5",
+          "default": "5",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "ability_6",
+          "default": "6",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "ability_7",
+          "default": "7",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "ability_8",
+          "default": "8",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        }
+      ],
+      "pipeline_override_sha256": "21db98449ad8192b"
+    },
+    "GameKeysActions": {
+      "type": "input",
+      "inputs": [
+        {
+          "name": "interact",
+          "default": "F",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "exit",
+          "default": "Backspace",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        },
+        {
+          "name": "fishing_reel",
+          "default": "MouseRight",
+          "verify": "^\\s*(?:[A-Za-z0-9]|[Ff](?:[1-9]|1[0-9]|2[0-4])|[Nn][Uu][Mm][Pp][Aa][Dd][0-9]|[Ee][Ss][Cc]|[Ee][Ss][Cc][Aa][Pp][Ee]|[Ss][Pp][Aa][Cc][Ee]|[Ee][Nn][Tt][Ee][Rr]|[Rr][Ee][Tt][Uu][Rr][Nn]|[Bb][Aa][Cc][Kk][Ss][Pp][Aa][Cc][Ee]|[Tt][Aa][Bb]|[Ss][Hh][Ii][Ff][Tt]|[Cc][Tt][Rr][Ll]|[Cc][Oo][Nn][Tt][Rr][Oo][Ll]|[Aa][Ll][Tt]|[Cc][Aa][Pp][Ss][Ll][Oo][Cc][Kk]|[Uu][Pp]|[Dd][Oo][Ww][Nn]|[Ll][Ee][Ff][Tt]|[Rr][Ii][Gg][Hh][Tt]|[Ii][Nn][Ss][Ee][Rr][Tt]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Hh][Oo][Mm][Ee]|[Ee][Nn][Dd]|[Pp][Aa][Gg][Ee][Uu][Pp]|[Pp][Aa][Gg][Ee][Dd][Oo][Ww][Nn]|[Ll][Ss][Hh][Ii][Ff][Tt]|[Rr][Ss][Hh][Ii][Ff][Tt]|[Ll][Cc][Tt][Rr][Ll]|[Rr][Cc][Tt][Rr][Ll]|[Ll][Aa][Ll][Tt]|[Rr][Aa][Ll][Tt]|[Ww][Ii][Nn]|[Mm][Ee][Tt][Aa]|[Ll][Ww][Ii][Nn]|[Rr][Ww][Ii][Nn]|[Aa][Pp][Pp][Ss]|[Pp][Aa][Uu][Ss][Ee]|[Pp][Rr][Ii][Nn][Tt][Ss][Cc][Rr][Ee][Ee][Nn]|[Nn][Uu][Mm][Ll][Oo][Cc][Kk]|[Ss][Cc][Rr][Oo][Ll][Ll][Ll][Oo][Cc][Kk]|[Bb][Aa][Cc][Kk][Qq][Uu][Oo][Tt][Ee]|[Mm][Ii][Nn][Uu][Ss]|[Ee][Qq][Uu][Aa][Ll]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Ll][Ee][Ff][Tt]|[Bb][Rr][Aa][Cc][Kk][Ee][Tt][Rr][Ii][Gg][Hh][Tt]|[Bb][Aa][Cc][Kk][Ss][Ll][Aa][Ss][Hh]|[Ss][Ee][Mm][Ii][Cc][Oo][Ll][Oo][Nn]|[Qq][Uu][Oo][Tt][Ee]|[Cc][Oo][Mm][Mm][Aa]|[Pp][Ee][Rr][Ii][Oo][Dd]|[Ss][Ll][Aa][Ss][Hh]|[Nn][Uu][Mm][Pp][Aa][Dd][Aa][Dd][Dd]|[Nn][Uu][Mm][Pp][Aa][Dd][Ss][Uu][Bb][Tt][Rr][Aa][Cc][Tt]|[Nn][Uu][Mm][Pp][Aa][Dd][Mm][Uu][Ll][Tt][Ii][Pp][Ll][Yy]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ii][Vv][Ii][Dd][Ee]|[Nn][Uu][Mm][Pp][Aa][Dd][Dd][Ee][Cc][Ii][Mm][Aa][Ll]|[Mm][Oo][Uu][Ss][Ee][Ll][Ee][Ff][Tt]|[Mm][Oo][Uu][Ss][Ee][Rr][Ii][Gg][Hh][Tt]|[Mm][Oo][Uu][Ss][Ee][Mm][Ii][Dd][Dd][Ll][Ee]|[Mm][Oo][Uu][Ss][Ee][Xx]1|[Mm][Oo][Uu][Ss][Ee][Xx]2|[Tt][Hh][Uu][Mm][Bb]1|[Tt][Hh][Uu][Mm][Bb]2|左键|右键|中键|侧键1|侧键2)\\s*$",
+          "pipeline_type": "string",
+          "input_type": "key"
+        }
+      ],
+      "pipeline_override_sha256": "56640090fb14b44f"
+    },
+    "StartGameProgram": {
+      "type": "input",
+      "inputs": [
+        {
+          "name": "path",
+          "default": "",
+          "input_type": "file"
+        }
+      ]
+    },
+    "StartGameTimeout": {
+      "type": "input",
+      "inputs": [
+        {
+          "name": "seconds",
+          "default": "900",
+          "pipeline_type": "int",
+          "verify": "^(?:[3-9][0-9]|[1-8][0-9]{2}|900)$"
+        }
+      ],
+      "pipeline_override_sha256": "ba9862996f975d98"
+    },
+    "PersistentAbilities": {
+      "type": "checkbox",
+      "cases": [
+        {
+          "name": "Gingerbread",
+          "pipeline_override_sha256": "2b58d933a6d14c57"
+        },
+        {
+          "name": "MaskAbsorb",
+          "pipeline_override_sha256": "ef7c45d1f909059f"
+        },
+        {
+          "name": "ForestLight",
+          "pipeline_override_sha256": "a4745efc6dced01b"
+        },
+        {
+          "name": "EagleInvis",
+          "pipeline_override_sha256": "7294869ba6ac5239"
+        },
+        {
+          "name": "EagleVision",
+          "pipeline_override_sha256": "95b4625ed85ce8c5"
+        }
+      ],
+      "default_case": [],
+      "min_count": 1
+    },
+    "PersistentPerAbilityPlan": {
+      "type": "switch",
+      "default_case": "No",
+      "cases": [
+        {
+          "name": "Yes",
+          "option": [
+            "PersistentPlanGingerbread",
+            "PersistentPlanMask",
+            "PersistentPlanForestLight",
+            "PersistentPlanEagleEye"
+          ],
+          "pipeline_override_sha256": "9048bae03fda2630"
+        },
+        {
+          "name": "No",
+          "option": [
+            "PersistentAbilityPlan"
+          ],
+          "pipeline_override_sha256": "ba1453952fcbb724"
+        }
+      ]
+    },
+    "PersistentAbilityPlan": {
+      "type": "select",
+      "default_case": "Plan3",
+      "cases": [
+        {
+          "name": "Plan1",
+          "pipeline_override_sha256": "5199bd276e96c4da"
+        },
+        {
+          "name": "Plan2",
+          "pipeline_override_sha256": "0831c4cb39da3485"
+        },
+        {
+          "name": "Plan3",
+          "pipeline_override_sha256": "e72eeaab880fe7b1"
+        }
+      ]
+    },
+    "PersistentPlanGingerbread": {
+      "type": "select",
+      "default_case": "Plan3",
+      "cases": [
+        {
+          "name": "Plan1",
+          "pipeline_override_sha256": "10c9cfdddf992f8d"
+        },
+        {
+          "name": "Plan2",
+          "pipeline_override_sha256": "ad7532c802bb092f"
+        },
+        {
+          "name": "Plan3",
+          "pipeline_override_sha256": "147aa381056e029a"
+        }
+      ]
+    },
+    "PersistentPlanMask": {
+      "type": "select",
+      "default_case": "Plan3",
+      "cases": [
+        {
+          "name": "Plan1",
+          "pipeline_override_sha256": "11ceaa705973609e"
+        },
+        {
+          "name": "Plan2",
+          "pipeline_override_sha256": "3e87b90dd9f521ef"
+        },
+        {
+          "name": "Plan3",
+          "pipeline_override_sha256": "e0e8fe324caed703"
+        }
+      ]
+    },
+    "PersistentPlanForestLight": {
+      "type": "select",
+      "default_case": "Plan3",
+      "cases": [
+        {
+          "name": "Plan1",
+          "pipeline_override_sha256": "9df936622a21a8f4"
+        },
+        {
+          "name": "Plan2",
+          "pipeline_override_sha256": "ed87eac5934b1fb7"
+        },
+        {
+          "name": "Plan3",
+          "pipeline_override_sha256": "1199636485091f9f"
+        }
+      ]
+    },
+    "PersistentPlanEagleEye": {
+      "type": "select",
+      "default_case": "Plan3",
+      "cases": [
+        {
+          "name": "Plan1",
+          "pipeline_override_sha256": "335cbe1bf76d7493"
+        },
+        {
+          "name": "Plan2",
+          "pipeline_override_sha256": "80050697e3813879"
+        },
+        {
+          "name": "Plan3",
+          "pipeline_override_sha256": "38d050cd699523c1"
+        }
+      ]
+    },
+    "DigRepeat": {
+      "type": "switch",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "207512fc2af36797"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "7ccc83fbd25ec6ca"
+        }
+      ],
+      "default_case": "Yes"
+    },
+    "ZhaoxiAbilityPlan": {
+      "type": "select",
+      "default_case": "Plan3",
+      "cases": [
+        {
+          "name": "Plan1",
+          "pipeline_override_sha256": "a2e3e7dd79bed21c"
+        },
+        {
+          "name": "Plan2",
+          "pipeline_override_sha256": "83df4d7718505bdc"
+        },
+        {
+          "name": "Plan3",
+          "pipeline_override_sha256": "003ba1869feb5bb8"
+        }
+      ]
+    },
+    "ZhaoxiEnergy": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "b5e636bdbb097cb3"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "311337a110b377c0"
+        }
+      ]
+    },
+    "ZhaoxiPhoto": {
+      "type": "switch",
+      "default_case": "No",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "a4f48f237c1a5559"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "b14161caf5ae811c"
+        }
+      ]
+    },
+    "ZhaoxiClaim": {
+      "type": "switch",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "359482fa2e39e6df"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "ecdeeb2eed32dbe7"
+        }
+      ],
+      "default_case": "Yes"
+    },
+    "RealmTypes": {
+      "type": "select",
+      "cases": [
+        {
+          "name": "Jihua",
+          "pipeline_override_sha256": "227bd86fc6aa1593"
+        },
+        {
+          "name": "Bless",
+          "pipeline_override_sha256": "93ed86b0b82d533c"
+        },
+        {
+          "name": "Monster",
+          "pipeline_override_sha256": "aeac1854ba3a07e6"
+        }
+      ],
+      "default_case": "Bless"
+    },
+    "CollectionWorkflow": {
+      "type": "select",
+      "cases": [
+        {
+          "name": "Managed",
+          "pipeline_override_sha256": "0cf754fd99b07d11"
+        },
+        {
+          "name": "FarmOnly",
+          "pipeline_override_sha256": "1127ad13b8052daf"
+        }
+      ],
+      "default_case": "Managed"
+    },
+    "CollectionReserveBling": {
+      "type": "input",
+      "inputs": [
+        {
+          "name": "amount",
+          "default": "0",
+          "pipeline_type": "int",
+          "verify": "^\\d+$"
+        }
+      ],
+      "pipeline_override_sha256": "82046b9f4222ed54"
+    },
+    "CollectionBling": {
+      "type": "switch",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "fd1a468ba6c960ba"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "1c91bb7105eeb361"
+        }
+      ],
+      "default_case": "Yes"
+    },
+    "CollectionDecompose": {
+      "type": "switch",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "54c430eec51ee9d6"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "919758a59aa7a8bf"
+        }
+      ],
+      "default_case": "Yes"
+    },
+    "CollectionOrganize": {
+      "type": "select",
+      "cases": [
+        {
+          "name": "Auto",
+          "pipeline_override_sha256": "f356d5c86b4b5bc0"
+        },
+        {
+          "name": "Always",
+          "pipeline_override_sha256": "4a73363b7f92f434"
+        },
+        {
+          "name": "AlwaysUnlock",
+          "pipeline_override_sha256": "1080137573fccb4f"
+        }
+      ],
+      "default_case": "Auto"
+    },
+    "JihuaTarget": {
+      "type": "select",
+      "cases": [
+        {
+          "name": "Bubble",
+          "pipeline_override_sha256": "1f53c99bafc0e13a"
+        },
+        {
+          "name": "Bling",
+          "pipeline_override_sha256": "14ce855dbc1833ec"
+        },
+        {
+          "name": "Thread",
+          "pipeline_override_sha256": "34b93df3fc8cfe27"
+        }
+      ],
+      "default_case": "Bubble"
+    },
+    "JihuaMaterialMode": {
+      "type": "select",
+      "cases": [
+        {
+          "name": "Priority",
+          "option": [
+            "JihuaMaterials"
+          ],
+          "pipeline_override_sha256": "a2bb37c766d0b496"
+        },
+        {
+          "name": "Most",
+          "pipeline_override_sha256": "daa91c4b298ebbb2"
+        }
+      ],
+      "default_case": "Priority"
+    },
+    "JihuaMaterials": {
+      "type": "input",
+      "inputs": [
+        {
+          "name": "Primary",
+          "default": "星荧草",
+          "pipeline_type": "string",
+          "verify": "^.{1,12}$"
+        },
+        {
+          "name": "Backup1",
+          "default": "纽扣松果",
+          "pipeline_type": "string",
+          "verify": "^.{1,12}$"
+        },
+        {
+          "name": "Backup2",
+          "default": "小棉菊",
+          "pipeline_type": "string",
+          "verify": "^.{1,12}$"
+        }
+      ],
+      "pipeline_override_sha256": "517860c95ad9adda"
+    },
+    "BlessTarget": {
+      "type": "select",
+      "cases": [
+        {
+          "name": "Well",
+          "pipeline_override_sha256": "7dbf3d04348e965e"
+        },
+        {
+          "name": "Warehouse",
+          "pipeline_override_sha256": "5fc556c4896b63a5"
+        },
+        {
+          "name": "Cellar",
+          "pipeline_override_sha256": "322c7683a612311f"
+        },
+        {
+          "name": "Train",
+          "pipeline_override_sha256": "63e53ae6297a624d"
+        },
+        {
+          "name": "Makeup",
+          "pipeline_override_sha256": "507b7e5728731b61"
+        },
+        {
+          "name": "Queen",
+          "pipeline_override_sha256": "8fa4a6ddff1b7250"
+        },
+        {
+          "name": "Sword",
+          "pipeline_override_sha256": "e2acbccbf847568a"
+        },
+        {
+          "name": "Snake",
+          "pipeline_override_sha256": "85906848a5a35ae1"
+        },
+        {
+          "name": "Mushroom",
+          "pipeline_override_sha256": "1461335ad95061c2"
+        },
+        {
+          "name": "Ishanshan",
+          "pipeline_override_sha256": "b9ab535fd773193b"
+        },
+        {
+          "name": "Beast",
+          "pipeline_override_sha256": "13b720d3fdc14d6b"
+        },
+        {
+          "name": "Frost",
+          "pipeline_override_sha256": "f9d23335636ae337"
+        },
+        {
+          "name": "Soul",
+          "pipeline_override_sha256": "98a4e093715e9cd0"
+        },
+        {
+          "name": "Harvest",
+          "pipeline_override_sha256": "e3570f497228eab6"
+        }
+      ],
+      "default_case": "Well"
+    },
+    "MonsterTarget": {
+      "type": "select",
+      "cases": [
+        {
+          "name": "Energy",
+          "pipeline_override_sha256": "b9a35499fd3599de"
+        },
+        {
+          "name": "Throw",
+          "pipeline_override_sha256": "972ec4dff4c6d5c7"
+        },
+        {
+          "name": "Fall",
+          "pipeline_override_sha256": "8b89aedda9e8891e"
+        },
+        {
+          "name": "Roll",
+          "pipeline_override_sha256": "7514881df6cf8ab3"
+        },
+        {
+          "name": "Drive",
+          "pipeline_override_sha256": "63f7896d51350bfb"
+        },
+        {
+          "name": "Climb",
+          "pipeline_override_sha256": "1599330deec18319"
+        },
+        {
+          "name": "Shock",
+          "pipeline_override_sha256": "1c1e7de7bd0231ad"
+        },
+        {
+          "name": "Wind",
+          "pipeline_override_sha256": "3d53c713293e9905"
+        },
+        {
+          "name": "Spin",
+          "pipeline_override_sha256": "16e25dcdbac33781"
+        },
+        {
+          "name": "Flip",
+          "pipeline_override_sha256": "6f41cb65588ae8dc"
+        },
+        {
+          "name": "Crash",
+          "pipeline_override_sha256": "42592f42d2877a14"
+        },
+        {
+          "name": "Spit",
+          "pipeline_override_sha256": "050bd990650ea653"
+        },
+        {
+          "name": "Air",
+          "pipeline_override_sha256": "6c23e86e4890309f"
+        },
+        {
+          "name": "Blast",
+          "pipeline_override_sha256": "9ddd475cc8271395"
+        },
+        {
+          "name": "Guard",
+          "pipeline_override_sha256": "3df75f12d88b4ab7"
+        },
+        {
+          "name": "Assault",
+          "pipeline_override_sha256": "b9425c40368b159e"
+        },
+        {
+          "name": "Violence",
+          "pipeline_override_sha256": "488d6f540be4cd84"
+        },
+        {
+          "name": "Weightless",
+          "pipeline_override_sha256": "ea26d0652d9f3f97"
+        },
+        {
+          "name": "Lost",
+          "pipeline_override_sha256": "441be47c5ce55621"
+        },
+        {
+          "name": "Expel",
+          "pipeline_override_sha256": "ef7318cba606dbbc"
+        }
+      ],
+      "default_case": "Climb"
+    },
+    "WeeklyTargets": {
+      "type": "checkbox",
+      "cases": [
+        {
+          "name": "Qiggeda",
+          "pipeline_override_sha256": "f19e57ae9183fa8e"
+        },
+        {
+          "name": "Juan",
+          "pipeline_override_sha256": "6b5728fa444b242d"
+        }
+      ],
+      "default_case": [
+        "Qiggeda",
+        "Juan"
+      ],
+      "min_count": 1,
+      "max_count": 2
+    },
+    "RealmQueue": {
+      "type": "input",
+      "inputs": [
+        {
+          "name": "order",
+          "default": "weekly,-renewal,-crafting,-glow",
+          "pipeline_type": "string",
+          "verify": "^-?(weekly|renewal|crafting|glow)(,-?(weekly|renewal|crafting|glow))*$"
+        }
+      ],
+      "pipeline_override_sha256": "26e74a9fdd3c7830"
+    },
+    "DoubleEnabled": {
+      "type": "switch",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "c7c70e71b45e2f76"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "dac193af26046bf7"
+        }
+      ],
+      "default_case": "Yes"
+    },
+    "DoubleTypes": {
+      "type": "checkbox",
+      "cases": [
+        {
+          "name": "Jihua",
+          "pipeline_override_sha256": "dd475c5ecaae1707"
+        },
+        {
+          "name": "Bless",
+          "pipeline_override_sha256": "78145e182d2ce1c9"
+        },
+        {
+          "name": "Monster",
+          "pipeline_override_sha256": "410b2ef1c0c986a5"
+        },
+        {
+          "name": "Weekly",
+          "pipeline_override_sha256": "583aeea259ec36e1"
+        }
+      ],
+      "default_case": [
+        "Jihua",
+        "Bless",
+        "Monster",
+        "Weekly"
+      ],
+      "min_count": 0
+    },
+    "DoubleJihuaMode": {
+      "type": "select",
+      "cases": [
+        {
+          "name": "FollowDeficit",
+          "pipeline_override_sha256": "4c52edd73f53b26b"
+        },
+        {
+          "name": "InheritFallback",
+          "pipeline_override_sha256": "bfb5e437bd2b214f"
+        }
+      ],
+      "default_case": "FollowDeficit"
+    },
+    "DoubleBlessMode": {
+      "type": "select",
+      "cases": [
+        {
+          "name": "GlowPursuit",
+          "pipeline_override_sha256": "95a6e84560d332c5"
+        },
+        {
+          "name": "InheritFallback",
+          "pipeline_override_sha256": "2db222e4507745fe"
+        }
+      ],
+      "default_case": "GlowPursuit"
+    },
+    "MonsterTargetMode": {
+      "type": "select",
+      "cases": [
+        {
+          "name": "FollowDeficit",
+          "pipeline_override_sha256": "95898e03faec9860"
+        },
+        {
+          "name": "InheritFallback",
+          "pipeline_override_sha256": "dde883ef8c1272d4"
+        }
+      ],
+      "default_case": "FollowDeficit"
+    },
+    "DoubleWeeklyPriority": {
+      "type": "select",
+      "cases": [
+        {
+          "name": "Qiggeda",
+          "pipeline_override_sha256": "60fbd387d3a61270"
+        },
+        {
+          "name": "Juan",
+          "pipeline_override_sha256": "d530830bf7df575e"
+        }
+      ],
+      "default_case": "Qiggeda"
+    },
+    "StarlightCrystalTasks": {
+      "type": "checkbox",
+      "cases": [
+        {
+          "name": "Route",
+          "pipeline_override_sha256": "7ab7955fc554ed0c"
+        },
+        {
+          "name": "Tree",
+          "pipeline_override_sha256": "6427f4a0efb74894"
+        }
+      ],
+      "default_case": [
+        "Route"
+      ],
+      "min_count": 1,
+      "max_count": 2
+    },
+    "XinghaiForceCrystal": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "9dd10579f19c8e04"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "a0712d112c914659"
+        }
+      ]
+    },
+    "XinghaiChatText": {
+      "type": "input",
+      "layout": "inline",
+      "inputs": [
+        {
+          "name": "Text",
+          "default": "1",
+          "pipeline_type": "string",
+          "verify": "^.{1,40}$"
+        }
+      ],
+      "pipeline_override_sha256": "06f9fcbdf13c2358"
+    },
+    "XinghaiPhoto": {
+      "type": "switch",
+      "default_case": "No",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "a2bbf08c0546c2a5"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "0be10ea910cde954"
+        }
+      ]
+    },
+    "XinghaiClaim": {
+      "type": "switch",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "f3b1eca2042efce8"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "60c9e10f631b2927"
+        }
+      ],
+      "default_case": "Yes"
+    },
+    "XinghaiTask_photo": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "bbf9dd70ec0a84d1"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "4780b919ec14ccb9"
+        }
+      ]
+    },
+    "XinghaiTask_place": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "74669bc0c2c51a44"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "87878e03837d1bdd"
+        }
+      ]
+    },
+    "XinghaiTask_music": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "552318947a6f5f27"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "cec92249d7cebe8a"
+        }
+      ]
+    },
+    "XinghaiTask_chat": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "6c572e5b9d169a89"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "3ce24f98f94119d7"
+        }
+      ]
+    },
+    "XinghaiTask_like": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "e2643e0e8afc818b"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "87c6152695d96313"
+        }
+      ]
+    },
+    "XinghaiTask_bottle": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "590f051c7c94342a"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "ace7d1d02b8eae61"
+        }
+      ]
+    },
+    "XinghaiTask_delivery": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "b4e3228751bc229e"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "c797bda2bd11d836"
+        }
+      ]
+    },
+    "XinghaiTask_bottle_photo": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "cc05d00199a2832c"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "06e09530d02afa35"
+        }
+      ]
+    },
+    "XinghaiTask_meteor": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "b6ad73d51b01c468"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "838c383dca422f01"
+        }
+      ]
+    },
+    "XinghaiTask_bell": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "37219f4e39d74c7a"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "140e5b2110d9d7a1"
+        }
+      ]
+    },
+    "XinghaiTask_wing_photo": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "abb388ddfeef1e18"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "038fa346fc34fb58"
+        }
+      ]
+    },
+    "XinghaiTask_bubble": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "bdb1b0482dff99b5"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "0d3f482e7b7b1588"
+        }
+      ]
+    },
+    "XinghaiTask_animal_three": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "00454098f3ed768d"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "0aec0014774f8783"
+        }
+      ]
+    },
+    "XinghaiTask_animal_one": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "b7008f579c5f30d3"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "02bfc640353b6bf9"
+        }
+      ]
+    },
+    "HomeAbilityPlan": {
+      "type": "select",
+      "default_case": "Plan3",
+      "cases": [
+        {
+          "name": "Plan1",
+          "pipeline_override_sha256": "677b4fa0591461b7"
+        },
+        {
+          "name": "Plan2",
+          "pipeline_override_sha256": "214aaa3ebe706216"
+        },
+        {
+          "name": "Plan3",
+          "pipeline_override_sha256": "13a9f0f25c952a5e"
+        }
+      ]
+    },
+    "MonthlyPages": {
+      "type": "checkbox",
+      "cases": [
+        {
+          "name": "Task",
+          "pipeline_override_sha256": "8de499da8fa0bf60"
+        },
+        {
+          "name": "Treasure",
+          "pipeline_override_sha256": "5ac8fc38a5348cb9"
+        },
+        {
+          "name": "Paradise",
+          "pipeline_override_sha256": "454b21b3916de93d"
+        }
+      ],
+      "default_case": [
+        "Task",
+        "Treasure",
+        "Paradise"
+      ],
+      "min_count": 0,
+      "max_count": 3
+    },
+    "RedeemCodesOnline": {
+      "type": "switch",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "ff03da36d3e0de59"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "bbb67da1b847b4e7"
+        }
+      ],
+      "default_case": "Yes"
+    },
+    "RedeemCodesExtra": {
+      "type": "input",
+      "layout": "inline",
+      "inputs": [
+        {
+          "name": "Text",
+          "default": "",
+          "pipeline_type": "string",
+          "verify": "^.{0,120}$"
+        }
+      ],
+      "pipeline_override_sha256": "df908630c98198a7"
+    },
+    "CrownTargetStars": {
+      "type": "input",
+      "layout": "inline",
+      "inputs": [
+        {
+          "name": "stars",
+          "default": "12",
+          "pipeline_type": "int",
+          "verify": "^(?:[1-9]|1[0-9]|2[0-4])$"
+        }
+      ],
+      "pipeline_override_sha256": "cb33dc39f488fa5b"
+    },
+    "CrownRewards": {
+      "type": "switch",
+      "default_case": "No",
+      "cases": [
+        {
+          "name": "Yes",
+          "option": [
+            "CrownTargets"
+          ],
+          "pipeline_override_sha256": "196dfde4f26b1228"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "58612f9de08d0ac0"
+        }
+      ]
+    },
+    "CrownTargets": {
+      "type": "input",
+      "layout": "inline",
+      "inputs": [
+        {
+          "name": "value",
+          "default": "启示水晶,共鸣水晶"
+        }
+      ],
+      "pipeline_override_sha256": "c3048e0411e1eed7"
+    },
+    "AssistPickup": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "f2810281975a89de"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "cc971012059721a3"
+        }
+      ]
+    },
+    "AssistClear": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "24f32a7dc2263071"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "48bb83c73b9f7bf8"
+        }
+      ]
+    },
+    "AssistDialogue": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "851b73f2377fb754"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "07985fa7865d8d34"
+        }
+      ]
+    },
+    "AssistFishing": {
+      "type": "switch",
+      "default_case": "No",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "984d7bbe20e1d963"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "496258f71695980f"
+        }
+      ]
+    },
+    "AssistMapStar": {
+      "type": "switch",
+      "default_case": "No",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "100bad25b7296e36"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "07627af4e7f2bb0b"
+        }
+      ]
+    },
+    "AssistMapDewdrop": {
+      "type": "switch",
+      "default_case": "No",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "a86ddddc5d9b4395"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "6a25c82fa46fd8f7"
+        }
+      ]
+    },
+    "AssistMapChest": {
+      "type": "switch",
+      "default_case": "No",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "d9ab9fc404442db2"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "8ee80cf7f90cfa1f"
+        }
+      ]
+    },
+    "AssistMapBox": {
+      "type": "switch",
+      "default_case": "No",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "f382ea9ffafd9276"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "4fc18ae30a45330f"
+        }
+      ]
+    },
+    "FishingCastCount": {
+      "type": "input",
+      "inputs": [
+        {
+          "name": "cast_count",
+          "default": "3",
+          "verify": "^[1-9][0-9]*$",
+          "pipeline_type": "int",
+          "input_type": "text"
+        }
+      ],
+      "pipeline_override_sha256": "b16949ceffef76b0"
+    },
+    "FishingAbilityPlan": {
+      "type": "select",
+      "default_case": "Plan3",
+      "cases": [
+        {
+          "name": "Plan1",
+          "pipeline_override_sha256": "7ab364cf971e5375"
+        },
+        {
+          "name": "Plan2",
+          "pipeline_override_sha256": "ead25cdd3c75cddb"
+        },
+        {
+          "name": "Plan3",
+          "pipeline_override_sha256": "300af539f185564f"
+        }
+      ]
+    },
+    "FishingRhythms": {
+      "type": "switch",
+      "default_case": "No",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "147864edcc49aebe"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "71ed49ed9dcce487"
+        }
+      ]
+    },
+    "OpenWorldRoutes": {
+      "type": "input",
+      "inputs": [
+        {
+          "name": "files",
+          "default": "gb_all_florawish_miraland_01,gb_all_florawish_miraland_02,gb_all_florawish_miraland_03",
+          "input_type": "route_multi"
+        }
+      ],
+      "pipeline_override_sha256": "78afefcccbeffd1e"
+    },
+    "OpenWorldGingerbreadSummon": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "option": [
+            "OpenWorldGingerbreadAbilityPlan"
+          ],
+          "pipeline_override_sha256": "00e5b48b7ac91a14"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "4064b3af5d90e885"
+        }
+      ]
+    },
+    "OpenWorldGingerbreadAbilityPlan": {
+      "type": "select",
+      "default_case": "Plan3",
+      "cases": [
+        {
+          "name": "Plan1",
+          "pipeline_override_sha256": "6addbeb955c0acfa"
+        },
+        {
+          "name": "Plan2",
+          "pipeline_override_sha256": "fcd713d0d00c0de2"
+        },
+        {
+          "name": "Plan3",
+          "pipeline_override_sha256": "a57498fff379a835"
+        }
+      ]
+    },
+    "OpenWorldQuietWindow": {
+      "type": "select",
+      "default_case": "SmartAdaptive",
+      "cases": [
+        {
+          "name": "SmartAdaptive",
+          "pipeline_override_sha256": "1aebe20f8f2a9857"
+        },
+        {
+          "name": "Wait15s",
+          "pipeline_override_sha256": "948b8a5ca85182c1"
+        },
+        {
+          "name": "Wait20s",
+          "pipeline_override_sha256": "eaec539722335eea"
+        },
+        {
+          "name": "Strict",
+          "pipeline_override_sha256": "1657fea606821c50"
+        },
+        {
+          "name": "Conservative",
+          "pipeline_override_sha256": "8f771a9f44de2525"
+        },
+        {
+          "name": "Balanced",
+          "pipeline_override_sha256": "82fc6971e8e00f9e"
+        },
+        {
+          "name": "FixedRoute",
+          "pipeline_override_sha256": "454dd2616bc66820"
+        }
+      ]
+    },
+    "TaskRouteOverlay": {
+      "type": "select",
+      "default_case": "Default",
+      "cases": [
+        {
+          "name": "Default",
+          "pipeline_override_sha256": "44136fa355b3678a"
+        },
+        {
+          "name": "Full",
+          "pipeline_override_sha256": "b2747e8c3c8671cc"
+        },
+        {
+          "name": "MinimapOnly",
+          "pipeline_override_sha256": "7b6a6052aa15bc9f"
+        },
+        {
+          "name": "Off",
+          "pipeline_override_sha256": "ea8dddc20189aabe"
+        }
+      ]
+    },
+    "MinigameBlingTarget": {
+      "type": "select",
+      "default_case": "Full160k",
+      "cases": [
+        {
+          "name": "Full160k",
+          "pipeline_override_sha256": "84004a44a09cc654"
+        },
+        {
+          "name": "Half80k",
+          "pipeline_override_sha256": "fe9a7935419106d3"
+        },
+        {
+          "name": "Quarter40k",
+          "pipeline_override_sha256": "651674e05ae7f50b"
+        },
+        {
+          "name": "Quick20",
+          "pipeline_override_sha256": "6855bc42971d501a"
+        },
+        {
+          "name": "Trial3",
+          "pipeline_override_sha256": "91aa0c595f0763b2"
+        }
+      ]
+    },
+    "MinigameBlingCameraAssist": {
+      "type": "select",
+      "default_case": "Enabled",
+      "cases": [
+        {
+          "name": "Enabled",
+          "pipeline_override_sha256": "83c43158692ed9d9"
+        },
+        {
+          "name": "Disabled",
+          "pipeline_override_sha256": "be3f1e255720416e"
+        }
+      ]
+    },
+    "MinigameBlingStartMode": {
+      "type": "select",
+      "default_case": "AutoNavigate",
+      "cases": [
+        {
+          "name": "AutoNavigate",
+          "pipeline_override_sha256": "da1285a0bb417cfa"
+        },
+        {
+          "name": "AtNpc",
+          "pipeline_override_sha256": "6207d19f17e619fc"
+        }
+      ]
+    },
+    "MinigameBlingBackground": {
+      "type": "switch",
+      "default_case": "Yes",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "7deaa46c96bc1e74"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "6efac878c714a293"
+        }
+      ]
+    },
+    "CustomRouteFile": {
+      "type": "input",
+      "inputs": [
+        {
+          "name": "file",
+          "default": "",
+          "input_type": "route"
+        }
+      ],
+      "pipeline_override_sha256": "7c76d98e8fde033a"
+    },
+    "ForceCloseOnTimeout": {
+      "type": "switch",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "bb57515c01ae2ee3"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "24679ccac5ea0815"
+        }
+      ],
+      "default_case": "No"
+    },
+    "CloseLauncher": {
+      "type": "switch",
+      "cases": [
+        {
+          "name": "Yes",
+          "pipeline_override_sha256": "66a3158f5d0bbb8f"
+        },
+        {
+          "name": "No",
+          "pipeline_override_sha256": "280de756862ea758"
+        }
+      ],
+      "default_case": "No"
+    },
+    "RouteTestFile": {
+      "type": "input",
+      "inputs": [
+        {
+          "name": "file",
+          "default": "",
+          "input_type": "file"
+        }
+      ],
+      "pipeline_override_sha256": "2a8ac9ea4fb528d1"
+    },
+    "RouteTestMode": {
+      "type": "select",
+      "default_case": "movement",
+      "cases": [
+        {
+          "name": "movement",
+          "option": [
+            "RouteTestFile"
+          ],
+          "pipeline_override_sha256": "efb33456726b1ff6"
+        },
+        {
+          "name": "starsea_crystals",
+          "pipeline_override_sha256": "d44cc89917aa1d26"
+        },
+        {
+          "name": "map_compare",
+          "pipeline_override_sha256": "ec1b0d4feeb64919"
+        },
+        {
+          "name": "home",
+          "option": [
+            "RouteTestFile",
+            "HomeAbilityPlan"
+          ],
+          "pipeline_override_sha256": "9a027b078b09d078"
+        },
+        {
+          "name": "bottle",
+          "option": [
+            "RouteTestBottleRoute"
+          ],
+          "pipeline_override_sha256": "1d496cffd2d4e52f"
+        }
+      ]
+    },
+    "RouteTestBottleRoute": {
+      "type": "select",
+      "default_case": "original",
+      "cases": [
+        {
+          "name": "original",
+          "pipeline_override_sha256": "d8b549cc6176f463"
+        },
+        {
+          "name": "route2",
+          "pipeline_override_sha256": "2be0a86e246362af"
+        },
+        {
+          "name": "file",
+          "option": [
+            "RouteTestFile"
+          ]
+        }
+      ]
+    }
+  },
+  "preset": [
+    {
+      "name": "Daily",
+      "task": [
+        {
+          "name": "start_game"
+        },
+        {
+          "name": "dig"
+        },
+        {
+          "name": "zhaoxi"
+        },
+        {
+          "name": "realm_challenge"
+        },
+        {
+          "name": "starlight_crystals"
+        },
+        {
+          "name": "xinghai"
+        },
+        {
+          "name": "home"
+        },
+        {
+          "name": "monthly_pass"
+        },
+        {
+          "name": "mailbox"
+        },
+        {
+          "name": "redeem_codes"
+        },
+        {
+          "name": "weekly_free_gifts"
+        },
+        {
+          "name": "monthly_crystal_exchange"
+        },
+        {
+          "name": "crown",
+          "enabled": true
+        }
+      ]
+    }
+  ],
+  "import": [
+    "options/Runtime.json",
+    "options/GameKeys.json",
+    "tasks/StartGame.json",
+    "tasks/PersistentAbilities.json",
+    "tasks/Dig.json",
+    "tasks/Zhaoxi.json",
+    "tasks/Energy.json",
+    "tasks/StarlightCrystals.json",
+    "tasks/Xinghai.json",
+    "tasks/Home.json",
+    "tasks/MonthlyPass.json",
+    "tasks/Mailbox.json",
+    "tasks/RedeemCodes.json",
+    "tasks/WeeklyFreeGifts.json",
+    "tasks/MonthlyCrystalExchange.json",
+    "tasks/Crown.json",
+    "tasks/Exploration.json",
+    "tasks/Fishing.json",
+    "tasks/OpenWorldCollect.json",
+    "tasks/MinigameBling.json",
+    "tasks/CustomRoute.json",
+    "tasks/CloseGame.json",
+    "tasks/RouteTest.json",
+    "tasks/SubtaskTest.json",
+    "tasks/Presets.json"
+  ],
+  "binary_zip_name": "MaaNikki-v{version}-win-x86_64.zip"
+}
