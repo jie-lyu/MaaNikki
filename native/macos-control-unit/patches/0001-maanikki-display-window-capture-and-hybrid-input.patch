@@ -211,10 +211,10 @@ index 344f217..2744be9 100644
 +endif()
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.h b/source/MaaMacOSControlUnit/Input/HybridInput.h
 new file mode 100644
-index 0000000..a1d6b44
+index 0000000..e47fd92
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.h
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,147 @@
 +#pragma once
 +
 +#include <map>
@@ -330,7 +330,7 @@ index 0000000..a1d6b44
 +    // Puts the user's cursor back and reports the outcome ("restored", "warp failed", ...).
 +    std::string restore_cursor(CGPoint point);
 +
-+    bool scene_press_locked(int contact, CGEventType type, CGMouseButton button);
++    bool scene_press(std::unique_lock<std::mutex>& lock, int contact, CGEventType type, CGMouseButton button);
 +    bool touch_up_locked(int contact);
 +    bool key_up_locked(int key);
 +
@@ -355,15 +355,19 @@ index 0000000..a1d6b44
 +    // Frame point of the core's bare touch_move, which it sends right before scroll(): the point the
 +    // next scroll hovers. Consumed by that scroll.
 +    std::optional<std::pair<int, int>> scroll_target_;
++    // A scroll between its hover move and its wheel (the lock is released meanwhile); a release from
++    // another thread (a stop) cancels it.
++    bool scroll_pending_ = false;
++    bool scroll_cancelled_ = false;
 +};
 +
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
 new file mode 100644
-index 0000000..891d9d8
+index 0000000..7bf3515
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
-@@ -0,0 +1,610 @@
+@@ -0,0 +1,642 @@
 +#include "HybridInput.h"
 +
 +#include "InputUtils.h"
@@ -522,6 +526,7 @@ index 0000000..891d9d8
 +    // that press consumes it or inactive() ends the task.
 +    if (std::this_thread::get_id() != worker_) {
 +        cancels.insert(id);
++        scroll_cancelled_ = scroll_cancelled_ || scroll_pending_;
 +    }
 +}
 +
@@ -573,7 +578,7 @@ index 0000000..891d9d8
 +        return false;
 +    }
 +    if (pressure == kScenePressPressure) {
-+        return scene_press_locked(contact, info.event_type, info.mouse_button);
++        return scene_press(lock, contact, info.event_type, info.mouse_button);
 +    }
 +    auto phase = Clock::now();
 +    CheckTiming first;
@@ -662,48 +667,61 @@ index 0000000..891d9d8
 +    return true;
 +}
 +
-+bool HybridInput::scene_press_locked(int contact, CGEventType type, CGMouseButton button)
++bool HybridInput::scene_press(std::unique_lock<std::mutex>& lock, int contact, CGEventType type, CGMouseButton button)
 +{
 +    const auto started = Clock::now();
-+    auto frame = geometry_->latest();
-+    if (frame && frame->geometry_changed) {
-+        LogError << "window or display geometry changed since connect; reconnect before pressing" << VAR(contact);
++    // The checks ask the accessibility server and may block: run them unlocked, as a click's are, so
++    // that a stop's releases go out at once and cancel this press (seen under the lock below).
++    pending_contact_ = contact;
++    lock.unlock();
++    auto checked = [&]() -> std::optional<CGPoint> {
++        auto frame = geometry_->latest();
++        if (frame && frame->geometry_changed) {
++            LogError << "window or display geometry changed since connect; reconnect before pressing" << VAR(contact);
++            return std::nullopt;
++        }
++        auto pid = foreground_target("scene_press");
++        if (!pid) {
++            return std::nullopt;
++        }
++        // Where the cursor already is: in the scene the game hides it and turns the camera on any move.
++        auto cursor = platform_->cursor();
++        if (!cursor) {
++            LogError << "cursor position unknown, not sending" << VAR(contact);
++            return std::nullopt;
++        }
++        auto window = platform_->window(window_id_);
++        if (!window || window->pid != *pid || !CGRectContainsPoint(window->bounds, *cursor)) {
++            LogError << "cursor is not over the game window, not sending" << VAR(contact) << VAR(cursor->x) << VAR(cursor->y);
++            return std::nullopt;
++        }
++        int error = 0;
++        pid_t owner = platform_->process_at(*cursor, &error);
++        if (owner != *pid) {
++            LogError << "another process receives clicks at the cursor, not sending" << VAR(contact) << VAR(owner) << VAR(error);
++            return std::nullopt;
++        }
++        if (platform_->front_window_of_process_at(*pid, *cursor) != window_id_) {
++            LogError << "another window of the game covers the cursor, not sending" << VAR(contact);
++            return std::nullopt;
++        }
++        if (platform_->front_pid() != *pid) {
++            LogError << "target left the front during the checks, not sending" << VAR(contact);
++            return std::nullopt;
++        }
++        return cursor;
++    }();
++    lock.lock();
++    pending_contact_.reset();
++    if (cancelled_contacts_.erase(contact)) {
++        LogWarn << "scene press cancelled by a stop during its checks" << VAR(contact);
 +        return false;
 +    }
-+    auto pid = foreground_target("scene_press");
-+    if (!pid) {
++    if (!checked || !platform_->post_mouse(type, *checked, button)) {
 +        return false;
 +    }
-+    // Where the cursor already is: in the scene the game hides it and turns the camera on any move.
-+    auto cursor = platform_->cursor();
-+    if (!cursor) {
-+        LogError << "cursor position unknown, not sending" << VAR(contact);
-+        return false;
-+    }
-+    auto window = platform_->window(window_id_);
-+    if (!window || window->pid != *pid || !CGRectContainsPoint(window->bounds, *cursor)) {
-+        LogError << "cursor is not over the game window, not sending" << VAR(contact) << VAR(cursor->x) << VAR(cursor->y);
-+        return false;
-+    }
-+    int error = 0;
-+    pid_t owner = platform_->process_at(*cursor, &error);
-+    if (owner != *pid) {
-+        LogError << "another process receives clicks at the cursor, not sending" << VAR(contact) << VAR(owner) << VAR(error);
-+        return false;
-+    }
-+    if (platform_->front_window_of_process_at(*pid, *cursor) != window_id_) {
-+        LogError << "another window of the game covers the cursor, not sending" << VAR(contact);
-+        return false;
-+    }
-+    if (platform_->front_pid() != *pid) {
-+        LogError << "target left the front during the checks, not sending" << VAR(contact);
-+        return false;
-+    }
-+    if (!platform_->post_mouse(type, *cursor, button)) {
-+        return false;
-+    }
-+    held_contacts_[contact] = { *cursor, button, true };
-+    LogInfo << "scene press accepted" << VAR(contact) << VAR(cursor->x) << VAR(cursor->y) << "total_ms=" << ms_since(started);
++    held_contacts_[contact] = { *checked, button, true };
++    LogInfo << "scene press accepted" << VAR(contact) << VAR(checked->x) << VAR(checked->y) << "total_ms=" << ms_since(started);
 +    return true;
 +}
 +
@@ -717,6 +735,11 @@ index 0000000..891d9d8
 +    auto held = held_contacts_.find(contact);
 +    if (held == held_contacts_.end()) {
 +        scroll_target_ = std::make_pair(x, y);
++        return false;
++    }
++    if (held->second.scene) {
++        // A scene button never drags: moving the cursor in the scene turns the camera.
++        LogError << "touch_move of a scene press, not sending" << VAR(contact);
 +        return false;
 +    }
 +    MouseEventInfo info;
@@ -872,8 +895,9 @@ index 0000000..891d9d8
 +    if (lines_y == 0 && lines_x == 0) {
 +        return true;
 +    }
-+    if (!held_contacts_.empty()) {
-+        LogError << "scroll while a mouse button is held, not sending" << VAR(dx) << VAR(dy);
++    if (!held_contacts_.empty() || !held_keys_.empty()) {
++        // A held modifier would turn the wheel into something else (zoom, sideways).
++        LogError << "scroll while a key or mouse button is held, not sending" << VAR(dx) << VAR(dy);
 +        return false;
 +    }
 +    CheckTiming first;
@@ -892,19 +916,28 @@ index 0000000..891d9d8
 +        return false;
 +    };
 +    // The game scrolls the list under its hover position: move there and let the hover settle, as a
-+    // press does. Unlocked while settling and checking so that a stop's releases go out at once (the
-+    // core gives a scroll no cancellation of its own; nothing is held during one).
++    // press does. Unlocked while settling and checking so that a stop's releases go out at once; a
++    // release from another thread meanwhile cancels the scroll. The core may give a stop during a
++    // scroll no signal at all (nothing is held then, so it has nothing to release).
 +    if (!platform_->post_mouse(kCGEventMouseMoved, *point, kCGMouseButtonLeft)) {
 +        return finish("hover move not posted");
 +    }
++    scroll_pending_ = true;
++    scroll_cancelled_ = false;
 +    const double deadline = platform_->now_ms() + kHoverSettleMs;
-+    lock.unlock();
-+    for (double remaining = kHoverSettleMs; remaining > 0; remaining = deadline - platform_->now_ms()) {
++    for (double remaining = kHoverSettleMs; remaining > 0 && !scroll_cancelled_; remaining = deadline - platform_->now_ms()) {
++        lock.unlock();
 +        platform_->sleep_ms(std::max(1, std::min(kHoverSliceMs, static_cast<int>(std::ceil(remaining)))));
++        lock.lock();
 +    }
 +    CheckTiming second;
++    lock.unlock();
 +    auto settled = checked_point(target->first, target->second, "scroll", &second);
 +    lock.lock();
++    scroll_pending_ = false;
++    if (std::exchange(scroll_cancelled_, false)) {
++        return finish("cancelled by a stop during the hover");
++    }
 +    if (!settled) {
 +        return finish("second check refused");
 +    }
@@ -948,8 +981,11 @@ index 0000000..891d9d8
 +void HybridInput::cancel_pending_from_stop()
 +{
 +    // Releasing everything from another thread while a press hovers: that press must not follow.
-+    if (pending_contact_ && std::this_thread::get_id() != worker_) {
-+        cancelled_contacts_.insert(*pending_contact_);
++    if (std::this_thread::get_id() != worker_) {
++        if (pending_contact_) {
++            cancelled_contacts_.insert(*pending_contact_);
++        }
++        scroll_cancelled_ = scroll_cancelled_ || scroll_pending_;
 +    }
 +}
 +
@@ -1662,10 +1698,10 @@ index 0000000..c17723a
 +MAA_CTRL_UNIT_NS_END
 diff --git a/test/maanikki/HybridInputTest.mm b/test/maanikki/HybridInputTest.mm
 new file mode 100644
-index 0000000..d4e4ba6
+index 0000000..405311a
 --- /dev/null
 +++ b/test/maanikki/HybridInputTest.mm
-@@ -0,0 +1,585 @@
+@@ -0,0 +1,631 @@
 +// Deterministic tests for HybridInput over a fake InputPlatform: orderings a real desktop cannot
 +// reproduce on demand (a stop racing a press), and every refusal path. Nothing reaches the system.
 +// Built only with -DMAANIKKI_UNIT_TESTS=ON; never part of the shipped unit.
@@ -2219,6 +2255,49 @@ index 0000000..d4e4ba6
 +    CHECK((t.platform->take() == Events { "rdown@960,540", "rup@960,540" }));
 +}
 +
++void scene_press_never_drags_and_scroll_waits_for_keys()
++{
++    Fixture t;
++    t.platform->cursor_at = CGPointMake(960, 540);
++    CHECK(t.input->touch_down(0, 0, 0, HybridInput::kScenePressPressure));
++    t.platform->take();
++    CHECK(!t.input->touch_move(0, 100, 200, 0)); // the core's move before a scroll: no drag of a scene press
++    CHECK(!t.input->scroll(0, 120));
++    CHECK(t.platform->take().empty());
++    CHECK(t.input->touch_up(0));
++    t.platform->take();
++    CHECK(t.input->key_down(59)); // Control held: the wheel would zoom
++    t.platform->take();
++    CHECK(!t.input->touch_move(0, 100, 200, 0));
++    CHECK(!t.input->scroll(0, 120));
++    CHECK(t.platform->take().empty());
++}
++
++void stop_during_the_scroll_hover_cancels_the_wheel()
++{
++    Fixture t;
++    bool stopped = false;
++    t.platform->on_sleep = [&] {
++        if (!std::exchange(stopped, true)) {
++            std::thread([&] { t.input->inactive(); }).join();
++        }
++    };
++    CHECK(!t.input->touch_move(0, 100, 200, 0));
++    CHECK(!t.input->scroll(0, 120));
++    CHECK((t.platform->take() == Events { "move@50,100", "warp@7,7" }));
++}
++
++void stop_during_the_scene_press_checks_cancels_it()
++{
++    Fixture t;
++    t.platform->cursor_at = CGPointMake(960, 540);
++    t.platform->on_hit_test = [&] { std::thread([&] { t.input->touch_up(1); }).join(); };
++    CHECK(!t.input->touch_down(1, 0, 0, HybridInput::kScenePressPressure));
++    CHECK(t.platform->take().empty());
++    t.platform->on_hit_test = nullptr;
++    CHECK(t.input->touch_down(1, 0, 0, HybridInput::kScenePressPressure)); // consumed; the next press works
++}
++
 +} // namespace
 +
 +int main()
@@ -2248,6 +2327,9 @@ index 0000000..d4e4ba6
 +    scroll_is_refused_like_a_press();
 +    scene_press_presses_where_the_cursor_is();
 +    scene_press_is_cancelled_and_released_like_a_click();
++    scene_press_never_drags_and_scroll_waits_for_keys();
++    stop_during_the_scroll_hover_cancels_the_wheel();
++    stop_during_the_scene_press_checks_cancels_it();
 +    std::printf(failures ? "HybridInputTest: %d failure(s)\n" : "HybridInputTest: all passed\n", failures);
 +    return failures ? 1 : 0;
 +}
