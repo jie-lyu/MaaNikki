@@ -211,15 +211,16 @@ index 344f217..2744be9 100644
 +endif()
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.h b/source/MaaMacOSControlUnit/Input/HybridInput.h
 new file mode 100644
-index 0000000..0724eb8
+index 0000000..e1c05e0
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.h
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,112 @@
 +#pragma once
 +
 +#include <map>
 +#include <memory>
 +#include <mutex>
++#include <optional>
 +#include <set>
 +#include <thread>
 +
@@ -256,7 +257,11 @@ index 0000000..0724eb8
 +// state is guarded by one mutex. A release that arrives from another thread cancels the next press
 +// of that key or contact whenever it arrives, even if an older press was still held (it may belong to
 +// a press the core already registered); inactive(), which the core queues behind any in-flight
-+// action once a task ends, clears cancellations that no press consumed.
++// action once a task ends, clears cancellations that no press consumed. The hover before a press is
++// the one wait made without the lock: releases from the stopping thread go out at once, and one for
++// that contact (or release_all/inactive from another thread) cancels the press. Any exit between the
++// hover move and an accepted press puts the cursor back; a cursor position that cannot be read
++// refuses the press before anything moves.
 +class HybridInput : public InputBase
 +{
 +public:
@@ -304,6 +309,7 @@ index 0000000..0724eb8
 +    // A release from the stopping thread: cancel the next press of that id until inactive().
 +    void note_stop_release(std::set<int>& cancels, int id);
 +    bool release_all_locked();
++    void cancel_pending_from_stop();
 +
 +    uint32_t window_id_ = 0;
 +    std::shared_ptr<CaptureGeometry> geometry_;
@@ -316,15 +322,17 @@ index 0000000..0724eb8
 +    std::set<int> cancelled_contacts_;
 +    std::set<int> cancelled_keys_;
 +    CGPoint saved_cursor_ = { NAN, NAN };
++    // The contact whose press is hovering (the lock is released while the hover settles).
++    std::optional<int> pending_contact_;
 +};
 +
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
 new file mode 100644
-index 0000000..3eb5f63
+index 0000000..48ff288
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
-@@ -0,0 +1,373 @@
+@@ -0,0 +1,415 @@
 +#include "HybridInput.h"
 +
 +#include "InputUtils.h"
@@ -341,6 +349,8 @@ index 0000000..3eb5f63
 +
 +// Hover before a press; the Windows path waits 0.3 s between TouchMove and Click.
 +constexpr int kHoverSettleMs = 300;
++// The settle is waited in slices so that a stop ends it early.
++constexpr int kHoverSliceMs = 10;
 +
 +bool valid_key(int key)
 +{
@@ -465,7 +475,7 @@ index 0000000..3eb5f63
 +bool HybridInput::touch_down(int contact, int x, int y, int pressure)
 +{
 +    std::ignore = pressure;
-+    std::lock_guard lock(mutex_);
++    std::unique_lock lock(mutex_);
 +    worker_ = std::this_thread::get_id();
 +
 +    MouseEventInfo info;
@@ -486,26 +496,55 @@ index 0000000..3eb5f63
 +        return false;
 +    }
 +
-+    if (held_contacts_.empty()) {
-+        saved_cursor_ = platform_->cursor().value_or(CGPoint { NAN, NAN });
++    // The first press moves the user's cursor; it must be put back however the press ends, so a
++    // position that cannot be read means no press at all.
++    const bool restore = held_contacts_.empty();
++    CGPoint original = { NAN, NAN };
++    if (restore) {
++        auto cursor = platform_->cursor();
++        if (!cursor) {
++            LogError << "cursor position unknown, cannot restore it afterwards; not sending" << VAR(contact);
++            return false;
++        }
++        original = *cursor;
 +    }
-+    // The game acts on the control under its hover position, not on the location carried by the
-+    // press: move there and let the hover settle first, as the Windows path does (TouchMove, 0.3 s).
-+    if (!platform_->post_mouse(kCGEventMouseMoved, *point, info.mouse_button)) {
-+        return false;
-+    }
-+    platform_->sleep_ms(kHoverSettleMs);
-+    // Everything may have changed while settling: check again before pressing.
-+    auto settled = checked_point(x, y, "touch_down");
-+    if (!settled) {
-+        if (held_contacts_.empty() && !std::isnan(saved_cursor_.x)) {
-+            platform_->warp_cursor(saved_cursor_);
-+            saved_cursor_ = { NAN, NAN };
++    // Every exit after the hover move and before an accepted press.
++    auto abandon = [&] {
++        if (restore && held_contacts_.empty()) {
++            platform_->warp_cursor(original);
 +        }
 +        return false;
++    };
++
++    // The game acts on the control under its hover position, not on the location carried by the
++    // press: move there and let the hover settle first, as the Windows path does (TouchMove, 0.3 s).
++    pending_contact_ = contact;
++    if (!platform_->post_mouse(kCGEventMouseMoved, *point, info.mouse_button)) {
++        pending_contact_.reset();
++        return abandon();
++    }
++    // Settle without the lock, so that a stop's releases (a held key, this very press) are sent at
++    // once instead of waiting behind the press; any of them cancels this press.
++    for (int waited = 0; waited < kHoverSettleMs && !cancelled_contacts_.contains(contact); waited += kHoverSliceMs) {
++        lock.unlock();
++        platform_->sleep_ms(kHoverSliceMs);
++        lock.lock();
++    }
++    pending_contact_.reset();
++    if (cancelled_contacts_.erase(contact)) {
++        LogWarn << "press cancelled by a stop during the hover" << VAR(contact);
++        return abandon();
++    }
++    // Everything may have changed while settling: check again, under the lock, right before pressing.
++    auto settled = checked_point(x, y, "touch_down");
++    if (!settled) {
++        return abandon();
 +    }
 +    if (!platform_->post_mouse(info.event_type, *settled, info.mouse_button)) {
-+        return false;
++        return abandon();
++    }
++    if (restore) {
++        saved_cursor_ = original;
 +    }
 +    held_contacts_[contact] = { *settled, info.mouse_button };
 +    return true;
@@ -665,7 +704,9 @@ index 0000000..3eb5f63
 +bool HybridInput::release_all()
 +{
 +    std::lock_guard lock(mutex_);
-+    return release_all_locked();
++    bool released = release_all_locked();
++    cancel_pending_from_stop();
++    return released;
 +}
 +
 +bool HybridInput::inactive()
@@ -674,7 +715,16 @@ index 0000000..3eb5f63
 +    bool released = release_all_locked();
 +    cancelled_contacts_.clear();
 +    cancelled_keys_.clear();
++    cancel_pending_from_stop();
 +    return released;
++}
++
++void HybridInput::cancel_pending_from_stop()
++{
++    // Releasing everything from another thread while a press hovers: that press must not follow.
++    if (pending_contact_ && std::this_thread::get_id() != worker_) {
++        cancelled_contacts_.insert(*pending_contact_);
++    }
 +}
 +
 +bool HybridInput::release_all_locked()
@@ -1361,10 +1411,10 @@ index 0000000..c17723a
 +MAA_CTRL_UNIT_NS_END
 diff --git a/test/maanikki/HybridInputTest.mm b/test/maanikki/HybridInputTest.mm
 new file mode 100644
-index 0000000..78b10ac
+index 0000000..f7676ce
 --- /dev/null
 +++ b/test/maanikki/HybridInputTest.mm
-@@ -0,0 +1,412 @@
+@@ -0,0 +1,472 @@
 +// Deterministic tests for HybridInput over a fake InputPlatform: orderings a real desktop cannot
 +// reproduce on demand (a stop racing a press), and every refusal path. Nothing reaches the system.
 +// Built only with -DMAANIKKI_UNIT_TESTS=ON; never part of the shipped unit.
@@ -1408,6 +1458,8 @@ index 0000000..78b10ac
 +    std::function<void()> on_hit_test;
 +    std::vector<std::string> events;
 +    bool reject_ups = false; // post_mouse/post_key fail for releases
++    bool reject_downs = false; // post_mouse fails for mouse-downs
++    bool cursor_known = true;
 +
 +    // When set, the next mouse-down blocks inside post_mouse until `release_down` is fulfilled.
 +    bool block_down = false;
@@ -1452,6 +1504,9 @@ index 0000000..78b10ac
 +        if (type == kCGEventLeftMouseUp && reject_ups) {
 +            return false;
 +        }
++        if (is_down && reject_downs) {
++            return false;
++        }
 +        if (is_down && block_down) {
 +            block_down = false;
 +            down_entered.set_value();
@@ -1483,7 +1538,7 @@ index 0000000..78b10ac
 +        return true;
 +    }
 +
-+    std::optional<CGPoint> cursor() override { return CGPointMake(7, 7); }
++    std::optional<CGPoint> cursor() override { return cursor_known ? std::optional(CGPointMake(7, 7)) : std::nullopt; }
 +
 +    void warp_cursor(CGPoint point) override { record("warp@" + std::to_string(int(point.x)) + "," + std::to_string(int(point.y))); }
 +
@@ -1754,6 +1809,57 @@ index 0000000..78b10ac
 +    CHECK((t.platform->take() == Events { "move@50,100", "warp@7,7" }));
 +}
 +
++void stop_during_hover_releases_at_once_and_cancels_the_press()
++{
++    Fixture t;
++    CHECK(t.input->key_down(13));
++    bool stopped = false;
++    // The core's stopping thread releases W and the pending contact while the hover settles; it
++    // must not wait behind the press (joined here, inside the wait, it would deadlock otherwise).
++    t.platform->on_sleep = [&] {
++        if (!std::exchange(stopped, true)) {
++            std::thread([&] { t.input->key_up(13); t.input->touch_up(0); }).join();
++        }
++    };
++    CHECK(!t.input->touch_down(0, 100, 200, 0));
++    CHECK(t.platform->slept < 300); // the settle ends early
++    CHECK((t.platform->take() == Events { "key_down 13 pid=100", "move@50,100", "key_up 13 pid=100", "warp@7,7" }));
++    // The cancellation was consumed by that press.
++    t.platform->on_sleep = nullptr;
++    CHECK(t.input->touch_down(0, 100, 200, 0));
++}
++
++void release_all_from_the_stopping_thread_cancels_a_hovering_press()
++{
++    Fixture t;
++    bool stopped = false;
++    t.platform->on_sleep = [&] {
++        if (!std::exchange(stopped, true)) {
++            std::thread([&] { t.input->release_all(); }).join();
++        }
++    };
++    CHECK(!t.input->touch_down(0, 100, 200, 0));
++    CHECK((t.platform->take() == Events { "move@50,100", "warp@7,7" }));
++}
++
++void failed_press_after_the_hover_puts_the_cursor_back()
++{
++    Fixture t;
++    t.platform->reject_downs = true;
++    CHECK(!t.input->touch_down(0, 100, 200, 0));
++    CHECK(t.input->touch_up(0));
++    CHECK(t.input->inactive());
++    CHECK((t.platform->take() == Events { "move@50,100", "warp@7,7" }));
++}
++
++void unknown_cursor_position_refuses_before_moving()
++{
++    Fixture t;
++    t.platform->cursor_known = false;
++    CHECK(!t.input->touch_down(0, 100, 200, 0));
++    CHECK(t.platform->take().empty());
++}
++
 +} // namespace
 +
 +int main()
@@ -1774,6 +1880,10 @@ index 0000000..78b10ac
 +    stop_release_of_an_old_hold_still_cancels_the_pending_press();
 +    repeat_for_another_process_is_refused_and_the_owner_kept();
 +    press_hovers_then_rechecks_before_pressing();
++    stop_during_hover_releases_at_once_and_cancels_the_press();
++    release_all_from_the_stopping_thread_cancels_a_hovering_press();
++    failed_press_after_the_hover_puts_the_cursor_back();
++    unknown_cursor_position_refuses_before_moving();
 +    std::printf(failures ? "HybridInputTest: %d failure(s)\n" : "HybridInputTest: all passed\n", failures);
 +    return failures ? 1 : 0;
 +}
