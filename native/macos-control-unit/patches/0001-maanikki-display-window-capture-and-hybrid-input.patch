@@ -211,7 +211,7 @@ index 344f217..2744be9 100644
 +endif()
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.h b/source/MaaMacOSControlUnit/Input/HybridInput.h
 new file mode 100644
-index 0000000..465aaf7
+index 0000000..203fafc
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.h
 @@ -0,0 +1,153 @@
@@ -332,8 +332,8 @@ index 0000000..465aaf7
 +    std::string restore_cursor(CGPoint point);
 +
 +    bool scene_press(std::unique_lock<std::mutex>& lock, int contact, CGEventType type, CGMouseButton button);
-+    // A release from the task's own thread waits until the press has lasted kMinHoldMs: the game reads
-+    // input once per frame and missed a 12 ms key press on the device. Releases from the stopping
++    // A release from the task's own thread waits until the press has lasted kMinHoldMs (40 ms): the game
++    // reads input once per frame and missed a 12 ms key press on the device. Releases from the stopping
 +    // thread never wait.
 +    void hold_at_least(std::unique_lock<std::mutex>& lock, double pressed_at_ms);
 +    bool touch_up_locked(int contact);
@@ -370,10 +370,10 @@ index 0000000..465aaf7
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
 new file mode 100644
-index 0000000..5a6a485
+index 0000000..99d2f0c
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
-@@ -0,0 +1,673 @@
+@@ -0,0 +1,674 @@
 +#include "HybridInput.h"
 +
 +#include "InputUtils.h"
@@ -412,8 +412,9 @@ index 0000000..5a6a485
 +    return lines != 0 ? lines : (amount > 0 ? 1 : -1);
 +}
 +
-+// Shortest key or scene-button press: longer than a game frame even when the frame rate drops.
-+constexpr int kMinHoldMs = 80;
++// Shortest key or scene-button press: longer than a frame at 30 fps (33 ms); the game missed a 12 ms
++// press on the device. Kept low because the navigation engine's micro-turns pulse for 28 ms and up.
++constexpr int kMinHoldMs = 40;
 +
 +// Time for the window server to route a posted wheel to the window under the cursor before the
 +// cursor is moved back.
@@ -1735,7 +1736,7 @@ index 0000000..c17723a
 +MAA_CTRL_UNIT_NS_END
 diff --git a/test/maanikki/HybridInputTest.mm b/test/maanikki/HybridInputTest.mm
 new file mode 100644
-index 0000000..59b1b4d
+index 0000000..811968b
 --- /dev/null
 +++ b/test/maanikki/HybridInputTest.mm
 @@ -0,0 +1,660 @@
@@ -2344,7 +2345,7 @@ index 0000000..59b1b4d
 +    CHECK(t.input->key_down(13));
 +    const int before = t.platform->slept;
 +    CHECK(t.input->key_up(13)); // the core's ClickKey releases 50 ms later; here immediately
-+    CHECK(t.platform->slept - before >= 80);
++    CHECK(t.platform->slept - before >= 40);
 +    CHECK(t.input->key_down(13));
 +    t.platform->slept += 200; // held long enough already
 +    const int held = t.platform->slept;
@@ -2354,7 +2355,7 @@ index 0000000..59b1b4d
 +    CHECK(t.input->touch_down(1, 0, 0, HybridInput::kScenePressPressure));
 +    const int scene = t.platform->slept;
 +    CHECK(t.input->touch_up(1));
-+    CHECK(t.platform->slept - scene >= 80);
++    CHECK(t.platform->slept - scene >= 40);
 +    CHECK(t.input->key_down(13));
 +    const int stop = t.platform->slept;
 +    std::thread([&] { t.input->key_up(13); }).join(); // a stop releases at once

@@ -8,6 +8,7 @@ shows whether a self-built unit works with the stock core.
     python probe.py windows
     python probe.py lifecycle --runtime DIR (--window ID | --game) --log-dir DIR --expect-unit SHA256|stock
     python probe.py capture --runtime DIR --game --out DIR
+    python probe.py camera-check --profile maanikki --runtime DIR --game --out DIR [--option]
 
 `lifecycle` connects, captures, destroys the controller, then connects and
 captures again, for each round. It passes only when every round connects and
@@ -486,10 +487,106 @@ def cmd_input_check(args) -> int:
     return 0
 
 
+KEY_OPTION = 58
+
+
+def _cursor() -> tuple[float, float]:
+    import ctypes
+
+    class CGPoint(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+    cg = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+    cg.CGEventCreate.restype = ctypes.c_void_p
+    cg.CGEventCreate.argtypes = [ctypes.c_void_p]
+    cg.CGEventGetLocation.restype = CGPoint
+    cg.CGEventGetLocation.argtypes = [ctypes.c_void_p]
+    cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    cf.CFRelease.argtypes = [ctypes.c_void_p]
+    event = cg.CGEventCreate(None)
+    point = cg.CGEventGetLocation(event)
+    cf.CFRelease(event)
+    return round(point.x, 1), round(point.y, 1)
+
+
+def cmd_camera_check(args) -> int:
+    """Turn the camera by a relative move of +PIXELS then -PIXELS, judged from captures.
+
+    Sends only relative mouse moves (posted to the game process; the real cursor must not move) and,
+    with --option, two presses of Option (the Alt binding that toggles the game's cursor mode) to
+    see what the navigation engine's first move does on macOS. Spends nothing in the game.
+    """
+    import cv2
+    from maa.tasker import Tasker
+    from maa.toolkit import Toolkit
+
+    if _profile != "maanikki":
+        sys.exit("camera-check exercises the patched unit; pass --profile maanikki")
+    out = Path(args.out).resolve()
+    if out.exists() and any(out.iterdir()):
+        sys.exit(f"{out} is not empty")
+    out.mkdir(parents=True, exist_ok=True)
+    Tasker.set_log_dir(out)
+    window_id = _pick_window(args, Toolkit)
+    game_pid = _bundle_pid(GAME_BUNDLE_ID)
+    for _ in range(args.wait):
+        if _front_pid() == game_pid:
+            break
+        time.sleep(1)
+    else:
+        sys.exit("the game never became the front application; nothing sent")
+    controller, ok, _ = _connect(window_id, raw=False)
+    if not ok:
+        sys.exit("connection failed; nothing sent")
+    steps = []
+
+    def frame(name):
+        image, _ = _grab(controller)
+        if image is None or image.shape[:2] != (720, 1280):
+            fail(f"no 1280x720 frame at {name}")
+        cv2.imwrite(str(out / f"{len(steps):02d}-{name}.png"), image)
+        return image
+
+    def fail(reason):
+        steps.append({"failed": reason})
+        print(json.dumps(steps, ensure_ascii=False, indent=2))
+        sys.exit(1)
+
+    # The scene above the HUD: what a camera turn changes and the character's idle animation barely does.
+    band = (slice(120, 520), slice(200, 1080))
+    start = frame("start")
+    if _map_back_score(start) >= MAP_CLOSED_SCORE:
+        fail("the big map is open; start in the open world")
+    cursor_before = _cursor()
+    sent = controller.post_relative_move(args.pixels, 0).wait().succeeded
+    time.sleep(0.8)
+    turned = frame("after-turn")
+    steps.append({"step": f"relative move +{args.pixels}", "sent": sent, "scene_changed_pct": _changed(start[band], turned[band])})
+    if not sent:
+        fail("the unit refused the relative move (game not in front?)")
+    sent = controller.post_relative_move(-args.pixels, 0).wait().succeeded
+    time.sleep(0.8)
+    back = frame("after-turn-back")
+    steps.append({"step": f"relative move -{args.pixels}", "sent": sent, "scene_changed_pct": _changed(turned[band], back[band]),
+                  "vs_start_pct": _changed(start[band], back[band])})
+    steps.append({"step": "real cursor", "before": cursor_before, "after": _cursor()})
+    if args.option:
+        for press in ("option-1", "option-2"):
+            before = frame(f"before-{press}")
+            sent = controller.post_click_key(KEY_OPTION).wait().succeeded
+            time.sleep(0.8)
+            after = frame(f"after-{press}")
+            steps.append({"step": press, "sent": sent, "changed_pct": _changed(before, after), "cursor": _cursor()})
+    print(json.dumps(steps, ensure_ascii=False, indent=2))
+    print(f"frames and maafw.log in {out}; the turn passes when +{args.pixels} changes the scene clearly, "
+          f"-{args.pixels} brings it back near the start, and the real cursor did not move")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("windows", "lifecycle", "capture", "input-check", "refusal-check", "hit-test"):
+    for name in ("windows", "lifecycle", "capture", "input-check", "refusal-check", "hit-test", "camera-check"):
         command = sub.add_parser(name)
         command.add_argument("--runtime", help="directory with libMaaFramework.dylib and the control units")
         command.add_argument("--profile", choices=sorted(PROFILES), default="stock",
@@ -508,8 +605,13 @@ def main() -> int:
                                  help="SHA-256 the loaded control unit must have (build.json), or 'stock' for the official one")
         else:
             command.add_argument("--out", required=True)
-        if name == "input-check":
+        if name in ("input-check", "camera-check"):
             command.add_argument("--wait", type=int, default=60, help="seconds to wait for the game to be in front")
+        if name == "camera-check":
+            command.add_argument("--pixels", type=int, default=400, help="relative move each way (the plan measured 400)")
+            command.add_argument("--option", action="store_true",
+                                 help="also press Option twice (the game's cursor-mode toggle), judged from captures")
+        if name == "input-check":
             command.add_argument("--release", action="store_true",
                                  help="also hold W across a controller destroy (the character walks briefly)")
     args = parser.parse_args()
@@ -517,7 +619,8 @@ def main() -> int:
     global _profile
     _profile = args.profile
     commands = {"windows": cmd_windows, "lifecycle": cmd_lifecycle, "capture": cmd_capture,
-                "input-check": cmd_input_check, "refusal-check": cmd_refusal_check, "hit-test": cmd_hit_test}
+                "input-check": cmd_input_check, "refusal-check": cmd_refusal_check, "hit-test": cmd_hit_test,
+                "camera-check": cmd_camera_check}
     return commands[args.command](args)
 
 
