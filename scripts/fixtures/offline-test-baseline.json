@@ -384,6 +384,7 @@
     "ForegroundInputDelegationTests.test_session_brings_the_game_back_through_the_target",
     "ForegroundInputDelegationTests.test_window_handle_and_focus_come_from_the_target",
     "LaunchTests.test_ensure_unminimized_restores_without_activating_first",
+    "LaunchTests.test_launcher_background_click_maps_capture_to_client_and_posts_messages",
     "LaunchTests.test_start_game_window_helpers_live_in_the_backend",
     "LaunchTests.test_startup_probes_without_a_window_binding",
     "SelectionTests.test_backend_follows_platform_and_controller_type",

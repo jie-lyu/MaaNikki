@@ -199,12 +199,69 @@ class LauncherWindows:
             raise OSError("无法查找官方启动器窗口。")
         return max(found)[1] if found else None
 
+    def exists(self, hwnd):
+        return self.user32.IsWindow(hwnd)
+
+    def minimized(self, hwnd):
+        return self.user32.IsIconic(hwnd)
+
     def foreground(self, hwnd):
         return self.user32.GetForegroundWindow() == hwnd and not self.user32.IsIconic(hwnd)
 
     def focus(self, hwnd):
         if not focus_window(hwnd):
             raise RuntimeError("未能自动将官方启动器切到前台，请检查窗口状态和权限后重试。")
+
+    def background_click(self, hwnd, capture_shape, box) -> bool:
+        """Click the centre of box (capture pixels) with window messages and a briefly borrowed cursor (moved from start_game)."""
+        if not self.user32.IsWindow(hwnd) or self.user32.IsIconic(hwnd):
+            return False
+        cap_h, cap_w = capture_shape[:2]
+        if cap_w <= 0 or cap_h <= 0:
+            return False
+        u32 = self.user32
+        u32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+        u32.ClientToScreen.restype = wintypes.BOOL
+        u32.SendMessageTimeoutW.argtypes = [
+            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+            wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t),
+        ]
+        u32.SendMessageTimeoutW.restype = ctypes.c_ssize_t
+        rect = wintypes.RECT()
+        if not u32.GetClientRect(hwnd, ctypes.byref(rect)):
+            return False
+        cw, ch = rect.right - rect.left, rect.bottom - rect.top
+        if cw <= 0 or ch <= 0:
+            return False
+        cx = max(0, min(cw - 1, round((box[0] + box[2] / 2) * cw / cap_w)))
+        cy = max(0, min(ch - 1, round((box[1] + box[3] / 2) * ch / cap_h)))
+        pt = wintypes.POINT(cx, cy)
+        if not u32.ClientToScreen(hwnd, ctypes.byref(pt)):
+            return False
+        lparam = ((cy & 0xFFFF) << 16) | (cx & 0xFFFF)
+        res_out = ctypes.c_size_t(0)
+        u32.SendMessageTimeoutW(hwnd, 0x0006, 1, 0, 0x0002, 500, ctypes.byref(res_out))
+
+        from host.win32.mouse_guard import guarded_borrowed_cursor
+
+        sx, sy = int(pt.x), int(pt.y)
+        with guarded_borrowed_cursor(
+            sx,
+            sy,
+            enabled=True,
+            ready=lambda: bool(u32.IsWindow(hwnd) and not u32.IsIconic(hwnd)),
+            lease_ms=450,
+            clip_rect=(sx, sy, sx + 1, sy + 1),
+        ) as lease:
+            if not lease:
+                return False
+            time.sleep(0.01)
+            u32.SendMessageTimeoutW(hwnd, 0x0200, 0, lparam, 0x0002, 500, ctypes.byref(res_out))
+            time.sleep(0.02)
+            ok = u32.SendMessageTimeoutW(hwnd, 0x0201, 0x0001, lparam, 0x0002, 500, ctypes.byref(res_out)) != 0
+            time.sleep(0.05)
+            u32.SendMessageTimeoutW(hwnd, 0x0202, 0, lparam, 0x0002, 500, ctypes.byref(res_out))
+            return ok
 
 
 _WM_NULL = 0x0000
@@ -314,3 +371,19 @@ def _is_window_unresponsive(u32, hwnd) -> bool:
     if ok != 0:
         return False
     return ctypes.get_last_error() == _ERROR_TIMEOUT and bool(u32.IsWindow(hwnd))
+
+
+def initialize_winrt():
+    """RoInitialize(RO_INIT_MULTITHREADED) before a FramePool capture; best effort (moved from start_game)."""
+    try:
+        ctypes.WinDLL("combase").RoInitialize(1)
+    except Exception:
+        pass
+
+
+def window_exists_check():
+    """IsWindow bound once, for polling a window that may disappear (moved from start_game)."""
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.IsWindow.restype = wintypes.BOOL
+    return user32.IsWindow

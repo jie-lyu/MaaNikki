@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import configparser
 from contextlib import contextmanager
-import ctypes
-from ctypes import wintypes
 from datetime import datetime
 import json
 import math
@@ -25,7 +23,8 @@ from runtime_threads import configure_utf8_streams, configure_worker_threads
 configure_worker_threads(2)
 from file_io import write_json
 from client_config import mxu_config
-from host.win32.launch import LauncherWindows, ensure_unminimized, focus_window, game_window
+from host.win32.launch import (LauncherWindows, ensure_unminimized, focus_window, game_window, initialize_winrt,
+                               window_exists_check)
 
 configure_utf8_streams()
 
@@ -315,7 +314,7 @@ class LauncherRuntime:
         if require_foreground and not self.windows.foreground(self.hwnd):
             return None
         if not require_foreground and (
-            not self.windows.user32.IsWindow(self.hwnd) or self.windows.user32.IsIconic(self.hwnd)
+            not self.windows.exists(self.hwnd) or self.windows.minimized(self.hwnd)
         ):
             return None
         captured = self.controller.post_screencap().wait()
@@ -348,54 +347,9 @@ class LauncherRuntime:
         return state, recognition.box
 
     def _background_click(self, box) -> bool:
-        if self.image is None or not self.windows.user32.IsWindow(self.hwnd) or self.windows.user32.IsIconic(self.hwnd):
+        if self.image is None:
             return False
-        cap_h, cap_w = self.image.shape[:2]
-        if cap_w <= 0 or cap_h <= 0:
-            return False
-        u32 = self.windows.user32
-        u32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
-        u32.ClientToScreen.restype = wintypes.BOOL
-        u32.SendMessageTimeoutW.argtypes = [
-            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
-            wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t),
-        ]
-        u32.SendMessageTimeoutW.restype = ctypes.c_ssize_t
-        rect = wintypes.RECT()
-        if not u32.GetClientRect(self.hwnd, ctypes.byref(rect)):
-            return False
-        cw, ch = rect.right - rect.left, rect.bottom - rect.top
-        if cw <= 0 or ch <= 0:
-            return False
-        cx = max(0, min(cw - 1, round((box[0] + box[2] / 2) * cw / cap_w)))
-        cy = max(0, min(ch - 1, round((box[1] + box[3] / 2) * ch / cap_h)))
-        pt = wintypes.POINT(cx, cy)
-        if not u32.ClientToScreen(self.hwnd, ctypes.byref(pt)):
-            return False
-        lparam = ((cy & 0xFFFF) << 16) | (cx & 0xFFFF)
-        res_out = ctypes.c_size_t(0)
-        u32.SendMessageTimeoutW(self.hwnd, 0x0006, 1, 0, 0x0002, 500, ctypes.byref(res_out))
-
-        from host.win32.mouse_guard import guarded_borrowed_cursor
-
-        sx, sy = int(pt.x), int(pt.y)
-        with guarded_borrowed_cursor(
-            sx,
-            sy,
-            enabled=True,
-            ready=lambda: bool(u32.IsWindow(self.hwnd) and not u32.IsIconic(self.hwnd)),
-            lease_ms=450,
-            clip_rect=(sx, sy, sx + 1, sy + 1),
-        ) as lease:
-            if not lease:
-                return False
-            time.sleep(0.01)
-            u32.SendMessageTimeoutW(self.hwnd, 0x0200, 0, lparam, 0x0002, 500, ctypes.byref(res_out))
-            time.sleep(0.02)
-            ok = u32.SendMessageTimeoutW(self.hwnd, 0x0201, 0x0001, lparam, 0x0002, 500, ctypes.byref(res_out)) != 0
-            time.sleep(0.05)
-            u32.SendMessageTimeoutW(self.hwnd, 0x0202, 0, lparam, 0x0002, 500, ctypes.byref(res_out))
-            return ok
+        return self.windows.background_click(self.hwnd, self.image.shape, box)
 
     def action(self, state, box, *, background=False):
         from maa.pipeline import JClick
@@ -490,13 +444,13 @@ def launch_game(program, timeout, record, *, background=False):
                 return
             hwnd = windows.find()
             if runtime is not None and (
-                not hwnd or hwnd != runtime.hwnd or not windows.user32.IsWindow(runtime.hwnd)
+                not hwnd or hwnd != runtime.hwnd or not windows.exists(runtime.hwnd)
             ):
                 # Old launcher window closed or switched (e.g. self-update restart);
                 # drop the session immediately so even a recycled HWND reattaches cleanly.
                 drop_runtime()
             if restarting_from_hwnd is not None and (
-                not hwnd or not windows.user32.IsWindow(restarting_from_hwnd)
+                not hwnd or not windows.exists(restarting_from_hwnd)
             ):
                 restart_window_disappeared = True
                 set_stage("launcher_restarting")
@@ -506,7 +460,7 @@ def launch_game(program, timeout, record, *, background=False):
             if hwnd and runtime is None:
                 ready_win = ensure_unminimized(hwnd) if background else focus_window(hwnd)
                 if not ready_win:
-                    if not windows.user32.IsWindow(hwnd):
+                    if not windows.exists(hwnd):
                         drop_runtime()
                         consume_elapsed(True)
                         time.sleep(.25)
@@ -520,7 +474,7 @@ def launch_game(program, timeout, record, *, background=False):
                         runtime = LauncherRuntime(windows, hwnd)
                     connect_failures = 0
                 except RuntimeError:
-                    if not windows.user32.IsWindow(hwnd):
+                    if not windows.exists(hwnd):
                         drop_runtime()
                         consume_elapsed(True)
                         time.sleep(.25)
@@ -555,7 +509,7 @@ def launch_game(program, timeout, record, *, background=False):
                 )
                 save_record(record)
             active_ok = (
-                bool(hwnd and windows.user32.IsWindow(hwnd) and not windows.user32.IsIconic(hwnd))
+                bool(hwnd and windows.exists(hwnd) and not windows.minimized(hwnd))
                 if background
                 else bool(hwnd and windows.foreground(hwnd))
             )
@@ -606,7 +560,7 @@ def launch_game(program, timeout, record, *, background=False):
                             clicked = runtime.action(state, box, background=use_bg)
                             if clicked or (
                                 state == "launcher_update_restart"
-                                and not windows.user32.IsWindow(hwnd)
+                                and not windows.exists(hwnd)
                             ):
                                 clicks[state] += 1
                                 attempt_clicks[state] += 1
@@ -614,7 +568,7 @@ def launch_game(program, timeout, record, *, background=False):
                                 if state == "launcher_update_restart":
                                     restarting_from_hwnd = hwnd
                                     restart_clicked_at = now
-                                    restart_window_disappeared = not windows.user32.IsWindow(hwnd)
+                                    restart_window_disappeared = not windows.exists(hwnd)
                                     set_stage("launcher_restarting")
             time.sleep(.25)
     finally:
@@ -637,10 +591,7 @@ def _connect_game_controller(hwnd, background: bool):
     from maa.controller import Win32Controller
     from maa.define import MaaWin32InputMethodEnum, MaaWin32ScreencapMethodEnum
     if background:
-        try:
-            ctypes.WinDLL("combase").RoInitialize(1)
-        except Exception:
-            pass
+        initialize_winrt()
         methods = (
             ("FramePool", MaaWin32ScreencapMethodEnum.FramePool),
             ("PrintWindow", MaaWin32ScreencapMethodEnum.PrintWindow),
@@ -775,14 +726,12 @@ def prepare_game(timeout, record, options=None):
         # The old task has ended. Dispose its controller and rebuild the whole
         # local session on the new HWND; queued daily tasks do not exist yet.
         del result, tasker, controller, resource, handlers, action
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        user32.IsWindow.argtypes = [wintypes.HWND]
-        user32.IsWindow.restype = wintypes.BOOL
+        is_window = window_exists_check()
         previous_hwnd, disappeared = hwnd, False
         waiting_at = time.monotonic()
         deadline = waiting_at+remaining
         while time.monotonic() < deadline:
-            disappeared = disappeared or not user32.IsWindow(previous_hwnd)
+            disappeared = disappeared or not is_window(previous_hwnd)
             candidate = game_window()
             if candidate and (candidate != previous_hwnd or disappeared):
                 hwnd = candidate

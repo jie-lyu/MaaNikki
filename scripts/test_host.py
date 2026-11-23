@@ -260,6 +260,40 @@ class LaunchTests(unittest.TestCase):
             self.assertTrue(launch.ensure_unminimized(0x10))
         self.assertEqual([call.args for call in user32.ShowWindow.call_args_list], [(0x10, 4)])
 
+    def test_launcher_background_click_maps_capture_to_client_and_posts_messages(self):
+        from contextlib import contextmanager
+        from host.win32 import launch
+        user32 = Mock()
+        user32.IsWindow.return_value, user32.IsIconic.return_value = 1, 0
+
+        def client_rect(hwnd, ref):
+            ref._obj.left, ref._obj.top, ref._obj.right, ref._obj.bottom = 0, 0, 2000, 1000
+            return 1
+
+        def to_screen(hwnd, ref):
+            ref._obj.x += 300
+            ref._obj.y += 200
+            return 1
+        user32.GetClientRect.side_effect = client_rect
+        user32.ClientToScreen.side_effect = to_screen
+        user32.SendMessageTimeoutW.return_value = 1
+        leases = []
+
+        @contextmanager
+        def lease(x, y, **kwargs):
+            leases.append((x, y, kwargs["clip_rect"]))
+            yield True
+        windows = launch.LauncherWindows.__new__(launch.LauncherWindows)
+        windows.user32 = user32
+        with patch("host.win32.mouse_guard.guarded_borrowed_cursor", lease), patch("host.win32.launch.time.sleep"):
+            self.assertTrue(windows.background_click(0x10, (500, 1000, 3), (100, 50, 20, 10)))
+        lparam = (110 << 16) | 220  # centre (110, 55) in a 1000x500 capture -> (220, 110) client pixels
+        messages = [call.args[1:4] for call in user32.SendMessageTimeoutW.call_args_list]
+        self.assertEqual(messages, [(0x0006, 1, 0), (0x0200, 0, lparam), (0x0201, 1, lparam), (0x0202, 0, lparam)])
+        self.assertEqual(leases, [(520, 310, (520, 310, 521, 311))])
+        user32.IsIconic.return_value = 1
+        self.assertFalse(windows.background_click(0x10, (500, 1000, 3), (100, 50, 20, 10)))
+
     def test_startup_probes_without_a_window_binding(self):
         from host.win32 import launch
         if os.name != "nt":
