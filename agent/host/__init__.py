@@ -189,34 +189,27 @@ def controller_supports_foreground_input(controller) -> bool:
     return False
 
 
-SETTLE_TIMEOUT_SECONDS = 3.0
-
-
 def settle_controller_after_stop(get_controller) -> bool:
     """After a stopped task, make the controller release whatever its control unit still holds.
 
     macOS: the patched unit tracks held keys and clicks itself, and a press the core had already
-    queued can land after the agent released its own; post_inactive() releases them and clears
-    pending cancellations. Returns False when that could not be confirmed (the core may refuse
-    new posts while stopping); the caller asks for a reconnect. Nothing to do on Win32, where the
-    controller is not even looked up (``get_controller`` is called only on macOS).
+    queued can land after the agent released its own; post_inactive() releases them, clears pending
+    cancellations and reports whether every release was posted. Returns False when that could not be
+    confirmed (the core may refuse new posts while stopping); the caller asks for a reconnect.
+    Nothing to do on Win32, where the controller is not even looked up (``get_controller`` is called
+    only on macOS).
+
+    The wait is synchronous on purpose: the controller proxy belongs to the agent callback and is
+    destroyed when it returns, so no thread may outlive it. It is bounded by the control unit, whose
+    operations all time out (capture after 5 s, accessibility queries after 0.25 s; posting events
+    does not block), and the core runs at most the one action already in flight before it.
     """
     if platform_backend() != "macos":
         return True
-    import threading
-    outcome = []
-
-    def settle():
-        try:
-            outcome.append(bool(get_controller().post_inactive().wait().succeeded))
-        except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
-            outcome.append(False)
-
-    # A controller that stopped responding must not hang the end of the task.
-    worker = threading.Thread(target=settle, name="settle-controller", daemon=True)
-    worker.start()
-    worker.join(SETTLE_TIMEOUT_SECONDS)
-    return bool(outcome and outcome[0])
+    try:
+        return bool(get_controller().post_inactive().wait().succeeded)
+    except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
+        return False
 
 
 def background_input_class():

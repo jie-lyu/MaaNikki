@@ -439,15 +439,6 @@ class MacOSPreviewPathTests(unittest.TestCase):
             with self.assertRaises(GameFrameSizeError):
                 rt.capture()
 
-    def test_stop_settle_gives_up_on_an_unresponsive_controller(self):
-        import threading
-        hang = threading.Event()
-        controller = Mock()
-        controller.post_inactive.return_value.wait.side_effect = lambda: hang.wait(5)
-        with backend("macos"), patch.object(host, "SETTLE_TIMEOUT_SECONDS", 0.2):
-            self.assertFalse(host.settle_controller_after_stop(lambda: controller))
-        hang.set()
-
     def test_stop_settles_the_control_unit_only_on_macos(self):
         controller = Mock()
         controller.post_inactive.return_value.wait.return_value.succeeded = True

@@ -403,7 +403,6 @@
     "MacOSPreviewPathTests.test_macos_releases_through_the_controller_after_focus_loss",
     "MacOSPreviewPathTests.test_mailbox_claim_on_macos_sends_one_centred_click_without_hover",
     "MacOSPreviewPathTests.test_mailbox_claim_on_windows_still_hovers_first",
-    "MacOSPreviewPathTests.test_stop_settle_gives_up_on_an_unresponsive_controller",
     "MacOSPreviewPathTests.test_stop_settles_the_control_unit_only_on_macos",
     "MacOSPreviewPathTests.test_unmapped_key_is_never_recorded_as_held",
     "MacOSPreviewPathTests.test_windows_still_releases_directly_after_focus_loss",
