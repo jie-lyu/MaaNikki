@@ -64,6 +64,20 @@ class HostImportTests(unittest.TestCase):
         backends = [name for name in self.result["host_modules"] if name not in allowed]
         self.assertEqual(backends, [])
 
+    def test_backends_import_maa_only_inside_functions(self):
+        # Importing maa opens the MaaFramework libraries and fails without MAAFW_BINARY_PATH (the
+        # packaged runtime ships no maa/bin). Backend modules are imported by tests and tools that
+        # do not set it, and the Win32 ones can only be imported on Windows, so check the source.
+        import ast
+        offenders = []
+        for path in sorted((ROOT / "agent/host").rglob("*.py")):
+            for node in ast.parse(path.read_text(encoding="utf-8")).body:
+                names = ([alias.name for alias in node.names] if isinstance(node, ast.Import)
+                         else [node.module or ""] if isinstance(node, ast.ImportFrom) else [])
+                if any(name == "maa" or name.startswith("maa.") for name in names):
+                    offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+        self.assertEqual(offenders, [])
+
     @unittest.skipUnless(os.name == "nt", "the Win32 backend only imports on Windows")
     def test_win32_overlay_backend_imports(self):
         # Registration never loads the overlays; import them here so a broken move fails before a HUD opens.

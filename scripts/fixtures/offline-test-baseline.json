@@ -1,5 +1,5 @@
 {
- "source": "Windows CI run 45159836136 (phase 1 at 1039b44, PR merge commit b6e98fc): every suite present then produced exactly these outcomes on Windows. Added after 1039b44 and so far recorded on macOS only: test_app_paths.py, test_host.py, test_host_imports.py, test_window_layout.py, test_file_io.py, test_launcher_discovery.py, test_game_target.cjs and the selector test in test_windows_contract.cjs; HostImportTests.test_win32_overlay_backend_imports is skipped off Windows. Refresh from the offline-test-results artifact when Windows outcomes change.",
+ "source": "Windows CI run 45159836136 (phase 1 at 1039b44, PR merge commit b6e98fc): every suite present then produced exactly these outcomes on Windows. Added after 1039b44 and so far recorded on macOS only: test_app_paths.py, test_host.py, test_host_imports.py, test_window_layout.py, test_file_io.py, test_launcher_discovery.py, test_game_target.cjs and the selector test in test_windows_contract.cjs; HostImportTests.test_win32_overlay_backend_imports is skipped off Windows and recorded with its Windows outcome (pass in runs on 06c9c07 and 00d5531), so a Windows-only regression there cannot hide behind a skip. Refresh from the offline-test-results artifact when Windows outcomes change.",
  "suites": {
   "test_agent_pause.py": {
    "tests": [
@@ -420,14 +420,13 @@
   "test_host_imports.py": {
    "tests": [
     "HostImportTests.test_agent_output_is_utf8_with_replacement",
+    "HostImportTests.test_backends_import_maa_only_inside_functions",
     "HostImportTests.test_registered_handlers_match_snapshot",
     "HostImportTests.test_registration_loads_no_platform_backend",
     "HostImportTests.test_win32_overlay_backend_imports"
    ],
    "known_failures": [],
-   "skips": [
-    "HostImportTests.test_win32_overlay_backend_imports"
-   ]
+   "skips": []
   },
   "test_launcher_discovery.py": {
    "tests": [
