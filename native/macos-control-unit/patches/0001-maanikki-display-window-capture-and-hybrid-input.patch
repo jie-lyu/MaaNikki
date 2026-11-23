@@ -211,10 +211,10 @@ index 344f217..2744be9 100644
 +endif()
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.h b/source/MaaMacOSControlUnit/Input/HybridInput.h
 new file mode 100644
-index 0000000..e1c05e0
+index 0000000..7cc16d8
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.h
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,127 @@
 +#pragma once
 +
 +#include <map>
@@ -222,6 +222,7 @@ index 0000000..e1c05e0
 +#include <mutex>
 +#include <optional>
 +#include <set>
++#include <string>
 +#include <thread>
 +
 +#include "Base/CaptureGeometry.h"
@@ -262,6 +263,10 @@ index 0000000..e1c05e0
 +// that contact (or release_all/inactive from another thread) cancels the press. Any exit between the
 +// hover move and an accepted press puts the cursor back; a cursor position that cannot be read
 +// refuses the press before anything moves.
++//
++// Every accepted press logs one Info line with the time spent in each phase (first check, hover
++// move, settle, second check with its hit-test share, press), and every release logs its own time
++// and whether the cursor went back.
 +class HybridInput : public InputBase
 +{
 +public:
@@ -300,8 +305,18 @@ index 0000000..e1c05e0
 +        CGMouseButton button = kCGMouseButtonLeft;
 +    };
 +
++    // Where a click check spends its time (milliseconds), for the accepted-press log line.
++    struct CheckTiming
++    {
++        double geometry_ms = 0;     // frame, window and display state, front application
++        double hit_test_ms = 0;     // accessibility hit test
++        double front_window_ms = 0; // window list: the game's front-most window at the point
++    };
++
 +    std::optional<pid_t> foreground_target(const char* action) const;
-+    std::optional<CGPoint> checked_point(int x, int y, const char* action) const;
++    std::optional<CGPoint> checked_point(int x, int y, const char* action, CheckTiming* timing = nullptr) const;
++    // Puts the user's cursor back and reports the outcome ("restored", "warp failed", ...).
++    std::string restore_cursor(CGPoint point);
 +
 +    bool touch_up_locked(int contact);
 +    bool key_up_locked(int key);
@@ -329,15 +344,17 @@ index 0000000..e1c05e0
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
 new file mode 100644
-index 0000000..48ff288
+index 0000000..3a0daae
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
-@@ -0,0 +1,415 @@
+@@ -0,0 +1,484 @@
 +#include "HybridInput.h"
 +
 +#include "InputUtils.h"
 +#include "MaaUtils/Logger.h"
 +
++#include <chrono>
++#include <algorithm>
 +#include <cmath>
 +#include <tuple>
 +#include <vector>
@@ -351,6 +368,13 @@ index 0000000..48ff288
 +constexpr int kHoverSettleMs = 300;
 +// The settle is waited in slices so that a stop ends it early.
 +constexpr int kHoverSliceMs = 10;
++
++using Clock = std::chrono::steady_clock;
++
++double ms_since(Clock::time_point start)
++{
++    return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
++}
 +
 +bool valid_key(int key)
 +{
@@ -395,8 +419,9 @@ index 0000000..48ff288
 +    return window->pid;
 +}
 +
-+std::optional<CGPoint> HybridInput::checked_point(int x, int y, const char* action) const
++std::optional<CGPoint> HybridInput::checked_point(int x, int y, const char* action, CheckTiming* timing) const
 +{
++    const auto started = Clock::now();
 +    auto frame = geometry_->latest();
 +    if (!frame || frame->window_id != window_id_ || frame->scale <= 0) {
 +        LogError << "no captured frame to map the point through, not sending" << VAR(action);
@@ -428,15 +453,26 @@ index 0000000..48ff288
 +
 +    // Frame pixel -> global point: one origin, one scale, the same ones the frame was cropped with.
 +    CGPoint point = CGPointMake(frame->captured_rect.origin.x + x / frame->scale, frame->captured_rect.origin.y + y / frame->scale);
++    if (timing) {
++        timing->geometry_ms = ms_since(started);
++    }
 +
 +    int error = 0;
++    const auto hit_started = Clock::now();
 +    pid_t owner = platform_->process_at(point, &error);
++    if (timing) {
++        timing->hit_test_ms = ms_since(hit_started);
++    }
 +    if (owner != *pid) {
 +        LogError << "another process receives clicks at this point (Dock, menu bar, a window above?), not sending" << VAR(action)
 +                 << VAR(point.x) << VAR(point.y) << VAR(owner) << VAR(error);
 +        return std::nullopt;
 +    }
++    const auto list_started = Clock::now();
 +    uint32_t front = platform_->front_window_of_process_at(*pid, point);
++    if (timing) {
++        timing->front_window_ms = ms_since(list_started);
++    }
 +    if (front != window_id_) {
 +        LogError << "another window of the game covers this point, not sending" << VAR(action) << VAR(point.x) << VAR(point.y) << VAR(front);
 +        return std::nullopt;
@@ -459,6 +495,21 @@ index 0000000..48ff288
 +    }
 +}
 +
++std::string HybridInput::restore_cursor(CGPoint point)
++{
++    if (!platform_->warp_cursor(point)) {
++        return "warp failed";
++    }
++    auto now = platform_->cursor();
++    if (!now) {
++        return "warped, position unreadable";
++    }
++    if (std::fabs(now->x - point.x) > 1 || std::fabs(now->y - point.y) > 1) {
++        return "warped, cursor elsewhere";
++    }
++    return "restored";
++}
++
 +bool HybridInput::click(int x, int y)
 +{
 +    LogError << "use touch_down/touch_up (UseMouseDownAndUpInsteadOfClick)" << VAR(x) << VAR(y);
@@ -475,6 +526,7 @@ index 0000000..48ff288
 +bool HybridInput::touch_down(int contact, int x, int y, int pressure)
 +{
 +    std::ignore = pressure;
++    const auto started = Clock::now();
 +    std::unique_lock lock(mutex_);
 +    worker_ = std::this_thread::get_id();
 +
@@ -491,7 +543,10 @@ index 0000000..48ff288
 +        LogError << "contact already pressed" << VAR(contact);
 +        return false;
 +    }
-+    auto point = checked_point(x, y, "touch_down");
++    auto phase = Clock::now();
++    CheckTiming first;
++    auto point = checked_point(x, y, "touch_down", &first);
++    const double first_check_ms = ms_since(phase);
 +    if (!point) {
 +        return false;
 +    }
@@ -509,44 +564,61 @@ index 0000000..48ff288
 +        original = *cursor;
 +    }
 +    // Every exit after the hover move and before an accepted press.
-+    auto abandon = [&] {
++    auto abandon = [&](const char* why) {
++        std::string restored = "not moved back (another contact is held)";
 +        if (restore && held_contacts_.empty()) {
-+            platform_->warp_cursor(original);
++            restored = restore_cursor(original);
 +        }
++        LogWarn << "press abandoned after the hover" << VAR(contact) << VAR(why) << VAR(restored);
 +        return false;
 +    };
 +
 +    // The game acts on the control under its hover position, not on the location carried by the
 +    // press: move there and let the hover settle first, as the Windows path does (TouchMove, 0.3 s).
++    phase = Clock::now();
 +    pending_contact_ = contact;
 +    if (!platform_->post_mouse(kCGEventMouseMoved, *point, info.mouse_button)) {
 +        pending_contact_.reset();
-+        return abandon();
++        return abandon("hover move not posted");
 +    }
++    const double move_ms = ms_since(phase);
 +    // Settle without the lock, so that a stop's releases (a held key, this very press) are sent at
 +    // once instead of waiting behind the press; any of them cancels this press.
-+    for (int waited = 0; waited < kHoverSettleMs && !cancelled_contacts_.contains(contact); waited += kHoverSliceMs) {
++    phase = Clock::now();
++    // Up to a deadline rather than a count of slices: sleeps overshoot, 30 x 10 ms took ~350 ms.
++    const double deadline = platform_->now_ms() + kHoverSettleMs;
++    for (double remaining = kHoverSettleMs; remaining > 0 && !cancelled_contacts_.contains(contact);
++         remaining = deadline - platform_->now_ms()) {
 +        lock.unlock();
-+        platform_->sleep_ms(kHoverSliceMs);
++        platform_->sleep_ms(std::max(1, std::min(kHoverSliceMs, static_cast<int>(std::ceil(remaining)))));
 +        lock.lock();
 +    }
++    const double settle_ms = ms_since(phase);
 +    pending_contact_.reset();
 +    if (cancelled_contacts_.erase(contact)) {
-+        LogWarn << "press cancelled by a stop during the hover" << VAR(contact);
-+        return abandon();
++        return abandon("cancelled by a stop during the hover");
 +    }
 +    // Everything may have changed while settling: check again, under the lock, right before pressing.
-+    auto settled = checked_point(x, y, "touch_down");
++    phase = Clock::now();
++    CheckTiming second;
++    auto settled = checked_point(x, y, "touch_down", &second);
++    const double second_check_ms = ms_since(phase);
 +    if (!settled) {
-+        return abandon();
++        return abandon("second check refused");
 +    }
++    phase = Clock::now();
 +    if (!platform_->post_mouse(info.event_type, *settled, info.mouse_button)) {
-+        return abandon();
++        return abandon("mouse-down not posted");
 +    }
++    const double press_ms = ms_since(phase);
 +    if (restore) {
 +        saved_cursor_ = original;
 +    }
 +    held_contacts_[contact] = { *settled, info.mouse_button };
++    LogInfo << "hover settled, press accepted" << VAR(contact) << VAR(settled->x) << VAR(settled->y) << VAR(first_check_ms)
++            << VAR(first.geometry_ms) << VAR(first.hit_test_ms) << VAR(first.front_window_ms) << VAR(move_ms) << VAR(settle_ms)
++            << VAR(second_check_ms) << VAR(second.geometry_ms) << VAR(second.hit_test_ms) << VAR(second.front_window_ms) << VAR(press_ms)
++            << "total_ms=" << ms_since(started);
 +    return true;
 +}
 +
@@ -595,17 +667,29 @@ index 0000000..48ff288
 +    }
 +    MouseEventInfo info;
 +    contact_to_mouse_up_info(contact, info);
++    const auto started = Clock::now();
 +    // Released where it was pressed, whatever the window or the user's cursor did since.
 +    if (!platform_->post_mouse(info.event_type, held->second.point, held->second.button)) {
 +        // Still down as far as anyone knows: keep it for the next release attempt.
 +        LogError << "mouse-up could not be posted; the contact stays held" << VAR(contact);
 +        return false;
 +    }
++    const double release_ms = ms_since(started);
 +    held_contacts_.erase(held);
-+    if (held_contacts_.empty() && !std::isnan(saved_cursor_.x)) {
-+        platform_->warp_cursor(saved_cursor_);
-+        saved_cursor_ = { NAN, NAN };
++    std::string cursor = "not moved back (another contact is held)";
++    double restore_ms = 0;
++    if (held_contacts_.empty()) {
++        if (std::isnan(saved_cursor_.x)) {
++            cursor = "no saved position";
++        }
++        else {
++            const auto restore_started = Clock::now();
++            cursor = restore_cursor(saved_cursor_);
++            restore_ms = ms_since(restore_started);
++            saved_cursor_ = { NAN, NAN };
++        }
 +    }
++    LogInfo << "release posted" << VAR(contact) << VAR(release_ms) << VAR(restore_ms) << VAR(cursor);
 +    return true;
 +}
 +
@@ -750,10 +834,10 @@ index 0000000..48ff288
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/InputPlatform.h b/source/MaaMacOSControlUnit/Input/InputPlatform.h
 new file mode 100644
-index 0000000..56ef959
+index 0000000..ab76883
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/InputPlatform.h
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,45 @@
 +#pragma once
 +
 +#include <memory>
@@ -789,8 +873,11 @@ index 0000000..56ef959
 +    virtual bool post_text(pid_t pid, const std::vector<UniChar>& chars) = 0;
 +    virtual bool post_relative_move(pid_t pid, int dx, int dy) = 0;
 +    virtual std::optional<CGPoint> cursor() = 0;
-+    virtual void warp_cursor(CGPoint point) = 0;
++    // False when the window server refused to move the cursor.
++    virtual bool warp_cursor(CGPoint point) = 0;
 +    virtual void sleep_ms(int milliseconds) = 0;
++    // Monotonic time in milliseconds; the hover settle ends at a deadline on this clock.
++    virtual double now_ms() = 0;
 +};
 +
 +std::shared_ptr<InputPlatform> system_input_platform();
@@ -798,14 +885,15 @@ index 0000000..56ef959
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/InputPlatform.mm b/source/MaaMacOSControlUnit/Input/InputPlatform.mm
 new file mode 100644
-index 0000000..dea3421
+index 0000000..e5c3500
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/InputPlatform.mm
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,190 @@
 +#include "InputPlatform.h"
 +
 +#include "MaaUtils/Logger.h"
 +
++#include <chrono>
 +#include <unistd.h>
 +
 +MAA_CTRL_UNIT_NS_BEGIN
@@ -973,9 +1061,14 @@ index 0000000..dea3421
 +        return point;
 +    }
 +
-+    void warp_cursor(CGPoint point) override { CGWarpMouseCursorPosition(point); }
++    bool warp_cursor(CGPoint point) override { return CGWarpMouseCursorPosition(point) == kCGErrorSuccess; }
 +
 +    void sleep_ms(int milliseconds) override { usleep(static_cast<useconds_t>(milliseconds) * 1000); }
++
++    double now_ms() override
++    {
++        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    }
 +};
 +
 +} // namespace
@@ -1411,10 +1504,10 @@ index 0000000..c17723a
 +MAA_CTRL_UNIT_NS_END
 diff --git a/test/maanikki/HybridInputTest.mm b/test/maanikki/HybridInputTest.mm
 new file mode 100644
-index 0000000..f7676ce
+index 0000000..ffcbe3d
 --- /dev/null
 +++ b/test/maanikki/HybridInputTest.mm
-@@ -0,0 +1,472 @@
+@@ -0,0 +1,477 @@
 +// Deterministic tests for HybridInput over a fake InputPlatform: orderings a real desktop cannot
 +// reproduce on demand (a stop racing a press), and every refusal path. Nothing reaches the system.
 +// Built only with -DMAANIKKI_UNIT_TESTS=ON; never part of the shipped unit.
@@ -1540,7 +1633,11 @@ index 0000000..f7676ce
 +
 +    std::optional<CGPoint> cursor() override { return cursor_known ? std::optional(CGPointMake(7, 7)) : std::nullopt; }
 +
-+    void warp_cursor(CGPoint point) override { record("warp@" + std::to_string(int(point.x)) + "," + std::to_string(int(point.y))); }
++    bool warp_cursor(CGPoint point) override
++    {
++        record("warp@" + std::to_string(int(point.x)) + "," + std::to_string(int(point.y)));
++        return true;
++    }
 +
 +    std::function<void()> on_sleep;
 +    void sleep_ms(int milliseconds) override
@@ -1551,6 +1648,7 @@ index 0000000..f7676ce
 +        }
 +    }
 +    int slept = 0;
++    double now_ms() override { return slept; } // time passes only while sleeping
 +
 +    void record(std::string event)
 +    {
