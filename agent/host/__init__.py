@@ -41,6 +41,8 @@ class Capabilities:
     tall_window: bool = False  # 16:9 healing and the temporary tall scan window
     launch_game: bool = False
     close_game: bool = False
+    clipboard: bool = False
+    credential_store: bool = False
 
 
 UNSUPPORTED = Capabilities("unsupported")
@@ -147,6 +149,22 @@ def game_close_api():
         raise RuntimeError("当前系统不支持关闭游戏。")
     from host.win32.close import Win32Api
     return Win32Api()
+
+
+def clipboard():
+    """Module with get_clipboard_text() and set_clipboard_text() for this desktop."""
+    if not capabilities(platform_backend()).clipboard:
+        raise RuntimeError("当前系统不支持读写剪贴板。")
+    from host.win32 import clipboard as module
+    return module
+
+
+def credential_store():
+    """Module whose credentials(path) reads the PearPal login protected for the current user."""
+    if not capabilities(platform_backend()).credential_store:
+        raise RuntimeError("当前系统不支持读取已保存的登录信息。")
+    from host.win32 import credentials as module
+    return module
 
 
 def capabilities(backend: str | None) -> Capabilities:

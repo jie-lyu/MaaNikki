@@ -78,6 +78,28 @@ class SelectionTests(unittest.TestCase):
                 host.game_close_api()
         with patch.object(host.os, "name", "nt"), patch("host.win32.close.Win32Api") as binding:
             self.assertIs(host.game_close_api(), binding.return_value)
+        with patch.object(host.os, "name", "posix"):
+            with self.assertRaisesRegex(RuntimeError, "剪贴板"):
+                host.clipboard()
+            with self.assertRaisesRegex(RuntimeError, "登录信息"):
+                host.credential_store()
+        with patch.object(host.os, "name", "nt"):
+            self.assertTrue(callable(host.clipboard().get_clipboard_text))
+            self.assertTrue(callable(host.clipboard().set_clipboard_text))
+            self.assertTrue(callable(host.credential_store().credentials))
+
+    def test_task_code_reaches_clipboard_and_credentials_through_the_host(self):
+        from daily import redeem_codes
+        from map_mask import pearpal
+        module = SimpleNamespace(get_clipboard_text=Mock(return_value=(True, "x")),
+                                 set_clipboard_text=Mock(return_value=True),
+                                 credentials=Mock(return_value={"token": "t", "openid": "o"}))
+        with patch("host.clipboard", return_value=module), patch("host.credential_store", return_value=module):
+            self.assertEqual(redeem_codes.get_clipboard_text(), (True, "x"))
+            self.assertTrue(redeem_codes.set_clipboard_text("CODE"))
+            self.assertEqual(pearpal.credentials("login.bin"), {"token": "t", "openid": "o"})
+        module.set_clipboard_text.assert_called_once_with("CODE")
+        module.credentials.assert_called_once_with("login.bin")
 
     def test_win32_capabilities(self):
         capabilities = host.capabilities("win32")

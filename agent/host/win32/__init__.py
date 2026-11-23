@@ -11,4 +11,6 @@ CAPABILITIES = Capabilities(
     tall_window=True,
     launch_game=True,
     close_game=True,
+    clipboard=True,
+    credential_store=True,
 )
