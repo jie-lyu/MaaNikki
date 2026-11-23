@@ -35,7 +35,8 @@ jobs:
         # Includes the agent import/registration check and MaaFramework resource loading.
         run: python scripts/release.py prepare --output .build/ci-runtime
       - name: Compare the prepared runtime with the package inventory
-        run: python -B scripts/test_windows_contract.py --runtime .build/ci-runtime
+        # Also records the generated runtime files for scripts/fixtures/windows-runtime-generated.txt.
+        run: python -B scripts/test_windows_contract.py --runtime .build/ci-runtime --record-runtime .build/ci-results/windows-runtime-generated.txt
       - name: Place the runtime where the suites expect it
         shell: pwsh
         run: |
@@ -55,10 +56,22 @@ jobs:
             ../.build/build-tools/node_modules/.bin/pnpm.cmd exec tsc --noEmit
             if ($LASTEXITCODE -ne 0) { throw 'TypeScript check failed' }
           } finally { Pop-Location }
-      - name: Run offline suites
+      - name: Run offline suites against the per-test baseline
         env:
           PYTHONUTF8: '1'
-        run: python scripts/run_offline_tests.py --python python/python.exe
+        run: >-
+          python scripts/run_offline_tests.py --python python/python.exe
+          --results .build/ci-results/offline-test-results.json
+          --write-baseline .build/ci-results/offline-test-baseline.json
+          --baseline-source "Windows CI run ${{ github.run_id }} at ${{ github.sha }}"
+      - name: Upload observed outcomes and recordings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-test-results
+          path: .build/ci-results/
+          if-no-files-found: warn
+          retention-days: 14
 
   client-check:
     runs-on: windows-2022

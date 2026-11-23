@@ -10,6 +10,10 @@ library only.
     --runtime DIR     also compare a runtime prepared by
                       `scripts/release.py prepare` with the inventory
                       (Windows CI; needs the downloaded runtime)
+    --record-runtime PATH
+                      with --runtime, write the runtime's generated files
+                      (python/, maafw/, ...) so they can be committed as
+                      scripts/fixtures/windows-runtime-generated.txt
 """
 from __future__ import annotations
 
@@ -26,6 +30,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_FILE = ROOT / "scripts/fixtures/windows-contract.json"
 INVENTORY_FILE = ROOT / "scripts/fixtures/windows-package-files.txt"
+# Recorded from a Windows run; the downloads are pinned by hash, so the list is exact.
+RUNTIME_GENERATED_FILE = ROOT / "scripts/fixtures/windows-runtime-generated.txt"
 
 _spec = importlib.util.spec_from_file_location("maanikki_release", ROOT / "scripts/release.py")
 release = importlib.util.module_from_spec(_spec)
@@ -216,6 +222,13 @@ def compare_runtime(runtime: Path, files: list[str], generated: list[str]) -> li
     return problems
 
 
+def runtime_generated(runtime: Path, files: list[str]) -> list[str]:
+    """Files of a prepared runtime that are not copied from source."""
+    runtime = runtime.resolve()
+    actual = {path.relative_to(runtime).as_posix() for path in release.release_files(runtime)}
+    return sorted(actual - set(files))
+
+
 class WindowsContractTests(unittest.TestCase):
     runtime: Path | None = None
 
@@ -249,6 +262,18 @@ class WindowsContractTests(unittest.TestCase):
         files, generated = parse_inventory(INVENTORY_FILE.read_text(encoding="utf-8"))
         problems = compare_runtime(self.runtime, files, generated)
         self.assertFalse(problems, "\n".join(problems[:50]))
+
+    def test_prepared_runtime_generated_files_match_recording(self):
+        if self.runtime is None:
+            self.skipTest("pass --runtime DIR to compare a prepared runtime")
+        if not RUNTIME_GENERATED_FILE.is_file():
+            self.skipTest(f"{RUNTIME_GENERATED_FILE.name} not recorded yet; use --record-runtime on Windows")
+        files, _ = parse_inventory(INVENTORY_FILE.read_text(encoding="utf-8"))
+        recorded = [line for line in RUNTIME_GENERATED_FILE.read_text(encoding="utf-8").splitlines()
+                    if line and not line.startswith("#")]
+        actual = runtime_generated(self.runtime, files)
+        added, removed = sorted(set(actual) - set(recorded)), sorted(set(recorded) - set(actual))
+        self.assertFalse(added or removed, f"generated runtime files changed; added={added[:30]} removed={removed[:30]}")
 
 
 class ContractHelperTests(unittest.TestCase):
@@ -297,6 +322,15 @@ class ContractHelperTests(unittest.TestCase):
                                        list(GENERATED_ENTRIES))
         self.assertEqual(problems, ["missing from runtime: agent/missing.py", "not in inventory: stray.txt"])
 
+    def test_generated_files_exclude_source_and_unshipped(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            runtime = Path(folder)
+            for name in ("interface.json", "python/python.exe", "maafw/a.dll", "debug/x.log", "agent/__pycache__/m.pyc"):
+                (runtime / name).parent.mkdir(parents=True, exist_ok=True)
+                (runtime / name).write_text("x", encoding="utf-8")
+            self.assertEqual(runtime_generated(runtime, ["interface.json"]), ["maafw/a.dll", "python/python.exe"])
+
 
 def update():
     CONTRACT_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -309,9 +343,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--update", action="store_true")
     parser.add_argument("--runtime", type=Path)
+    parser.add_argument("--record-runtime", type=Path)
     args, rest = parser.parse_known_args()
     if args.update:
         update()
         sys.exit(0)
+    if args.record_runtime:
+        if args.runtime is None:
+            parser.error("--record-runtime needs --runtime")
+        inventory, _ = parse_inventory(INVENTORY_FILE.read_text(encoding="utf-8"))
+        args.record_runtime.parent.mkdir(parents=True, exist_ok=True)
+        args.record_runtime.write_text(
+            "# Generated files of the prepared Windows runtime. Record on Windows CI with --record-runtime.\n"
+            + "\n".join(runtime_generated(args.runtime, inventory)) + "\n", encoding="utf-8")
     WindowsContractTests.runtime = args.runtime
     unittest.main(argv=[sys.argv[0], *rest])

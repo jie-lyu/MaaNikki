@@ -1,0 +1,225 @@
+{
+ "source": "Seeded on macOS (arm64) with Win32 calls stubbed so modules import, at d58445e. Replace with the first Windows CI run: download the offline-test-results artifact's baseline file and review it. test_agent_pause fails on macOS only on CREATE_NO_WINDOW and is expected to pass on Windows, so it lists no known failures.",
+ "suites": {
+  "test_agent_pause.py": {
+   "tests": 1,
+   "known_failures": []
+  },
+  "test_clicks.py": {
+   "tests": 67,
+   "known_failures": [
+    "ClickTests.test_catalog_assets_have_pipeline_nodes_for_override_reads",
+    "ClickTests.test_current_normal_region_is_not_reselected_and_open_menu_is_closed",
+    "ClickTests.test_daily_energy_only_batch_keeps_calendar_route",
+    "ClickTests.test_daily_success_can_handoff_without_returning_to_world",
+    "ClickTests.test_dig_checks_page_after_dismissing_reward",
+    "ClickTests.test_dig_choice_input_failure_is_not_replayed",
+    "ClickTests.test_dig_collect_and_repeat_are_exclusive_dialog_choices",
+    "ClickTests.test_dig_missing_configured_choice_does_not_collect_by_other_choice",
+    "ClickTests.test_dig_unconfirmed_reward_does_not_replay_either_choice",
+    "ClickTests.test_dig_without_completed_reward_keeps_running_or_empty_result",
+    "ClickTests.test_enter_page_retries_unhandled_click",
+    "ClickTests.test_entry_recovers_unknown_page_before_retrying",
+    "ClickTests.test_existing_destination_is_not_clicked_again",
+    "ClickTests.test_failed_recovery_is_bounded_without_blind_inputs",
+    "ClickTests.test_gameplay_mouse_binding_keeps_original_timing",
+    "ClickTests.test_home_and_other_routes_focus_before_guarded_operations",
+    "ClickTests.test_home_reuse_closes_menu_without_reselecting_even_with_custom_name",
+    "ClickTests.test_item_selection_finishes_settings_before_using_or_recalling_item",
+    "ClickTests.test_late_arrival_does_not_trigger_escape_or_second_click",
+    "ClickTests.test_like_response_is_verified_without_toggling_twice",
+    "ClickTests.test_lookbook_dispatches_actual_click_with_null_parameters",
+    "ClickTests.test_main_confirmation_never_moves_cursor",
+    "ClickTests.test_main_recovery_does_not_require_static_background",
+    "ClickTests.test_main_recovery_waits_through_loading_without_escape",
+    "ClickTests.test_monthly_start_recovery_reopens_intro_without_recursive_submit",
+    "ClickTests.test_mouse_bound_interaction_never_uses_ui_clicks",
+    "ClickTests.test_nested_route_waits_on_parent_guard_without_refocusing",
+    "ClickTests.test_no_click_when_hover_fails",
+    "ClickTests.test_optional_stability_only_checks_feature_roi",
+    "ClickTests.test_page_diagnostics_include_retry_outcome_and_cropped_frame",
+    "ClickTests.test_page_retry_is_bounded",
+    "ClickTests.test_page_wait_needs_consecutive_features_not_static_animation",
+    "ClickTests.test_point_click_and_asset_use_same_path",
+    "ClickTests.test_realm_search_scrolls_inside_list_without_shrinking_recognition",
+    "ClickTests.test_rectangle_uses_center_after_hover",
+    "ClickTests.test_region_close_waits_for_overlay_to_disappear_not_only_map_marker",
+    "ClickTests.test_region_menu_title_allows_search_when_destinations_are_offscreen",
+    "ClickTests.test_reward_dismissal_can_use_specific_marker",
+    "ClickTests.test_scene_transition_suppresses_unhover_and_restores_ui_behavior",
+    "ClickTests.test_scroll_search_checks_current_view_then_top_and_each_lower_view",
+    "ClickTests.test_stop_during_hover_prevents_click",
+    "ClickTests.test_stop_during_late_wait_prevents_recovery",
+    "ClickTests.test_stopping_prevents_recovery_and_more_input",
+    "ClickTests.test_template_retry_relocates_changed_box",
+    "ClickTests.test_transport_candidate_retries_only_visible_entry_and_rejects_locked_point",
+    "ClickTests.test_transport_candidate_waits_for_detail_and_never_scrolls_or_reclicks_marker",
+    "ClickTests.test_transport_waits_for_detail_before_submitting_once",
+    "ClickTests.test_unclassified_input_is_not_repeated",
+    "ClickTests.test_unknown_page_is_not_blindly_clicked"
+   ]
+  },
+  "test_close_game.py": {
+   "tests": 75,
+   "known_failures": []
+  },
+  "test_fishing.py": {
+   "tests": 0,
+   "known_failures": [
+    "<import>"
+   ]
+  },
+  "test_focus_pause.py": {
+   "tests": 13,
+   "known_failures": [
+    "PauseTests.test_cache_and_recognition_use_fresh_frames_after_resume",
+    "PauseTests.test_focus_loss_releases_inputs_and_resumes_without_refocusing",
+    "PauseTests.test_long_hold_restores_only_after_focus_returns",
+    "PauseTests.test_native_nested_callback_without_contextvar_inherits_parent",
+    "PauseTests.test_navigation_discards_old_movement_and_jump_schedule",
+    "PauseTests.test_nested_callbacks_and_pipeline_nodes_share_pause_session",
+    "PauseTests.test_pause_time_does_not_consume_page_wait_duration",
+    "PauseTests.test_physical_hold_resumes_and_stop_cleanup_does_not_refocus",
+    "PauseTests.test_physical_shortcut_keys_are_released_on_focus_loss",
+    "PauseTests.test_route_refreshes_pose_before_waypoint_decision_after_resume",
+    "PauseTests.test_stop_during_pause_exits_without_resuming_or_sending_input",
+    "PauseTests.test_ui_recognition_refreshes_pipeline_screenshot_after_resume"
+   ]
+  },
+  "test_gameplay.py": {
+   "tests": 35,
+   "known_failures": [
+    "GameplayTests.test_absent_cannot_place_message_does_not_mean_success",
+    "GameplayTests.test_crown_progress_retries_and_requires_repeatable_value",
+    "GameplayTests.test_crystal_matching_excludes_right_panel_and_uses_snapshot",
+    "GameplayTests.test_crystal_snapshot_is_retained_without_recentering_markers",
+    "GameplayTests.test_map_recenters_on_player_then_uses_one_bounded_large_pan",
+    "GameplayTests.test_new_recover_control_confirms_object_placement",
+    "GameplayTests.test_partial_markers_do_not_use_map_center_as_location",
+    "GameplayTests.test_persistent_cannot_place_toast_does_not_trigger_repeated_clicks",
+    "GameplayTests.test_persistent_category_icon_does_not_abort_placement",
+    "GameplayTests.test_score_does_not_extend_wait_when_three_reads_disagree",
+    "GameplayTests.test_unreadable_score_is_not_zero",
+    "MonthlyTests.test_both_pages_are_processed_once_in_the_opened_order",
+    "MonthlyTests.test_failed_exit_is_saved_and_task_reports_failure",
+    "MonthlyTests.test_failed_switch_records_source_page_and_does_not_claim_again",
+    "MonthlyTests.test_paradise_only_claims_task_and_keeps_after_claim_snapshot",
+    "MonthlyTests.test_travel_keeps_task_then_treasure_order",
+    "MonthlyTests.test_unchanged_page_after_switch_does_not_claim_processed_page_twice",
+    "MonthlyTests.test_unrecognized_paradise_reward_is_logged_before_main_recovery",
+    "RealmTests.test_level_failure_is_saved_before_returning_and_preserves_selected_target"
+   ]
+  },
+  "test_home.py": {
+   "tests": 15,
+   "known_failures": [
+    "HomeTests.test_at_most_five_casts_and_second_candidate_skips_even_zero_catches",
+    "HomeTests.test_fishing_failure_records_failure_and_continues_route",
+    "HomeTests.test_fishing_icon_matches_recorded_hud_and_rejects_missing_icon",
+    "HomeTests.test_giant_meteor_notice_keeps_route_result_and_skips_after_stop",
+    "HomeTests.test_route_preserves_upstream_coordinates_order_and_departure_modes",
+    "HomeTests.test_route_teleport_happens_before_walking_and_recalibrates_nearby_too",
+    "HomeTests.test_unavailable_subability_keeps_second_candidate_available",
+    "HomeTests.test_unrecognized_start_saves_footer_and_halts_without_exit_input"
+   ]
+  },
+  "test_meteor.py": {
+   "tests": 15,
+   "known_failures": [
+    "MeteorTests.test_binary_close_template_positive_and_negative",
+    "MeteorTests.test_meteor_navigation_transports_from_current_map_without_task_actions"
+   ]
+  },
+  "test_navigation.py": {
+   "tests": 18,
+   "known_failures": [
+    "CollectionTests.test_insect_reuses_route_calibration_and_never_walks_after_failed_turn",
+    "SteeringTests.test_incomplete_small_turn_stops_and_corrects_before_returning",
+    "SteeringTests.test_large_turn_uses_complete_calibrated_displacement_across_north",
+    "SteeringTests.test_small_turn_applies_full_correction_and_verifies_heading",
+    "SteeringTests.test_stationary_catch_uses_three_degree_tolerance_and_stops_on_no_response",
+    "SteeringTests.test_stop_prevents_camera_submission"
+   ]
+  },
+  "test_offline_runner.py": {
+   "tests": 7,
+   "known_failures": []
+  },
+  "test_performance.py": {
+   "tests": 36,
+   "known_failures": [
+    "AssistTests.test_background_never_captures_or_sends_input",
+    "AssistTests.test_clear_disappearance_releases_other_helpers_on_a_new_frame",
+    "AssistTests.test_clear_is_submitted_once_until_its_feature_disappears",
+    "AssistTests.test_closed_window_never_captures_or_sends_input",
+    "AssistTests.test_continuous_pickup_cannot_starve_clear_or_dialogue_checks",
+    "AssistTests.test_dialogue_keeps_cooldown_and_new_frame_after_every_input",
+    "AssistTests.test_disabled_helpers_are_never_recognized",
+    "AssistTests.test_failed_input_does_not_submit_another_action_on_same_frame",
+    "AssistTests.test_fishing_session_excludes_other_helpers_from_its_frame",
+    "AssistTests.test_focus_loss_during_fishing_detection_pauses_without_session",
+    "AssistTests.test_losing_focus_during_recognition_prevents_input",
+    "AssistTests.test_mouse_binding_clicks_in_place_without_extra_capture",
+    "AssistTests.test_no_match_shares_each_due_decision_frame",
+    "ObservationTests.test_explicit_capture_is_always_fresh_and_invalidates_parent",
+    "ObservationTests.test_failed_capture_does_not_reuse_last_success",
+    "ObservationTests.test_independent_checks_share_one_capture_only_in_scope",
+    "ObservationTests.test_input_wait_and_cursor_move_invalidate_pixels_even_when_input_fails",
+    "ObservationTests.test_nested_page_predicate_shares_frame",
+    "ObservationTests.test_page_confirmation_uses_two_new_frames_inside_existing_observation",
+    "ObservationTests.test_scrolled_frame_is_searched_without_recapture",
+    "ObservationTests.test_slow_decision_cannot_keep_reusing_an_aging_frame",
+    "ObservationTests.test_stop_prevents_cached_reads_and_input",
+    "TemplateTests.test_cached_pixels_are_immutable_and_decoded_once",
+    "TemplateTests.test_map_maximum_requires_gold_segment_at_right_end_not_gray_track",
+    "TemplateTests.test_ui_template_brightness_matching_remains_available"
+   ]
+  },
+  "test_route_test.py": {
+   "tests": 6,
+   "known_failures": [
+    "RouteTestChecks.test_all_dropdown_routes_are_valid_movement_routes",
+    "RouteTestChecks.test_current_submission_controller_takes_priority_over_saved_active_tab",
+    "RouteTestChecks.test_invalid_files_and_task_actions_are_rejected_before_input",
+    "RouteTestChecks.test_snapshot_transmission_and_release_on_success_failure_and_stop"
+   ]
+  },
+  "test_subtask_test.py": {
+   "tests": 15,
+   "known_failures": [
+    "SubtaskTests.test_catalog_covers_every_rule_with_unique_entries_and_developer_flag",
+    "SubtaskTests.test_dig_reuses_existing_executor",
+    "SubtaskTests.test_failure_frame_is_kept_before_return_to_main"
+   ]
+  },
+  "test_task_restart.cjs": {
+   "tests": 17,
+   "known_failures": [
+    "backend startup failure releases lock for retry",
+    "browser: a running instance still blocks startup",
+    "browser: all metadata-based developer subtasks require mode",
+    "browser: another stopped instance's history does not block",
+    "browser: developer task requires mode and forwards it to the agent",
+    "browser: restart after failed with retained history",
+    "browser: restart after succeeded with retained history",
+    "desktop: a running instance still blocks startup",
+    "desktop: all metadata-based developer subtasks require mode",
+    "desktop: another stopped instance's history does not block",
+    "desktop: developer task requires mode and forwards it to the agent",
+    "desktop: restart after failed with retained history",
+    "desktop: restart after succeeded with retained history",
+    "parallel startup is blocked and lock released after completion",
+    "stop in progress blocks; restart succeeds after framework stops",
+    "unknown backend state blocks startup and releases lock"
+   ]
+  },
+  "test_windows_contract.cjs": {
+   "tests": 2,
+   "known_failures": []
+  },
+  "test_windows_contract.py": {
+   "tests": 9,
+   "known_failures": []
+  }
+ }
+}

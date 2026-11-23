@@ -1,0 +1,14 @@
+{
+  "nikki_windows": {
+    "type": "Win32",
+    "handle": 4660,
+    "screencap_method": 2,
+    "screencap_fallbacks": [
+      8,
+      32
+    ],
+    "mouse_method": 1,
+    "keyboard_method": 1,
+    "display_short_side": 720
+  }
+}
