@@ -479,6 +479,41 @@ class TaskAllowlistTests(unittest.TestCase):
         self.assertEqual(ran, [])
 
 
+class GeometryLatchTests(unittest.TestCase):
+    def session(self, info):
+        from task_control import ForegroundSession as TaskSession
+        session = TaskSession.__new__(TaskSession)
+        session._frame_failure = None
+        session.frame_validated = False
+        session.inputs = []
+        session.generation = 0
+        session.evidence = Mock()
+        session.notify = Mock()
+        session.context = Mock()
+        session._controller = Mock(info=info)
+        return session
+
+    def test_macos_geometry_change_stops_the_queue_like_a_bad_frame(self):
+        import numpy as np
+        from task_control import TaskStopped
+        session = self.session({"type": "macos", "geometry_changed": True})
+        with backend("macos"), patch("task_control.write_message"):
+            with self.assertRaisesRegex(TaskStopped, "重新连接"):
+                session.validate_frame(np.zeros((720, 1280, 3), dtype=np.uint8))
+        session.context.tasker.post_stop.assert_called_once()
+        session.evidence.save.assert_called_once()
+        unchanged = self.session({"type": "macos", "geometry_changed": False})
+        with backend("macos"):
+            unchanged.validate_frame(np.zeros((720, 1280, 3), dtype=np.uint8))
+        self.assertTrue(unchanged.frame_validated)
+
+    def test_windows_never_looks_up_the_controller(self):
+        get = Mock()
+        with backend("win32"):
+            self.assertFalse(host.connection_geometry_changed(get))
+        get.assert_not_called()
+
+
 class SelectionTests(unittest.TestCase):
     def test_backend_follows_platform_and_controller_type(self):
         with patch.object(host.os, "name", "nt"):

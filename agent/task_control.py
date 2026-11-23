@@ -95,6 +95,12 @@ class ForegroundSession:
             raise TaskStopped(self._frame_failure)
         try:
             require_game_frame(frame)
+            from host import connection_geometry_changed
+            if connection_geometry_changed(lambda: self.controller):
+                # A same-size change (moved window, other display or scaling) still yields 1280x720
+                # frames, but the control unit refuses clicks until reconnect: stop like a bad frame.
+                raise GameFrameSizeError(
+                    "游戏窗口的位置、所在显示器或缩放在运行中发生了变化，已暂停输入；请重新连接游戏后再运行")
         except GameFrameSizeError as error:
             self.evidence.save("frame_size", str(error), image=frame, generation=self.generation)
             message = f"任务已停止：{error}"

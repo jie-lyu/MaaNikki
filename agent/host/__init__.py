@@ -189,6 +189,22 @@ def controller_supports_foreground_input(controller) -> bool:
     return False
 
 
+def connection_geometry_changed(get_controller) -> bool:
+    """Whether the connected window's geometry changed since connect, so clicks are refused until
+    reconnect (the patched macOS unit's latch, read live from Controller.info).
+
+    Always False on Win32, where the controller is not even looked up (``get_controller`` is
+    called only on macOS).
+    """
+    if platform_backend() != "macos":
+        return False
+    try:
+        info = get_controller().info
+    except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
+        return False
+    return isinstance(info, dict) and info.get("geometry_changed") is True
+
+
 def task_entry_supported(entry) -> bool:
     """Whether this desktop's backend may run the task whose pipeline entry is ``entry``.
 
