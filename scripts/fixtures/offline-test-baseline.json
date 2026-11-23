@@ -407,6 +407,7 @@
     "CompareTests.test_newly_skipped_test_fails",
     "CompareTests.test_replaced_test_fails_even_with_same_count",
     "RecordingTests.test_subtests_fold_into_their_test",
+    "RecordingTests.test_tap_exit_codes",
     "RecordingTests.test_tap_top_level_only"
    ],
    "known_failures": [],

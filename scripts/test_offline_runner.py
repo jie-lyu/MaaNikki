@@ -87,6 +87,13 @@ class RecordingTests(unittest.TestCase):
         outcomes = {key.rsplit(".", 1)[-1]: value for key, value in result.outcomes.items()}
         self.assertEqual(outcomes, {"test_sub": "fail", "test_ok": "pass", "test_error": "error"})
 
+    def test_tap_exit_codes(self):
+        self.assertIsNone(runner.tap_run_error(0, {"a": "pass"}))
+        self.assertIsNone(runner.tap_run_error(1, {"a": "fail"}))
+        self.assertIsNotNone(runner.tap_run_error(1, {"a": "pass"}))
+        self.assertIsNotNone(runner.tap_run_error(0xC0000005, {"a": "fail"}))  # crash after reported failures
+        self.assertIsNotNone(runner.tap_run_error(1, {}))
+
     def test_tap_top_level_only(self):
         text = "TAP version 13\n# Subtest: a\n    ok 1 - inner\nok 1 - a\nnot ok 2 - b\nok 3 - c # SKIP later\n"
         self.assertEqual(runner.parse_tap(text), {"a": "pass", "b": "fail", "c": "skip"})

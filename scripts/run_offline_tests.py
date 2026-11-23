@@ -133,6 +133,16 @@ def parse_tap(text: str) -> dict[str, str]:
     return outcomes
 
 
+def tap_run_error(returncode: int, outcomes: dict[str, str]) -> str | None:
+    """node --test exits 1 when tests fail; anything else abnormal is a broken run."""
+    failed = any(outcome == "fail" for outcome in outcomes.values())
+    if not outcomes:
+        return f"no TAP results (exit {returncode})"
+    if returncode == 0 or (returncode == 1 and failed):
+        return None
+    return f"node exited {returncode}" + ("" if failed else " without a failing test")
+
+
 def run_suite(name: str, python: str, timeout: float) -> dict:
     print(f"::group::{name}" if GITHUB else f"===== {name}", flush=True)
     report = _report()
@@ -142,11 +152,7 @@ def run_suite(name: str, python: str, timeout: float) -> dict:
                                        timeout=timeout, stdout=subprocess.PIPE, text=True, encoding="utf-8")
             print(completed.stdout, flush=True)
             report["outcomes"] = parse_tap(completed.stdout)
-            failed = any(outcome == "fail" for outcome in report["outcomes"].values())
-            if not report["outcomes"]:
-                report["import_error"] = f"no TAP results (exit {completed.returncode})"
-            elif completed.returncode != 0 and not failed:
-                report["run_error"] = f"node exited {completed.returncode} without a failing test"
+            report["run_error"] = tap_run_error(completed.returncode, report["outcomes"])
         else:
             output = ROOT / ".build" / f"offline-{name}.json"
             output.parent.mkdir(parents=True, exist_ok=True)
