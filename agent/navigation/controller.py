@@ -3,11 +3,10 @@ from __future__ import annotations
 from contextlib import contextmanager, nullcontext
 import ctypes
 from ctypes import wintypes
-import os
-import re
 import time as wall_time
 from task_control import task_time as time
 
+from host import connect_target
 from .models import GameWindowClosed, NavigationError
 from game_keys import Binding, GameKeys, MACRO_KEYS
 
@@ -84,88 +83,34 @@ class ForegroundInput:
         self.held = set()
         self.buttons = set()
         self.bindings = bindings or GameKeys()
-        if os.name != "nt":
-            raise NavigationError("前台导航仅支持 Windows 游戏窗口。")
-        # Controller.info is forwarded by MaaAgentServer; Toolkit enumeration
-        # is not. Bind to the client's actual HWND, never an independently found
-        # window or the current foreground window.
-        try:
-            info = controller.info
-        except (OSError, RuntimeError, ValueError, TypeError, AttributeError) as error:
-            raise NavigationError("无法读取当前连接的游戏窗口，请重新连接后再试。") from error
-        hwnd = info.get("hwnd") if isinstance(info, dict) else None
-        if (not isinstance(info, dict) or info.get("type") != "win32" or type(hwnd) is not int
-                or not 0 < hwnd < 2**(ctypes.sizeof(ctypes.c_void_p)*8)):
-            raise NavigationError("当前连接没有有效的 Windows 游戏窗口，导航已停止。")
-        self.hwnd = hwnd
-        from maa.define import MaaWin32ScreencapMethodEnum
-        capture_method = info.get("screencap_method", 0)
-        screen_methods = int(MaaWin32ScreencapMethodEnum.Foreground
-                             | MaaWin32ScreencapMethodEnum.DXGI_DesktopDup
-                             | MaaWin32ScreencapMethodEnum.GDI)
-        self.capture_requires_foreground = bool(type(capture_method) is int
-                                                and capture_method & screen_methods)
-        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
-        self.user32.GetForegroundWindow.argtypes = []
-        self.user32.GetForegroundWindow.restype = wintypes.HWND
-        self.user32.IsWindow.argtypes = [wintypes.HWND]
-        self.user32.IsWindow.restype = wintypes.BOOL
-        self.user32.IsIconic.argtypes = [wintypes.HWND]
-        self.user32.IsIconic.restype = wintypes.BOOL
-        self.user32.IsHungAppWindow.argtypes = [wintypes.HWND]
-        self.user32.IsHungAppWindow.restype = wintypes.BOOL
-        self.user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
-        self.user32.MapVirtualKeyW.restype = wintypes.UINT
-        self.user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-        self.user32.PostMessageW.restype = wintypes.BOOL
-        self.user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
-        self.user32.GetWindowTextLengthW.restype = ctypes.c_int
-        self.user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-        self.user32.GetWindowTextW.restype = ctypes.c_int
-        self.user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-        self.user32.GetClassNameW.restype = ctypes.c_int
-        if not self.user32.IsWindow(self.hwnd):
-            raise GameWindowClosed("连接的游戏窗口已经关闭，请重新连接。")
-        class_name = ctypes.create_unicode_buffer(257)
-        if (not self.user32.GetClassNameW(self.hwnd, class_name, len(class_name))
-                or class_name.value != "UnrealWindow"):
-            raise NavigationError("当前连接的窗口不是游戏客户端，请重新连接无限暖暖。")
-        length = self.user32.GetWindowTextLengthW(self.hwnd)
-        if not 0 < length <= 256:
-            raise NavigationError("无法确认连接窗口的标题，导航已停止。")
-        title = ctypes.create_unicode_buffer(length+1)
-        if (not self.user32.GetWindowTextW(self.hwnd, title, len(title))
-                or not re.fullmatch(r"\s*(Infinity\s*Nikki|无限暖暖|無限暖暖)\s*", title.value)):
-            raise NavigationError("当前连接的窗口不是无限暖暖，导航已停止，请检查连接对象。")
+        # The backend verifies the connected window and owns focus queries.
+        self.target = connect_target(controller)
+        self.hwnd = self.target.handle
+        self.capture_requires_foreground = self.target.capture_requires_foreground
+        # Win32 handle shared with BackgroundInput and the input helpers below,
+        # which move into host.win32 in a later step.
+        self.user32 = self.target.user32
         from task_control import active_session
         session = active_session()
         if session is not None:
             session.register(self)
 
     def foreground(self):
-        return bool(
-            self.user32.IsWindow(self.hwnd)
-            and not self.user32.IsIconic(self.hwnd)
-            and self.user32.GetForegroundWindow() == self.hwnd
-        )
+        return self.target.foreground()
 
     def capturable(self):
         """Return whether the bound window exists, is unminimized, and satisfies capture requirements."""
         return bool(
-            self.user32.IsWindow(self.hwnd)
-            and not self.user32.IsIconic(self.hwnd)
+            self.target.exists()
+            and not self.target.minimized()
             and (not self.capture_requires_foreground or self.foreground())
         )
 
     def focus_details(self):
-        hwnd = self.user32.GetForegroundWindow()
-        text = ctypes.create_unicode_buffer(1024)
-        if hwnd:
-            self.user32.GetWindowTextW(hwnd, text, len(text))
-        return {"game_hwnd": self.hwnd, "foreground_hwnd": int(hwnd or 0), "foreground_title": text.value}
+        return self.target.focus_details()
 
     def hung(self):
-        return bool(self.user32.IsWindow(self.hwnd) and self.user32.IsHungAppWindow(self.hwnd))
+        return self.target.hung()
 
     def _wait_without_session(self, ready):
         if not ready():
@@ -173,7 +118,7 @@ class ForegroundInput:
             while not ready():
                 if self.stopped():
                     raise NavigationError("任务已停止。")
-                if not self.user32.IsWindow(self.hwnd):
+                if not self.target.exists():
                     raise GameWindowClosed("连接的游戏窗口已经关闭，请重新连接。")
                 time.sleep(.05)
 

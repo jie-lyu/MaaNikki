@@ -79,6 +79,23 @@ def controller_backend(info) -> str | None:
     return None
 
 
+def connect_target(controller) -> Target:
+    """Target for the window the client connected, never an independently found one.
+
+    Controller.info is forwarded by MaaAgentServer; Toolkit enumeration is not.
+    Raises NavigationError when this host cannot drive that controller.
+    """
+    from navigation.models import NavigationError
+    if platform_backend() != "win32":
+        raise NavigationError("前台导航仅支持 Windows 游戏窗口。")
+    try:
+        info = controller.info
+    except (OSError, RuntimeError, ValueError, TypeError, AttributeError) as error:
+        raise NavigationError("无法读取当前连接的游戏窗口，请重新连接后再试。") from error
+    from host.win32.target import Win32Target
+    return Win32Target(info)
+
+
 def capabilities(backend: str | None) -> Capabilities:
     if backend == "win32":
         from host.win32 import CAPABILITIES

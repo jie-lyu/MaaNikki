@@ -358,6 +358,23 @@
    ],
    "skips": []
   },
+  "test_host.py": {
+   "tests": [
+    "ForegroundInputDelegationTests.test_capturable_requires_foreground_only_for_screen_capture",
+    "ForegroundInputDelegationTests.test_session_brings_the_game_back_through_the_target",
+    "ForegroundInputDelegationTests.test_window_handle_and_focus_come_from_the_target",
+    "SelectionTests.test_backend_follows_platform_and_controller_type",
+    "SelectionTests.test_non_windows_host_rejects_with_the_previous_message",
+    "SelectionTests.test_unreadable_info_and_invalid_window",
+    "SelectionTests.test_win32_capabilities",
+    "Win32TargetTests.test_bring_to_foreground_is_a_noop_when_focused",
+    "Win32TargetTests.test_bring_to_foreground_restores_then_releases_alt_through_maa",
+    "Win32TargetTests.test_focus_details",
+    "Win32TargetTests.test_focus_queries"
+   ],
+   "known_failures": [],
+   "skips": []
+  },
   "test_host_imports.py": {
    "tests": [
     "HostImportTests.test_registered_handlers_match_snapshot",

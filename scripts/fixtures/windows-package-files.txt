@@ -106,6 +106,7 @@ agent/host/win32/layered_surface.py
 agent/host/win32/map_overlay.py
 agent/host/win32/overlays.py
 agent/host/win32/route_overlay.py
+agent/host/win32/target.py
 agent/main.py
 agent/map_mask/__init__.py
 agent/map_mask/icons.py

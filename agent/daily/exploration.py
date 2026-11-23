@@ -104,8 +104,8 @@ class Exploration(Runtime):
                     and _resource_signature(self.ui) != initial_resources)
 
         def available():
-            return (not self.stopped and guard.user32.IsWindow(guard.hwnd)
-                    and not guard.user32.IsIconic(guard.hwnd)
+            return (not self.stopped and guard.target.exists()
+                    and not guard.target.minimized()
                     and (guard.foreground() or has_bg_helper))
 
         @measure("input.assist")
@@ -156,7 +156,7 @@ class Exploration(Runtime):
                 except GameWindowClosed:
                     raise
                 except Exception as error:
-                    if not guard.user32.IsWindow(guard.hwnd):
+                    if not guard.target.exists():
                         raise GameWindowClosed("连接的游戏窗口已经关闭，请重新连接。") from error
                     self.log(f"地图标记启动失败（{type(error).__name__}）。")
                     enabled["MapMask"] = False
@@ -165,10 +165,10 @@ class Exploration(Runtime):
                     schedule = AssistSchedule(enabled, now=time.monotonic())
             while not self.stopped:
                 checkpoint()
-                if not guard.user32.IsWindow(guard.hwnd):
+                if not guard.target.exists():
                     raise GameWindowClosed("连接的游戏窗口已经关闭，请重新连接。")
                 foreground = guard.foreground()
-                mode = ("minimized" if guard.user32.IsIconic(guard.hwnd) else
+                mode = ("minimized" if guard.target.minimized() else
                         "foreground" if foreground else
                         "background" if has_bg_helper
                         else "paused")
@@ -248,7 +248,7 @@ class Exploration(Runtime):
                     except GameWindowClosed:
                         raise
                     except Exception as error:
-                        if not guard.user32.IsWindow(guard.hwnd):
+                        if not guard.target.exists():
                             raise GameWindowClosed("连接的游戏窗口已经关闭，请重新连接。") from error
                         if resources_replaced(error):
                             raise ResourceReplaced from error
@@ -323,7 +323,7 @@ class Exploration(Runtime):
             # Closure can race a capture or PostMessage after its window check.
             # Recheck the bound HWND; focus loss and errors on a live window
             # retain their ordinary handling.
-            if not guard.user32.IsWindow(guard.hwnd):
+            if not guard.target.exists():
                 raise GameWindowClosed("连接的游戏窗口已经关闭，请重新连接。") from error
             if resources_replaced(error):
                 raise ResourceReplaced from error
