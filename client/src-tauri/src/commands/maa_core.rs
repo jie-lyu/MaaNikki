@@ -1399,6 +1399,12 @@ pub fn run_task_impl(
     instance.start_generation = instance.start_generation.wrapping_add(1);
 
     let resource = instance.resource.as_ref().ok_or("Resource not loaded")?;
+    // 已停止的 Mac 连接正在确认松开、即将释放，不再接收任务；重新连接后再运行。
+    if instance.controller_stopped
+        && matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. }))
+    {
+        return Err("Mac 控制器已停止，请重新连接后再运行。".to_string());
+    }
     let controller = instance
         .controller
         .as_ref()
@@ -1593,6 +1599,18 @@ fn confirm_macos_release(controller: &Controller) -> bool {
     ) == Some(true)
 }
 
+/// 在单独线程里丢弃句柄，最多等待 `deadline`；超过期限返回 false，丢弃在后台继续完成。
+fn dispose_with_deadline<T: Send + 'static>(handles: T, deadline: Duration) -> bool {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("dispose-controller".to_string())
+        .spawn(move || {
+            drop(handles);
+            let _ = done_tx.send(());
+        });
+    spawned.is_ok() && done_rx.recv_timeout(deadline).is_ok()
+}
+
 fn try_release_controller_handles(
     app: &tauri::AppHandle,
     state: &Arc<MaaState>,
@@ -1600,7 +1618,7 @@ fn try_release_controller_handles(
     only_if_desktop: bool,
     expected_generation: Option<u64>,
 ) -> Result<DesktopReleaseOutcome, String> {
-    let (dropped_tasker, dropped_controller, exact_key) = {
+    let (dropped_tasker, dropped_controller, exact_key, released_generation) = {
         let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
         let Some(instance) = instances.get_mut(instance_id) else {
             return if expected_generation.is_some() {
@@ -1651,24 +1669,11 @@ fn try_release_controller_handles(
             .controller_config
             .clone()
             .map(|cfg| (instance_id.to_string(), cfg));
-        (dropped_tasker, dropped_controller, exact_key)
+        (dropped_tasker, dropped_controller, exact_key, instance.start_generation)
     };
-
-    // 已停止的连接不会被复用（controller_stopped 使下次运行重新连接）；Mac 控制模块在丢弃前确认松开。
     let is_macos = exact_key
         .as_ref()
         .is_some_and(|(_, cfg)| matches!(cfg, ControllerConfig::MacOS { .. }));
-    if is_macos {
-        if let Some(controller) = dropped_controller.as_ref() {
-            if !confirm_macos_release(controller) {
-                warn!(
-                    "[ControllerRelease] macOS control unit did not confirm releasing held input for instance {}",
-                    instance_id
-                );
-                super::maa_agent::emit_agent_output(app, instance_id, "stderr", MACOS_RELEASE_UNCONFIRMED_MESSAGE);
-            }
-        }
-    }
 
     let mut pooled_controllers = Vec::new();
     if let Ok(mut pool) = state.controller_pool.lock() {
@@ -1689,6 +1694,37 @@ fn try_release_controller_handles(
                 pooled_controllers.push(ctrl);
             }
         }
+    }
+
+    if is_macos {
+        // 池中条目已移除、实例已标记为已停止：确认期间的重新启动只会建立新连接，不会复用这个控制器。
+        let confirmed = dropped_controller
+            .as_ref()
+            .map_or(true, confirm_macos_release);
+        // 原生析构会等待控制器自己的工作线程，没有期限；放到单独线程，调用方只等到期限为止。
+        let disposed = dispose_with_deadline(
+            (dropped_tasker, dropped_controller, pooled_controllers),
+            MACOS_RELEASE_CONFIRM_TIMEOUT,
+        );
+        if !confirmed || !disposed {
+            warn!(
+                "[ControllerRelease] macOS controller release not confirmed for instance {} (confirmed={}, disposed={})",
+                instance_id, confirmed, disposed
+            );
+            super::maa_agent::emit_agent_output(app, instance_id, "stderr", MACOS_RELEASE_UNCONFIRMED_MESSAGE);
+        }
+        // 确认期间若已开始新的运行，不再替它发出断开通知。
+        let current_generation = state
+            .instances
+            .lock()
+            .ok()
+            .and_then(|instances| instances.get(instance_id).map(|i| i.start_generation));
+        if current_generation != Some(released_generation) {
+            return Ok(DesktopReleaseOutcome::Aborted);
+        }
+        info!("[ControllerRelease] Released macOS controller for instance {}", instance_id);
+        super::utils::emit_state_changed(app, instance_id, "disconnected");
+        return Ok(DesktopReleaseOutcome::Released);
     }
 
     // 在锁外释放 Tasker 与 Controller，防止回调线程等待产生死锁
@@ -2047,6 +2083,23 @@ mod release_confirm_tests {
         );
         assert_eq!(result, Some(true));
         assert_eq!(poll_until_done(|| MaaStatus::FAILED, Duration::from_secs(1), Duration::from_millis(1)), Some(false));
+    }
+
+    #[test]
+    fn disposal_returns_by_the_deadline_even_if_destruction_blocks() {
+        use std::sync::{Arc, Barrier};
+        struct BlocksOnDrop(Arc<Barrier>);
+        impl Drop for BlocksOnDrop {
+            fn drop(&mut self) {
+                self.0.wait();
+            }
+        }
+        let barrier = Arc::new(Barrier::new(2));
+        let started = Instant::now();
+        assert!(!dispose_with_deadline(BlocksOnDrop(Arc::clone(&barrier)), Duration::from_millis(80)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        barrier.wait(); // let the background disposal finish
+        assert!(dispose_with_deadline(42u8, Duration::from_secs(1)));
     }
 
     #[test]
