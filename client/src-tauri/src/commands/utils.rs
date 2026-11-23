@@ -295,6 +295,18 @@ pub fn preview_task_allowed(manifest_json: &str, entry: &str) -> Result<bool, St
     Ok(entries.iter().any(|item| item.as_str() == Some(entry)))
 }
 
+/// 把 agent 的运行计划（PI_MAANIKKI_RUN_PLAN 的 JSON）中的任务入口换成实际会执行的那些；
+/// 无法解析时原样返回。
+pub fn run_plan_with_entries(plan: &str, entries: &[&str]) -> String {
+    match serde_json::from_str::<serde_json::Value>(plan) {
+        Ok(mut value) if value.is_object() => {
+            value["entries"] = serde_json::json!(entries);
+            value.to_string()
+        }
+        _ => plan.to_string(),
+    }
+}
+
 /// 当前系统不能运行该任务入口时返回原因（直接显示给用户）；能运行时返回 None。
 ///
 /// Windows 上始终放行，行为不变。macOS 只放行 agent/host/macos/preview_tasks.json 中的入口，
@@ -512,6 +524,17 @@ mod preview_task_tests {
         for entry in ["MXU_LAUNCH", "MaaNikki_StartGame", "MaaNikki_Fishing", ""] {
             assert_eq!(preview_task_allowed(manifest, entry), Ok(false), "{}", entry);
         }
+    }
+
+    #[test]
+    fn the_run_plan_lists_only_the_tasks_that_will_run() {
+        use super::run_plan_with_entries;
+        let plan = r#"{"schema_version":1,"id":"x","instance":"i","entries":["MaaNikki_Mailbox","MaaNikki_RealmChallenge"]}"#;
+        let rewritten: serde_json::Value =
+            serde_json::from_str(&run_plan_with_entries(plan, &["MaaNikki_Mailbox"])).unwrap();
+        assert_eq!(rewritten["entries"], serde_json::json!(["MaaNikki_Mailbox"]));
+        assert_eq!(rewritten["id"], "x");
+        assert_eq!(run_plan_with_entries("not json", &["a"]), "not json");
     }
 
     #[test]

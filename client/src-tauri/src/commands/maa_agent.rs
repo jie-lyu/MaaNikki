@@ -614,11 +614,38 @@ pub async fn start_tasks_impl(
     agent_configs: Option<Vec<AgentConfig>>,
     cwd: String,
     tcp_compat_mode: bool,
-    pi_envs: Option<HashMap<String, String>>,
+    mut pi_envs: Option<HashMap<String, String>>,
     reset_state: bool,
     controller_info: Option<ControllerInfo>,
 ) -> Result<Vec<i64>, String> {
     info!("start_tasks_impl called");
+
+    // 在重新连接或启动 agent 之前按当前系统筛掉不能运行的任务：全部被拒绝时直接返回原因；
+    // 部分被拒绝时，交给 agent 的运行计划只列出会执行的任务，避免被跳过的任务影响其余任务的行为。
+    // Windows 上没有任务被拒绝，不做任何改动。
+    let refusals: Vec<Option<String>> = tasks
+        .iter()
+        .map(|task| super::utils::platform_refuses_task(&task.entry))
+        .collect();
+    if refusals.iter().any(Option::is_some) {
+        if refusals.iter().all(Option::is_some) {
+            let reason = refusals.into_iter().flatten().next().unwrap_or_default();
+            emit_agent_output(&app, &instance_id, "stderr", &reason);
+            return Err(reason);
+        }
+        let accepted: Vec<&str> = tasks
+            .iter()
+            .zip(&refusals)
+            .filter(|(_, refused)| refused.is_none())
+            .map(|(task, _)| task.entry.as_str())
+            .collect();
+        pi_envs = pi_envs.map(|mut envs| {
+            if let Some(plan) = envs.get_mut("PI_MAANIKKI_RUN_PLAN") {
+                *plan = super::utils::run_plan_with_entries(plan, &accepted);
+            }
+            envs
+        });
+    }
 
     info!("instance_id: {}", instance_id);
     info!("tasks: {:?}", tasks);

@@ -1354,8 +1354,17 @@ export function Toolbar({ showAddPanel, onToggleAddPanel, className }: ToolbarPr
           ),
         );
 
+        // macOS 会跳过测试预览版未开放的任务，返回的 ID 不再与提交顺序一一对应：按后端记录的
+        // 「任务 ID → 选中任务」对应关系取名称。Windows 不会跳过任务，仍按顺序对应。
+        const macosController =
+          projectInterface?.controller.find((c) => c.name === currentControllerName)?.type === 'MacOS';
+        const selectedIdByTaskId = macosController
+          ? (await maaService.getAllStates())?.instances[targetId]?.taskRunState.mappings
+          : undefined;
         startedTaskIds.forEach((maaTaskId, index) => {
-          const runnable = runnableTasks[index];
+          const runnable = selectedIdByTaskId
+            ? runnableTasks.find((item) => item.selectedTask.id === selectedIdByTaskId[String(maaTaskId)])
+            : runnableTasks[index];
           if (!runnable) {
             return;
           }
