@@ -708,6 +708,10 @@ def cmd_scene_button_check(args) -> int:
     still = frame("still")
     ambient = _changed(start[band], still[band])
     turn_limit = max(20.0, ambient * 3 + 5)
+    if turn_limit >= 100:
+        # No change can exceed the limit: a press could never be judged, so do not send one.
+        steps.append({"step": "still frames", "ambient_changed_pct": ambient, "change_limit_pct": round(turn_limit, 1)})
+        fail("the scene changes too much while standing still to judge a turn or a recentre; nothing sent")
     if args.no_turn:
         # The camera is already turned away (checked from a capture before the run): no relative move
         # at all, the press alone is judged against the still frames.
