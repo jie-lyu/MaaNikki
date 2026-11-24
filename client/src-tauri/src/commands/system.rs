@@ -1001,6 +1001,12 @@ pub fn get_os() -> String {
     std::env::consts::OS.to_string()
 }
 
+/// 获取 Mac 任务档位（已验证、试用、不开放、说明），供界面标记任务；Windows/Linux 返回全空
+#[tauri::command]
+pub fn get_macos_task_tiers() -> super::utils::TaskTiersView {
+    super::utils::macos_task_tiers()
+}
+
 /// 获取系统信息
 #[tauri::command]
 pub fn get_system_info() -> SystemInfo {

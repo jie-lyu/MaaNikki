@@ -1,5 +1,5 @@
 {
-  "comment": "Pipeline entries the macOS preview runs, read by the agent (host.macos) and by the client before submitting tasks. entries: verified on a real Mac (add only after a device run). experimental: available on macOS but not yet verified there, marked as such where tasks are picked and when they start. excluded: entries that cannot work or are known to misbehave on macOS, with the reason shown to the user. Any entry in none of the lists is refused. docs/macos-support-plan.md has the per-task table.",
+  "comment": "Pipeline entries the macOS preview runs, read by the agent (host.macos) and by the client before submitting tasks. entries: verified on a real Mac (add only after a device run). experimental: available on macOS but not yet verified there, marked as such where tasks are picked and when they start. excluded: entries that cannot work or are known to misbehave on macOS, with the reason shown to the user. Any entry in none of the lists is refused. notes: shown to Mac users next to the task (the client only; the agent ignores them): a hint for verified entries, a visible line for experimental ones. docs/macos-support-plan.md has the per-task table.",
   "entries": [
     "MaaNikki_Mailbox",
     "MaaNikki_WeeklyFreeGifts",
@@ -50,6 +50,16 @@
   "notes": {
     "MaaNikki_WeeklyFreeGifts": "Device run 2026-11-24: three gifts found by scrolling and claimed; the distance per scroll line is not measured.",
     "MaaNikki_MonthlyPass": "Device run 2026-11-24: 旅行任务 and 旅行秘宝 claimed; 乐园构想 was locked on the test account and skipped as designed, so that path is unverified on macOS.",
-    "MaaNikki_CollectStarlightCrystals": "Added 2026-11-24 on the maintainer's decision after one supervised run: 跑图收集 matched and walked xinghai_crystal_3 (one of eight routes), collected 星之魄 3/3, 星光结晶 30/30, 星光微尘 90/100, count and full route confirmed by the maintainer. In-place turning with the middle button was not exercised. The entry also opens the 星忆晶树 branch, which has not been run on macOS; the maintainer accepted that."
+    "MaaNikki_CollectStarlightCrystals": "Added 2026-11-24 on the maintainer's decision after one supervised run: 跑图收集 matched and walked xinghai_crystal_3 (one of eight routes), collected 星之魄 3/3, 星光结晶 30/30, 星光微尘 90/100, count and full route confirmed by the maintainer. In-place turning with the middle button was not exercised. The entry also opens the 星忆晶树 branch, which has not been run on macOS; the maintainer accepted that.",
+    "MaaNikki_MinigameBling": "每次进场或付费重试消耗 100 噗灵，默认 267 轮",
+    "MaaNikki_Crown": "可选的商店兑换会按最大数量兑换",
+    "MaaNikki_Home": "可能把能力保存进能力方案的槽位（永久改动）",
+    "MaaNikki_Zhaoxi": "可能把能力保存进能力方案的槽位（永久改动）",
+    "MaaNikki_OpenWorldCollect": "可能把能力保存进能力方案的槽位（永久改动）",
+    "MaaNikki_PersistentAbilities": "可能把能力保存进能力方案的槽位（永久改动）",
+    "MaaNikki_RouteRun": "会执行所选路线文件里的动作",
+    "MaaNikki_Xinghai": "会放置摆饰、给星绘图册照片点赞；Mac 上不做聚会聊天",
+    "MaaNikki_RedeemCodes": "Mac 上只用剪贴板粘贴（游戏的粘贴按钮在 Mac 上未实测），粘贴失败的码会停下，不手动输入",
+    "MaaNikki_RealmChallenge": "素材激化需要输入数量时在 Mac 上会停止，不改用默认副本"
   }
 }

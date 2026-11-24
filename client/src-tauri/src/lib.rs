@@ -363,6 +363,7 @@ pub fn run() {
             commands::system::autostart_is_enabled,
             commands::system::get_arch,
             commands::system::get_os,
+            commands::system::get_macos_task_tiers,
             commands::system::get_system_info,
             commands::system::get_web_server_port,
             commands::system::get_local_lan_ip,

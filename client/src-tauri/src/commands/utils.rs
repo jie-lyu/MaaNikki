@@ -395,6 +395,75 @@ pub fn parse_task_tiers(manifest_json: &str) -> Result<TaskTiers, String> {
     Ok(TaskTiers { verified, experimental, excluded })
 }
 
+/// 清单里给用户看的任务说明（notes，入口到说明），可选；类型不对、空名字或空说明时报错。
+/// 只用于界面标记，不影响哪些任务能运行（运行与否只看 parse_task_tiers）。
+pub fn parse_task_notes(manifest_json: &str) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let manifest: serde_json::Value =
+        serde_json::from_str(manifest_json).map_err(|e| format!("任务清单无法解析: {}", e))?;
+    let mut notes = std::collections::BTreeMap::new();
+    if let Some(value) = manifest.get("notes") {
+        let map = value.as_object().ok_or("任务清单的 notes 无效")?;
+        for (entry, note) in map {
+            let note = note.as_str().filter(|s| !s.is_empty()).ok_or("任务清单的 notes 无效")?;
+            if entry.is_empty() {
+                return Err("任务清单的 notes 无效".to_string());
+            }
+            notes.insert(entry.clone(), note.to_string());
+        }
+    }
+    Ok(notes)
+}
+
+/// 界面用来标记任务的 Mac 任务档位（桌面命令 get_macos_task_tiers 与 GET /api/macos/task-tiers 返回）。
+/// 四个字段全空表示没有档位、不做任何标记（Windows/Linux 始终如此）；error 存在时表示 Mac 上清单读不出来，
+/// 界面显示它，此时档位为空，任务仍由 platform_refuses_task 在下发前拒绝。
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+pub struct TaskTiersView {
+    pub verified: Vec<String>,
+    pub experimental: Vec<String>,
+    pub excluded: std::collections::BTreeMap<String, String>,
+    pub notes: std::collections::BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl TaskTiersView {
+    fn unreadable(reason: &str) -> Self {
+        TaskTiersView { error: Some(format!("无法读取 Mac 任务清单（{}）", reason)), ..Default::default() }
+    }
+}
+
+/// 从清单内容得到界面用的档位；清单或其中的 notes 无效时返回只带 error 的结果。
+pub fn task_tiers_view(manifest_json: &str) -> TaskTiersView {
+    match parse_task_tiers(manifest_json).and_then(|tiers| Ok((tiers, parse_task_notes(manifest_json)?))) {
+        Ok((tiers, notes)) => TaskTiersView {
+            verified: tiers.verified,
+            experimental: tiers.experimental,
+            excluded: tiers.excluded,
+            notes,
+            error: None,
+        },
+        Err(e) => TaskTiersView::unreadable(&e),
+    }
+}
+
+/// 当前后端系统的任务档位：macOS 读取 agent/host/macos/preview_tasks.json，其他系统返回全空（不做标记）。
+pub fn macos_task_tiers() -> TaskTiersView {
+    #[cfg(target_os = "macos")]
+    {
+        match get_exe_directory().and_then(|root| {
+            std::fs::read_to_string(root.join(MACOS_PREVIEW_TASKS)).map_err(|e| e.to_string())
+        }) {
+            Ok(json) => task_tiers_view(&json),
+            Err(e) => TaskTiersView::unreadable(&e),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        TaskTiersView::default()
+    }
+}
+
 /// 该入口在 macOS 上是否可以运行（已验证或试用）；清单无效时报错。
 pub fn preview_task_allowed(manifest_json: &str, entry: &str) -> Result<bool, String> {
     let tiers = parse_task_tiers(manifest_json)?;
@@ -677,6 +746,62 @@ mod preview_task_tests {
         assert!(!extra_tasks_allow("MaaNikki_Dig", "MaaNikki_Di"));
         assert!(!extra_tasks_allow("", ""));
         assert!(!extra_tasks_allow(" , ", ""));
+    }
+
+    #[test]
+    fn the_shared_manifest_gives_the_ui_its_tiers_and_notes() {
+        let manifest = include_str!("../../../../agent/host/macos/preview_tasks.json");
+        let view = super::task_tiers_view(manifest);
+        assert_eq!(view.error, None);
+        assert_eq!(view.verified, super::parse_task_tiers(manifest).unwrap().verified);
+        assert!(view.experimental.iter().any(|e| e == "MaaNikki_MinigameBling"));
+        assert!(view.excluded.contains_key("MaaNikki_StartGame"));
+        assert!(view.notes.contains_key("MaaNikki_CollectStarlightCrystals"));
+        // Every experimental entry with consequences carries its note, so the UI has one source for them.
+        for entry in ["MaaNikki_MinigameBling", "MaaNikki_Crown", "MaaNikki_Home", "MaaNikki_Zhaoxi",
+                      "MaaNikki_OpenWorldCollect", "MaaNikki_PersistentAbilities", "MaaNikki_RouteRun",
+                      "MaaNikki_Xinghai", "MaaNikki_RedeemCodes", "MaaNikki_RealmChallenge"] {
+            assert!(view.experimental.iter().any(|e| e == entry), "{}", entry);
+            assert!(view.notes.contains_key(entry), "{}", entry);
+        }
+        let json = serde_json::to_value(&view).unwrap();
+        assert!(json.get("error").is_none());
+        assert!(json["notes"].is_object() && json["excluded"].is_object());
+    }
+
+    #[test]
+    fn an_unreadable_manifest_gives_the_ui_an_error_and_no_tiers() {
+        use super::task_tiers_view;
+        for bad in ["not json", "{}", r#"{"entries":["A"],"notes":["x"]}"#, r#"{"entries":["A"],"notes":{"A":""}}"#,
+                    r#"{"entries":["A"],"notes":{"A":1}}"#] {
+            let view = task_tiers_view(bad);
+            assert!(view.error.as_deref().unwrap_or("").starts_with("无法读取 Mac 任务清单"), "{}", bad);
+            assert!(view.verified.is_empty() && view.experimental.is_empty() && view.excluded.is_empty()
+                && view.notes.is_empty(), "{}", bad);
+        }
+        let view = task_tiers_view(r#"{"entries":["A"]}"#);
+        assert_eq!(view.error, None);
+        assert!(view.notes.is_empty());
+    }
+
+    /// The Windows contract: no tiers, no markings.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn other_platforms_get_no_tiers() {
+        let view = super::macos_task_tiers();
+        assert_eq!(view, super::TaskTiersView::default());
+        assert_eq!(serde_json::to_value(&view).unwrap(),
+                   serde_json::json!({ "verified": [], "experimental": [], "excluded": {}, "notes": {} }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_reads_the_shipped_manifest() {
+        if std::env::var_os("MAANIKKI_DEV_HOME").is_some() {
+            return; // A dev home holds its own copy of the manifest.
+        }
+        let manifest = include_str!("../../../../agent/host/macos/preview_tasks.json");
+        assert_eq!(super::macos_task_tiers(), super::task_tiers_view(manifest));
     }
 
     #[test]

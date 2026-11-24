@@ -305,6 +305,7 @@ pub async fn start_web_server(
         .route("/heartbeat", get(handle_heartbeat))
         // 系统信息
         .route("/system/is-elevated", get(handle_is_elevated))
+        .route("/macos/task-tiers", get(handle_get_macos_task_tiers))
         .route(
             "/system/restart-as-admin",
             axum::routing::post(handle_restart_as_admin),
@@ -1296,6 +1297,12 @@ async fn handle_is_elevated() -> impl IntoResponse {
         "elevated": crate::commands::system::is_elevated(),
     }))
     .into_response()
+}
+
+/// GET /api/macos/task-tiers
+/// 返回后端系统的 Mac 任务档位（与 get_macos_task_tiers 命令相同）；Windows/Linux 全空，清单读不出来时带 error
+async fn handle_get_macos_task_tiers() -> impl IntoResponse {
+    Json(crate::commands::utils::macos_task_tiers()).into_response()
 }
 
 /// POST /api/system/restart-as-admin
