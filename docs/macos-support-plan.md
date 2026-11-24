@@ -486,6 +486,11 @@ CI（fork `jie-lyu/MaaNikki`）：三个测试工作流都只由 PR 或手动触
 - 客户端直接启动内置 Python 作为子进程，系统权限预计归属到 MaaNikki 应用本身；需要在从访达启动的安装上实测每一项权限显示的应用名。
 - 没有 Developer ID 时使用临时签名，对外标注为测试预览。拿到付费账号后再做签名、公证和装订，并测试升级后授权是否保留。
 - 镜像在确认 `darwin/arm64` 映射后再启用。
+- 测试包（2026-11-24 起）：`scripts/macos_package.py` 组装、临时签名并检查 `.app` 与 DMG，`verify` 只在 Apple silicon 上运行内置 Python 并确认运行后签名不变；`.github/workflows/test-build-macos.yml` 在 PR 加 `test-build-macos` 标签或手动触发时于 Intel runner 交叉编译，只上传 artifact。包内的布局：
+  - 只读内容放在 `Contents/Resources`：interface.json、agent、resource、tasks、`maafw/`（官方 5.16.1 运行时加补丁单元）、`python/`（python-build-standalone 3.12.10 加 `build/macos/runtime.lock.json` 锁定的 arm64 wheel，字节码预编译）。客户端在 macOS 发布构建里从应用包的 `Contents/Resources` 读取资源。
+  - 写入的数据仍在 `~/Library/Application Support/MaaNikki`。
+- 测试包与 Windows 正式版共用版本号，所以 `build/macos/test-build-overlay.json` 去掉了 telemetry、statistics、mirrorchyan_rid、github 四项（打包时强制检查），窗口标题写明「Mac 测试版」和提交号。agent 用 `-I -B -X utf8` 启动，不受用户的 `PYTHON*` 变量影响，也不往签名后的包里写字节码。macOS 发布构建拒绝一切应用内更新安装，Mac 只用完整 DMG 更新。仍会联网的有游戏数据后台更新、幻境预测，以及用户主动使用的功能。给测试者的说明见 [Mac 测试版使用说明](macos-test-build.md)。
+- 发布 CI 产出的包之前，要在 Apple silicon 上对同一个 DMG（按 SHA-256 核对）运行 `verify`，并用包内的单元（`maafw/control-unit.json` 记录了它的 SHA-256）和官方主库跑生命周期探针（风险 11）。
 
 ## 风险
 
@@ -507,6 +512,7 @@ CI（fork `jie-lyu/MaaNikki`）：三个测试工作流都只由 PR 或手动触
 14. 场景鼠标键要求系统光标在游戏窗口内（控制单元按光标当前位置按下，不移动光标），而每次界面点击后单元把光标放回用户原位；Windows 上场景键直接发给前台窗口，没有这个前提。用户把光标留在另一块显示器、Dock 或菜单栏上时，攻击、能力、捕虫、收杆和中键回正都会被拒。单用户正常操作就能碰到（例如在另一块显示器上的客户端里按「开始」），放开任何用场景键的任务（星海、家园、朝夕）之前要处理：候选是用不产生事件的 `CGWarpMouseCursorPosition` 把光标放进窗口再按，或者在开始前检查并提示；目前只作为实机测试的前置条件（「实机测试计划」中「场景键与光标位置」）。
 15. 场景键被拒时，Mac 上的导航会中断而不是降级：`ForegroundInput.mouse_down` 在 `press_mouse` 返回失败时抛出「鼠标动作输入失败」，`engine._press_middle_align` 从不返回 False，`_wasd_snap_camera` 和 `recheck_heading` 里的退路不会执行，路线停止。Windows 上同一路径同样会抛出，但 `SendInput` 几乎不会失败。2026-11-24 已处理最常见的一种：Mac 后端能确定单元会拒绝（系统光标在游戏窗口之外）时，`_can_middle_align()` 直接报告中键回正不可用（导航日志记一次 `middle_align_unavailable`），三处调用都改走已有的路径，不发送中键（会发方向键；原地两次短按转得太少时，前台路径还会改用相对镜头转向，看日志时要知道这一点）；Windows 的输入后端没有这个判断，行为不变。仍会中断的情况：检查之后光标才移出、前台或命中测试被拒等，这些按原样报错停止。左键、右键（攻击、能力、捕虫、收杆、摆放与收回）没有键盘退路，光标在窗口外时照样被拒；2026-11-24 起这种情况下不再报笼统的「鼠标动作输入失败」，而是在按下之前就报「鼠标指针不在游戏画面内……请把鼠标指针移回游戏窗口后重新开始」，什么都不按（Windows 的输入后端没有这个判断，行为不变）；按经 Codex 复审的意见，暂不自动移动用户的光标，若以后需要，放进控制单元（它已负责命中测试、取消和光标放回），并先实机验证镜头和放回。钓鱼收线中途被拒同样会从 `reel_in` 抛出（推断）。
 16. 定时运行的轮询是串行的（原有限制，Windows 同样存在，不是 Mac 改动引入的）：`ScheduleService.check` 在等某个实例的开始回调返回期间持有 `checking`，此间的轮询直接跳过。如果第一个时间槽的开始回调一直没返回，到下一分钟的最后一次轮询时还在等，那次轮询就被跳过，可能漏掉另一个实例在那一分钟的时间槽。Codex 在 2026-11-24 把回调卡住 30 秒复现出来。前提：某一次定时开始的回调一直没返回，并且一直占到下一分钟里有到点时间槽的最后一次轮询。单实例也可能漏掉自己的下一个时间槽：只要开始回调到该时间槽的最后一次轮询时仍未返回（例如还在等控制器连接，界面尚未把实例标为运行中），即使稍后启动成功，也不会补跑。Mac 上任务清单读取期间的等待另有处理：被停掉时什么都不记，重启后照常只跑一次。
+17. 游戏数据后台更新（`client/src-tauri/src/commands/data_update.rs`）：客户端启动 3 秒后检查一次，之后每 6 小时一次，从 `architect9331/MaaNikki-data` 下载识别用的 JSON、npz 和 ONNX 模型。文件按清单里的 sha256 校验，只写入数据目录的 `data_overlay`，不包含代码。但清单本身没有签名，经 gh-proxy 镜像取到的清单只要格式有效也会被接受，所以镜像可以换掉识别数据和模型。这是既有行为，Windows 同样存在，没有设置可以关闭，Mac 测试包也保留了它（2026-11-24 编排方决定）。
 
 ## 附录：实机验证记录
 
