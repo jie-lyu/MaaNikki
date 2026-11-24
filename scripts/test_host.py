@@ -389,9 +389,10 @@ class MacOSBackendTests(unittest.TestCase):
         capabilities = host.capabilities("macos")
         self.assertEqual(capabilities.backend, "macos")
         self.assertTrue(capabilities.foreground_input)
+        self.assertTrue(capabilities.clipboard)  # NSPasteboard text for redeem codes
         self.assertFalse(any((capabilities.background_input, capabilities.overlay, capabilities.tall_window,
                               capabilities.work_area_bounds, capabilities.launch_game, capabilities.close_game,
-                              capabilities.clipboard, capabilities.credential_store)))
+                              capabilities.credential_store)))
         import client_config
         mac = {"type": "MacOS", "macos": {"screencap": "DisplayWindow", "input": "Hybrid"}}
         with patch.object(host, "platform_backend", return_value="macos"):
@@ -676,7 +677,36 @@ class SelectionTests(unittest.TestCase):
         with patch.object(host, "platform_backend", return_value="win32"):
             self.assertTrue(callable(host.clipboard().get_clipboard_text))
             self.assertTrue(callable(host.clipboard().set_clipboard_text))
+            self.assertEqual(host.clipboard().__name__, "host.win32.clipboard")
             self.assertTrue(callable(host.credential_store().credentials))
+        with patch.object(host, "platform_backend", return_value="macos"):
+            # Importing the module loads nothing native; the runtime is bound on first use.
+            self.assertEqual(host.clipboard().__name__, "host.macos.clipboard")
+            with self.assertRaisesRegex(RuntimeError, "登录信息"):
+                host.credential_store()
+
+    @unittest.skipUnless(sys.platform == "darwin", "NSPasteboard exists only on macOS")
+    def test_macos_clipboard_round_trips_text_on_a_private_pasteboard(self):
+        # A uniquely named pasteboard, released afterwards: the user's clipboard is never touched.
+        import uuid
+        from host.macos import clipboard as module
+        rt = module._runtime()
+        cf = rt["cf"]
+        name = f"com.maanikki.test.{uuid.uuid4()}".encode()
+        ref = cf.CFStringCreateWithBytes(None, name, len(name), module._UTF8, False)
+        send, sel = rt["named"]
+        board = send(rt["class"], sel, ref)
+        self.assertTrue(board)
+        try:
+            with patch.object(module, "_board", lambda rt: board):
+                self.assertEqual(module.get_clipboard_text(), (False, ""))  # no text: nothing to restore
+                for text in ("ABCD1234", "兑换码 测试 ✓"):
+                    self.assertTrue(module.set_clipboard_text(text))
+                    self.assertEqual(module.get_clipboard_text(), (True, text))
+        finally:
+            send, sel = rt["release_globally"]
+            send(board, sel)
+            cf.CFRelease(ref)
 
     def test_task_code_reaches_clipboard_and_credentials_through_the_host(self):
         from daily import redeem_codes

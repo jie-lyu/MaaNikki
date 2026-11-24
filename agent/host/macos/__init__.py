@@ -5,10 +5,11 @@ import json
 
 from host import Capabilities
 
-# Foreground only: no background input, overlays, window resizing, launching or closing the game,
-# clipboard or credential store yet. Click targets are bounded by the frame; the patched control
-# unit refuses a click that the Dock, the menu bar or another window would receive.
-CAPABILITIES = Capabilities("macos", foreground_input=True)
+# Foreground only: no background input, overlays, window resizing, launching or closing the game or
+# credential store yet. Click targets are bounded by the frame; the patched control unit refuses a
+# click that the Dock, the menu bar or another window would receive. Clipboard text (redeem codes)
+# goes through the general NSPasteboard (host/macos/clipboard.py).
+CAPABILITIES = Capabilities("macos", foreground_input=True, clipboard=True)
 
 
 # Pipeline entries of the tasks the preview runs, from agent/host/macos/preview_tasks.json under

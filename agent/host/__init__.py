@@ -260,8 +260,12 @@ def game_close_api():
 
 def clipboard():
     """Module with get_clipboard_text() and set_clipboard_text() for this desktop."""
-    if not capabilities(platform_backend()).clipboard:
+    backend = platform_backend()
+    if not capabilities(backend).clipboard:
         raise RuntimeError("当前系统不支持读写剪贴板。")
+    if backend == "macos":
+        from host.macos import clipboard as module
+        return module
     from host.win32 import clipboard as module
     return module
 
