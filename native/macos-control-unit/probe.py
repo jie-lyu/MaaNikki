@@ -645,6 +645,10 @@ KEY_SEQUENCES = {
     "starsea-fall": (("down", 49), ("wait", 0.1587), ("up", 49), ("wait", 0.2323), ("down", 12), ("wait", 0.1004),
                      ("up", 12)),
 }
+# How each sequence's waits are timed, as the agent times them: face_camera() starts its 80 ms clock before
+# submitting W (submission counts toward the pulse); the route macro runner waits the full step after the
+# press has returned.
+WAIT_INCLUDES_SUBMISSION = {"face-camera": True, "starsea-fall": False}
 SEQUENCE_EXPECTED = {
     "face-camera": "The character should turn to face the camera's direction, moving at most a step.",
     "starsea-fall": "The character should jump and then plunge (急坠) straight down.",
@@ -707,9 +711,9 @@ def cmd_key_sequence_check(args) -> int:
         for kind, value in KEY_SEQUENCES[args.sequence]:
             at = round(time.perf_counter() - began, 3)
             if kind == "wait":
-                # Like the agent's holds: the clock starts before the preceding press is submitted, so the
-                # submission time counts toward the wait.
-                origin = down_started if down_started is not None else time.perf_counter()
+                # Timed as the agent times this sequence (WAIT_INCLUDES_SUBMISSION).
+                from_submission = WAIT_INCLUDES_SUBMISSION[args.sequence] and down_started is not None
+                origin = down_started if from_submission else time.perf_counter()
                 time.sleep(max(0.0, value - (time.perf_counter() - origin)))
                 down_started = None
                 continue

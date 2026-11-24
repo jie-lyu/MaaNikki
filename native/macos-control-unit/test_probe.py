@@ -359,6 +359,29 @@ class KeySequenceCheckTests(unittest.TestCase):
         self.assertIn("release of key(s) [13] was not confirmed", output)
         self.assertIn("NOT confirmed", output)
 
+    def slow_ack_run(self, name):
+        clock = {"t": 0.0}
+        slept = []
+
+        class SlowAck(FakeController):
+            def post_key_down(self, key):
+                clock["t"] += 0.06  # a 60 ms acknowledgement
+                return super().post_key_down(key)
+
+        def sleep(seconds):
+            slept.append(round(seconds, 4))
+            clock["t"] += seconds
+        with mock.patch.object(probe.time, "perf_counter", lambda: clock["t"]):
+            code, output, frames = run(["--sequence", name], SlowAck(), command="key-sequence-check", sleep=sleep)
+        return code, output, frames, slept
+
+    def test_starsea_fall_waits_the_full_steps_after_each_press_returns_like_the_macro_runner(self):
+        code, output, _, slept = self.slow_ack_run("starsea-fall")
+        self.assertEqual(code, 0, output)
+        self.assertIn(0.1587, slept)
+        self.assertIn(0.2323, slept)
+        self.assertIn(0.1004, slept)
+
     def test_face_camera_counts_the_submission_time_toward_the_80_ms_pulse(self):
         clock = {"t": 0.0}
         slept = []
