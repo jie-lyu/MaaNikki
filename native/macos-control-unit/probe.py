@@ -587,25 +587,31 @@ def cmd_camera_check(args) -> int:
             fail(f"the unit refused {name} (game not in front?)")
         return after
 
-    if args.option:
-        # An experiment on the Option key, not the navigation order (navigation sends no Option on
-        # macOS): Option, then a 1-pixel move to spend the move the game swallows after Option
-        # (device, 2026-11-24), then the turn.
-        option_press("option-before-turn")
-        after_option = _cursor()  # Option moves the pointer to the window centre
-        steps.append({"step": "cursor after Option", "cursor": after_option})
+    if args.option or args.absorb:
+        if args.option:
+            # An experiment on the Option key, not the navigation order (navigation sends no Option on
+            # macOS): Option, then a 1-pixel move to spend the move the game swallows after Option
+            # (device, 2026-11-24), then the turn.
+            option_press("option-before-turn")
+            before_absorb = _cursor()  # Option moves the pointer to the window centre
+            steps.append({"step": "cursor after Option", "cursor": before_absorb})
+        else:
+            # --absorb alone (drift investigation): does a 1-pixel move first (at most half a point of drag)
+            # keep the following +/-PIXELS from moving the real pointer?
+            before_absorb = _cursor()
+            steps.append({"step": "cursor before the absorbing move", "cursor": before_absorb})
         if not controller.post_relative_move(1, 0).wait().succeeded:
             fail("the unit refused the absorbing move")
         time.sleep(0.4)
         absorbed = _cursor()
         steps.append({"step": "absorbing move +1", "cursor": absorbed,
-                      "cursor_moved_by": (round(absorbed[0] - after_option[0], 1), round(absorbed[1] - after_option[1], 1))})
-        if (abs(absorbed[0] - after_option[0]) > 1 or abs(absorbed[1] - after_option[1]) > 1) and not args.record_cursor:
+                      "cursor_moved_by": (round(absorbed[0] - before_absorb[0], 1), round(absorbed[1] - before_absorb[1], 1))})
+        if (abs(absorbed[0] - before_absorb[0]) > 1 or abs(absorbed[1] - before_absorb[1]) > 1) and not args.record_cursor:
             fail("the real cursor moved after the absorbing move: relative moves must not move it")
         start = frame("after-absorb")
 
     # Every step is judged before the next input is sent: the first anomaly stops the probe.
-    baseline = _cursor()  # after Option, which moves the pointer to the window centre
+    baseline = _cursor()  # after Option (which moves the pointer to the window centre) and the absorbing move
     steps.append({"step": "cursor baseline", "cursor": baseline})
     previous = baseline
     for sign, name in ((1, f"relative move +{args.pixels}"), (-1, f"relative move -{args.pixels}")):
@@ -1173,6 +1179,12 @@ def cmd_hover_check(args) -> int:
 
 SCENE_PRESS_PRESSURE = 0x4D4E5343  # HybridInput::kScenePressPressure: press where the cursor is, no hover
 SCENE_BUTTONS = {"left": 0, "right": 1, "middle": 2}
+# --turn-key: a side direction key pulsed for as long as the navigation engine pulses a 90-degree sector before
+# its middle-button recentre (agent/navigation/engine.py _wasd_snap_camera: 0.10 + 0.00083 * |sector|), then the
+# middle press right after the release, as the engine does. macOS key codes A 0, D 2.
+TURN_KEYS = {"a": 0, "d": 2}
+TURN_KEY_SECTOR_DEG = 90.0
+TURN_KEY_PULSE_S = round(0.10 + 0.00083 * TURN_KEY_SECTOR_DEG, 4)
 SCENE_BUTTON_EXPECTED = {
     "middle": "The camera should swing back behind the character.",
     "left": "The character should purify (净化) once per press; nothing else should be hit.",
@@ -1268,6 +1280,9 @@ def cmd_scene_button_check(args) -> int:
 
     if _profile != "maanikki":
         sys.exit("scene-button-check exercises the patched unit; pass --profile maanikki")
+    if args.turn_key and (args.button != "middle" or args.no_turn or args.with_forward):
+        sys.exit("--turn-key replaces the relative turn before a middle press; it cannot go with another button, "
+                 "--no-turn or --with-forward. Nothing sent")
     out = Path(args.out).resolve()
     if out.exists() and any(out.iterdir()):
         sys.exit(f"{out} is not empty")
@@ -1383,7 +1398,23 @@ def cmd_scene_button_check(args) -> int:
     # undo). Left (净化) and right (the selected ability) act on their own; their result is judged
     # from the saved frames.
     middle = args.button == "middle"
-    if args.no_turn or not middle:
+    if args.turn_key:
+        # The character turns to the side (the camera stays): the recentre should then swing the camera behind her
+        # new facing. Judged from the frames; the middle press follows the release directly, like the engine.
+        code = TURN_KEYS[args.turn_key]
+        sent = False
+        try:
+            sent = controller.post_key_down(code).wait().succeeded
+            down_at = time.perf_counter()
+            time.sleep(max(0.0, TURN_KEY_PULSE_S - (time.perf_counter() - down_at)))
+        finally:
+            release(lambda: controller.post_key_up(code), args.turn_key.upper())
+        if not sent:
+            fail(f"the unit refused {args.turn_key.upper()}; no button pressed")
+        turned = still
+        steps.append({"step": f"{args.turn_key.upper()} pulse", "pulse_s": TURN_KEY_PULSE_S, "released": True,
+                      "ambient_changed_pct": ambient, "change_limit_pct": round(turn_limit, 1)})
+    elif args.no_turn or not middle:
         turned = still
         steps.append({"step": "no turn", "ambient_changed_pct": ambient, "change_limit_pct": round(turn_limit, 1)})
     elif not controller.post_relative_move(args.pixels, 0).wait().succeeded:
@@ -1454,7 +1485,8 @@ def cmd_scene_button_check(args) -> int:
     if abs(after_cursor[0] - cursor[0]) > 1 or abs(after_cursor[1] - cursor[1]) > 1:
         fail("the real cursor moved: a scene press must not move it")
     if middle and not args.with_forward and (
-            steps[-1]["scene_changed_pct"] < 1 or (args.no_turn and steps[-1]["scene_changed_pct"] <= turn_limit)):
+            steps[-1]["scene_changed_pct"] < 1
+            or ((args.no_turn or args.turn_key) and steps[-1]["scene_changed_pct"] <= turn_limit)):
         fail(f"no recentre observed: the {args.button} press was accepted but the screen changed no more than standing still")
     steps.append({"verdict": "needs_review", "frames": str(out)})
     print(json.dumps(steps, ensure_ascii=False, indent=2))
@@ -1509,6 +1541,9 @@ def main() -> int:
                                  help="scene button to press where the cursor is (middle: the camera recentre)")
             command.add_argument("--no-turn", action="store_true",
                                  help="no relative move: the camera is already turned away; judge the press alone")
+            command.add_argument("--turn-key", choices=sorted(TURN_KEYS),
+                                 help=f"middle only: instead of the relative move, pulse this side key for {TURN_KEY_PULSE_S} s "
+                                      "(the engine's 90-degree pulse) and press middle right after, as navigation does")
             command.add_argument("--hold", type=_hold_seconds, default=HOLD_RANGE_S[0],
                                  help=f"seconds each press is held ({HOLD_RANGE_S[0]}-{HOLD_RANGE_S[1]})")
             command.add_argument("--repeat", type=int, choices=range(1, REPEAT_MAX + 1), default=1, metavar=f"1-{REPEAT_MAX}",
@@ -1524,6 +1559,8 @@ def main() -> int:
                                  help="record real-pointer movement after each move instead of stopping (drift investigation)")
             command.add_argument("--option", action="store_true",
                                  help="experiment: Option, a 1-pixel absorbing move, the turn, Option again (navigation sends no Option on macOS)")
+            command.add_argument("--absorb", action="store_true",
+                                 help="drift investigation: a 1-pixel absorbing move before the turn, without Option")
         if name == "input-check":
             command.add_argument("--release", action="store_true",
                                  help="also hold W across a controller destroy (the character walks briefly)")

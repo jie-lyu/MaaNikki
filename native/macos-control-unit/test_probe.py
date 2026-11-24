@@ -150,6 +150,34 @@ class SceneButtonCheckTests(unittest.TestCase):
         self.assertEqual(controller.events, [("move", 400, 0), down(2), ("up", 2)])
         self.assertIn("needs_review", output)
 
+    def test_turn_key_pulses_the_side_key_like_the_engine_then_presses_middle(self):
+        for key, code in (("a", 0), ("d", 2)):
+            with self.subTest(key=key):
+                controller = FakeController()
+                slept = []
+                code_, output, _ = run(["--turn-key", key], controller, sleep=slept.append)
+                self.assertEqual(code_, 0, output)
+                # No relative move: the side key, its release, then the middle press right after.
+                self.assertEqual(controller.events, [("key_down", code), ("key_up", code), down(2), ("up", 2)])
+                self.assertEqual(probe.TURN_KEY_PULSE_S, round(0.10 + 0.00083 * 90, 4))  # engine.py, a 90-degree sector
+                self.assertTrue(any(abs(s - probe.TURN_KEY_PULSE_S) < 0.01 for s in slept), slept)
+                self.assertIn(f'"step": "{key.upper()} pulse"', output)
+
+    def test_turn_key_is_refused_with_other_buttons_and_modes_before_anything_is_sent(self):
+        for extra in (["--button", "left"], ["--no-turn"], ["--with-forward"]):
+            with self.subTest(extra=extra):
+                controller = FakeController()
+                code, output, _ = run(["--turn-key", "a", *extra], controller)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(controller.events, [])
+
+    def test_a_refused_turn_key_presses_nothing_and_is_still_released(self):
+        controller = FakeController(refuse_keys={0})
+        code, output, _ = run(["--turn-key", "a"], controller)
+        self.assertEqual(code, 1)
+        self.assertIn("refused A", output)
+        self.assertEqual(controller.events, [("key_down", 0), ("key_up", 0)])
+
     def test_left_and_right_press_without_a_turn(self):
         for button, contact, extra in (("left", 0, []), ("right", 1, ["--expect-ability", "insect"])):
             with self.subTest(button=button):
@@ -447,6 +475,23 @@ class CameraCheckCursorTests(unittest.TestCase):
         self.assertEqual(controller.events[1], ("move", 1, 0))
         self.assertIn('"step": "absorbing move +1"', output)
         self.assertIn('"cursor_moved_by": [\n      0.5', output)
+
+    def test_absorb_alone_sends_one_pixel_before_the_turn_and_no_option(self):
+        controller = FakeController()
+        code, output, _ = run(["--record-cursor", "--absorb"], controller, cursor=self.dragging_cursor(controller),
+                              command="camera-check")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(controller.events, [("move", 1, 0), ("move", 400, 0), ("move", -400, 0)])
+        self.assertIn('"step": "cursor before the absorbing move"', output)
+        self.assertIn('"cursor_moved_by": [\n      0.5', output)
+
+    def test_absorb_without_record_cursor_stops_when_the_absorbing_move_drags_the_pointer(self):
+        controller = FakeController()
+        drag = lambda: (100.0 + sum(3 * e[1] for e in controller.events if e[0] == "move"), 100.0)  # noqa: E731
+        code, output, _ = run(["--absorb"], controller, cursor=drag, command="camera-check")
+        self.assertEqual(code, 1)
+        self.assertEqual(controller.events, [("move", 1, 0)])
+        self.assertIn("after the absorbing move", output)
 
     def test_without_the_flag_a_moved_cursor_still_stops_the_check(self):
         controller = FakeController()
