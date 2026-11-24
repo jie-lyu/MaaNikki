@@ -285,13 +285,13 @@ CI（fork `jie-lyu/MaaNikki`）：三个测试工作流都只由 PR 或手动触
   - `logs/navigation/<时间>-route-test/events.jsonl`：导航事件（`camera_probe`、`camera_calibrated`、`camera_turn`、`forward`、`arrived` 等）。
   - `debug/mxu-tauri.log`：客户端 Rust 端日志（控制器连接、`start_tasks`、任务完成、`Released macOS controller` 等）；开发客户端的标准输出里也有这些，但只有启动时重定向了才留得下。
   - `debug/<日期>-<序号>.log`：客户端前端日志（加载 interface、实例与任务分发）。
-  - `debug/mxu-agent-0-<进程号>.log`：agent 的标准错误。
+  - `debug/mxu-agent-<agent 序号>-<进程号>.log`：agent 的标准输出和标准错误（行首标 `[stdout]`、`[stderr]`；现在只有一个 agent，序号是 0）。
   - `debug/maafw.bak.*.log`：`maafw.log` 轮转出来的旧文件，查早先的运行要连它们一起搜。
 - 控制单元的日志行：`hover settled, press accepted`（各阶段用时：`first_check_ms` 及其中的 `hit_test_ms`、`settle_ms` 悬停等待、`second_check_ms`、`press_ms`、`total_ms`）、`release posted [... cursor=restored]`（光标放回结果）、`scroll posted [lines_y=…] [restored=…]`、`hover moved`、`scene press accepted [contact=…]`、`press abandoned after the hover`（带原因）。拒绝时是 `ERR` 行，写明原因（不在前台、命中测试指向别的进程、几何变了等）。
-- 开发探针 `native/macos-control-unit/probe.py`（用法以文件开头的说明和 `--help` 为准；除 `windows` 外都要 `--runtime .build/macos-control-unit/runtime-patched`，连接游戏用 `--game`，连接别的窗口用 `--window ID`）：
-  - 不发输入：`windows`（列窗口）；`capture --out <新空目录>`（存一张原始尺寸、一张 720 短边的帧）；`lifecycle --log-dir <新空目录> --expect-unit <build.json 里的 SHA-256>`（连接、截图、销毁，检查加载的单元和每次 Create 都有 Destroy，不接受 `--out`）；`hit-test --profile maanikki --out <目录>`（用单元的截图几何映射一组点，问命中测试会落到哪个进程）。
+- 开发探针 `native/macos-control-unit/probe.py`（用法以文件开头的说明和 `--help` 为准；`--profile` 默认是 `stock`，即官方截图与输入路径，要测补丁的方法必须写 `--profile maanikki`；除 `windows` 外都要 `--runtime .build/macos-control-unit/runtime-patched`，连接游戏用 `--game`，连接别的窗口用 `--window ID`）：
+  - 不发输入：`windows`（列窗口）；`capture --profile maanikki --out <新空目录>`（存一张原始尺寸、一张 720 短边的帧）；`lifecycle --profile maanikki --log-dir <新空目录> --expect-unit <build.json 里的 SHA-256>`（连接、截图、销毁，检查加载的单元和每次 Create 都有 Destroy，不接受 `--out`）；`hit-test --profile maanikki --out <目录>`（用单元的截图几何映射一组点，问命中测试会落到哪个进程）。
   - 发输入，都要维护者批准，带 `--profile maanikki --game --out <新空目录>`：`input-check`（M、点大地图返回；加 `--release` 才会按住 W 后销毁控制器，W 的判定只是筛查，要看画面）；`camera-check`（相对位移 ±400；`--option` 是 Option 实验）；`scene-button-check`（场景鼠标键，`--button left|middle|right`，默认中键；`--no-turn` 在镜头已转开时只按一次）。左右键的参数已经有了，缺的是不需要衣服、不消耗东西的游戏动作和判据。
-  - `refusal-check --window <ID>`：**只对一个不在前台的一次性窗口用**，它确实会提交一次点击、一次 F13 和一次相对位移，期望单元全部拒绝；如果那个应用在运行中跑到了前台，输入就是真的发出去了。
+  - `refusal-check --profile maanikki --window <ID> --out <新空目录>`：**只对一个不在前台的一次性窗口用**，它确实会提交一次点击、一次 F13 和一次相对位移，期望单元全部拒绝；如果那个应用在运行中跑到了前台，输入就是真的发出去了。
 - 一个能用的日志监视必须盯 `debug/maafw.log` 本身，匹配：`游戏已离开前台|游戏已回到前台|press accepted|release posted|scroll posted|scene press|abandoned|not sending|Tasker.Task.(Succeeded|Failed)`，并确认它在运行（我设的两个监视都无声失败过：一个匹配词没覆盖实际日志，一个写到了标准错误）。最可靠的做法是运行结束后直接读日志。
 
 ### 验证情况（2026-11-24）
@@ -328,7 +328,7 @@ CI（fork `jie-lyu/MaaNikki`）：三个测试工作流都只由 PR 或手动触
 
 - 开发目录直接运行**工作区里的** agent 和资源：实机会话期间工作区要始终是可以直接跑的状态，不能留半截改动；跑之前告诉编排方比已签核的 tip 多了哪些提交。改了控制单元要重新构建运行时并**重启客户端**才会加载（已加载的单元留在进程内存里）。
 - 维护者是远程操作这台 Mac 的：远程会话断开后 Mac 会锁屏，游戏失去前台，正在跑的任务按设计暂停，解锁后游戏一回到前台就自动继续（风险 13）。
-- 「开始」要维护者自己在客户端里按；用无头浏览器点网页端没有成功。截图、改配置文件、重启客户端可以由我们做，但重启的前提是配置里 `autoRunOnLaunch` 为 false（本机现在是 false，`autoStartInstanceId` 未设）：如果勾了「手动启动时也自动执行」并选了实例，客户端一启动就会派发任务，不用任何人按「开始」（`client/src/App.tsx` 里 `shouldAutoRun`）。满足这个前提时重启不向游戏发任何东西，事前事后各截一张图作证。
+- 「开始」要维护者自己在客户端里按；用无头浏览器点网页端没有成功。截图、改配置文件、重启客户端可以由我们做，但重启有三个前提：按上面的 `tauri dev` 命令手动启动；配置里 `autoRunOnLaunch` 为 false（本机现在是 false，`autoStartInstanceId` 未设），否则勾了「手动启动时也自动执行」并选了实例时客户端一启动就会派发任务，不用任何人按「开始」（`client/src/App.tsx` 里 `shouldAutoRun`）；测试时段没有启用的定时任务（配置里的 `schedulePolicies`，本机现在没有），因为调度器启动时会立即检查一次（`client/src/services/scheduleService.ts`）。满足这些前提时重启不向游戏发任何东西，事前事后各截一张图作证。
 - 游戏重启后窗口 id 会变，客户端实例的连接要重新连接（开始任务时会重连）。
 
 ### 完整日常：「全套日常」实例的任务（按实例顺序）
