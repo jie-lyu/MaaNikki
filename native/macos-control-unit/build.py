@@ -282,7 +282,10 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     shutil.copy2(unit, out / UNIT)
     manifest = {"maafw": LOCK["maafw"]["tag"], "commit": LOCK["maafw"]["commit"],
-                "patches": applied, "sha256": sha256(out / UNIT), "architecture": LOCK["build"]["architecture"],
+                "patches": applied,
+                # Contents, not just names: the package checks the unit against the patches in its tree.
+                "patch_sha256": {name: sha256(HERE / "patches" / name) for name in applied},
+                "sha256": sha256(out / UNIT), "architecture": LOCK["build"]["architecture"],
                 # Whether this build also ran the input tests natively on the shipped architecture.
                 "input_tests": ("skipped (--unit-only)" if args.unit_only
                                 else "not built (stock)" if args.stock

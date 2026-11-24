@@ -168,10 +168,11 @@ def check_runtime(runtime: Path, unit_manifest: dict) -> None:
     for name, expected in stock.items():
         if name.endswith(".dylib") and name != UNIT and sha256(runtime / name) != expected:
             sys.exit(f"{runtime / name} does not match the official runtime in upstream.lock.json")
-    expected_patches = sorted(path.name for path in (ROOT / "native" / "macos-control-unit" / "patches").glob("*.patch"))
-    if unit_manifest.get("patches") != expected_patches:
-        sys.exit(f"the unit was built from patches {unit_manifest.get('patches')}, the tree has {expected_patches}; "
-                 "rebuild it with native/macos-control-unit/build.py")
+    patches = sorted((ROOT / "native" / "macos-control-unit" / "patches").glob("*.patch"))
+    expected = {path.name: sha256(path) for path in patches}
+    if unit_manifest.get("patches") != list(expected) or unit_manifest.get("patch_sha256") != expected:
+        sys.exit(f"the unit was built from other patches than the tree's {list(expected)} (names or contents "
+                 "differ, or the manifest predates patch hashes); rebuild it with native/macos-control-unit/build.py")
     if sha256(runtime / UNIT) != unit_manifest["sha256"]:
         sys.exit(f"{runtime / UNIT} is not the unit described by the manifest")
     if unit_manifest.get("architecture") != "arm64":
@@ -306,9 +307,19 @@ def check_macho(binary: Path, app: Path, universal: list[str], bundle_ids: set[s
     own_id = {line.strip() for line in macho_output("otool", "-arch", "arm64", "-D", binary)[1:]}
     dependencies = [line.split()[0] for line in macho_output("otool", "-arch", "arm64", "-L", binary)[1:]]
     dependencies = [dependency for dependency in dependencies if dependency not in own_id]
+    resources = app / "Contents" / "Resources"
+    # Who loads the file decides @executable_path: the embedded Python for python/, the client otherwise.
+    executable_dir = (resources / "python" / "bin" if binary.is_relative_to(resources / "python")
+                      else app / "Contents" / "MacOS")
     for dependency in dependencies:
         if not dependency.startswith(ALLOWED_LINK_PREFIXES):
             problems.append(f"{relative}: links {dependency}, which a tester's Mac will not have")
+            continue
+        for prefix, base in (("@loader_path/", binary.parent), ("@executable_path/", executable_dir)):
+            if dependency.startswith(prefix):
+                target = base / dependency.removeprefix(prefix)
+                if not (target.is_file() and target.resolve().is_relative_to(app.resolve())):
+                    problems.append(f"{relative}: {dependency} is missing from the bundle")
     load_commands = macho_output("otool", "-arch", "arm64", "-l", binary)
     rpaths = [load_commands[i + 2].split()[1] for i, line in enumerate(load_commands)
               if line.strip() == "cmd LC_RPATH"]
@@ -360,6 +371,9 @@ def sign(app: Path, binaries: list[Path]) -> list[Path]:
     """
     # Extended attributes (quarantine, Finder info) make codesign refuse to sign.
     run("xattr", "-cr", app)
+    # Archives (the official runtime zip among them) carry group- and world-writable modes; an
+    # installed app must not let other users replace its libraries.
+    run("chmod", "-R", "go-w", app)
     main = app / "Contents" / "MacOS"
     unsigned = [path for path in binaries if path.parent != main and not validly_signed(path)]
     for start in range(0, len(unsigned), 200):
@@ -514,9 +528,23 @@ def verify(dmg: Path, scratch: Path) -> None:
            "PYTHONIOENCODING": "utf-8", "MAAFW_BINARY_PATH": str(resources / "maafw"),
            "MAANIKKI_RESOURCE_ROOT": str(resources), "MAANIKKI_DATA_ROOT": str(data_root)}
     # No -B: if anything tried to write bytecode into the bundle, the signature check below fails.
-    run(python, "-c", VERIFY_RUNTIME, json.dumps(lock), cwd=resources, env=env)
-    run(python, "-c", "import runpy; runpy.run_path('agent/main.py', run_name='maanikki_import_check'); "
+    # The client's -B (child_args) is a second line of defence, not what this check relies on.
+    # -I and UTF-8 mode as the client runs it (packaged interface.json child_args); no -B here.
+    run(python, "-I", "-X", "utf8", "-c", VERIFY_RUNTIME, json.dumps(lock), cwd=resources, env=env)
+    run(python, "-I", "-X", "utf8", "-c", "import runpy; runpy.run_path('agent/main.py', run_name='maanikki_import_check'); "
         "print('agent imports and action/recognition registrations verified')", cwd=resources, env=env)
+    # Once more the way the client starts the agent (the packaged child_args flags), in a hostile
+    # environment: PYTHONOPTIMIZE would make Python write new .opt pycs into the bundle, PYTHONPATH and
+    # a user site would shadow the locked wheels. The flags must neutralise all three.
+    agent = read_json(resources / "interface.json")["agent"]
+    flags = agent["child_args"][:agent["child_args"].index("./agent/main.py")]
+    shadow = scratch / "shadow"
+    (shadow / "numpy").mkdir(parents=True)
+    (shadow / "numpy" / "__init__.py").write_text("raise ImportError('shadowed numpy was imported')\n", encoding="utf-8")
+    hostile = dict(env, PYTHONOPTIMIZE="1", PYTHONPATH=str(shadow), PYTHONUSERBASE=str(shadow),
+                   PYTHONDONTWRITEBYTECODE="")
+    run(python, *flags, "-c", "import runpy, numpy; runpy.run_path('agent/main.py', run_name='maanikki_import_check'); "
+        "print('agent imports with the client flags in a hostile environment')", cwd=resources, env=hostile)
     run("codesign", "--verify", "--deep", "--strict", "--verbose=2", app)
     print(f"verified {dmg.name}: the bundle is unchanged after running the embedded Python", flush=True)
 
