@@ -364,6 +364,7 @@ class Navigator:
         self._middle_cursor_pos = False
         self._middle_consecutive_failures = 0
         self._middle_disabled_until = -math.inf
+        self._middle_blocked_reported = False  # one middle_align_unavailable event per blocked stretch
         self._last_wasd_snap_at = -math.inf
         self._cursor_released = False
 
@@ -740,7 +741,18 @@ class Navigator:
         if hasattr(self.inputs, "click_window_middle"):
             return True
         fg = getattr(self.inputs, "foreground", None)
-        return bool(hasattr(self.inputs, "click_mouse") and callable(fg) and fg())
+        if not (hasattr(self.inputs, "click_mouse") and callable(fg) and fg()):
+            return False
+        # macOS: a press the unit would refuse (cursor outside the game window) would raise and stop the
+        # route; report the alignment unavailable so the callers' keyboard fallbacks run. Win32: never.
+        blocked = getattr(self.inputs, "scene_press_blocked", None)
+        if callable(blocked) and blocked():
+            if not self._middle_blocked_reported:
+                self._middle_blocked_reported = True
+                self.event({"type": "middle_align_unavailable", "reason": "cursor_outside_window"})
+            return False
+        self._middle_blocked_reported = False
+        return True
 
     def _press_middle_align(self, *, with_cursor_pos: bool) -> bool:
         """Click the middle mouse button without stealing OS focus."""

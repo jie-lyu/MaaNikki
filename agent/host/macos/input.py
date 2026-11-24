@@ -51,6 +51,21 @@ class MacOSInput:
         return bool(controller.post_touch_down(x=0, y=0, contact=button,
                                                pressure=SCENE_PRESS_PRESSURE).wait().succeeded)
 
+    def scene_press_blocked(self) -> bool:
+        """True only when the unit is known to refuse a scene press: the cursor is outside the window.
+
+        The unit presses where the cursor is and refuses unless it is over the connected window (it
+        never moves the cursor: in the scene that would turn the camera). Optional presses such as
+        navigation's middle-button alignment check this first and take their keyboard fallback instead
+        of failing the route. Unknown positions return False and leave the decision to the unit.
+        """
+        point = self.quartz.cursor()
+        window = self.target._window()
+        if point is None or window is None:
+            return False
+        x, y, width, height = window.bounds
+        return not (x <= point[0] < x + width and y <= point[1] < y + height)
+
     def post_window_key(self, key: int, *, down: bool) -> bool:
         return False
 

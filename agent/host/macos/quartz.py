@@ -78,6 +78,10 @@ def _cg():
     cg.CGEventCreateKeyboardEvent.restype = ctypes.c_void_p
     cg.CGEventPostToPid.argtypes = [ctypes.c_int32, ctypes.c_void_p]
     cg.CGEventPostToPid.restype = None
+    cg.CGEventCreate.argtypes = [ctypes.c_void_p]
+    cg.CGEventCreate.restype = ctypes.c_void_p
+    cg.CGEventGetLocation.argtypes = [ctypes.c_void_p]
+    cg.CGEventGetLocation.restype = CGPoint
     return cg
 
 
@@ -197,6 +201,19 @@ def bundle_identifier(pid: int) -> str:
             cf.CFRelease(ref)
     finally:
         cf.CFRelease(url)
+
+
+def cursor() -> tuple[float, float] | None:
+    """The system cursor in global points (top-left origin), or None when it cannot be read."""
+    cf, cg = _cf(), _cg()
+    event = cg.CGEventCreate(None)
+    if not event:
+        return None
+    try:
+        point = cg.CGEventGetLocation(event)
+        return point.x, point.y
+    finally:
+        cf.CFRelease(event)
 
 
 def post_key(pid: int, keycode: int, *, down: bool) -> bool:

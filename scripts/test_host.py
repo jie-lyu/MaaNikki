@@ -193,6 +193,7 @@ class FakeQuartz:
         self.WindowInfo = WindowInfo
         self.windows = {4242: WindowInfo(4242, pid, title, (0.0, 0.0, 1920.0, 1080.0), True)}
         self.bundle, self.front, self.posted = bundle, front, []
+        self.pointer = (100.0, 100.0)  # the system cursor, global points
 
     def window(self, window_id):
         return self.windows.get(window_id)
@@ -209,6 +210,9 @@ class FakeQuartz:
     def post_key(self, pid, keycode, *, down):
         self.posted.append((pid, keycode, down))
         return True
+
+    def cursor(self):
+        return self.pointer
 
 
 class MacOSBackendTests(unittest.TestCase):
@@ -963,6 +967,116 @@ class ForegroundInputDelegationTests(unittest.TestCase):
         adapter.target.bring_to_foreground.return_value = True
         self.assertTrue(ForegroundSession._bring_to_foreground(adapter))
         adapter.target.bring_to_foreground.assert_called_once_with(adapter.controller)
+
+
+class MiddleAlignFallbackTests(unittest.TestCase):
+    """macOS: a scene press the unit would refuse (cursor outside the game window) must not stop navigation;
+    the optional middle-button alignment is reported unavailable and the keyboard fallbacks run."""
+
+    def mac_input(self, quartz):
+        from host.macos.input import MacOSInput
+        return MacOSInput(MacOSBackendTests.mac_target(self, quartz))
+
+    def test_the_mac_backend_blocks_only_a_cursor_known_to_be_outside_the_window(self):
+        quartz = FakeQuartz()
+        native = self.mac_input(quartz)
+        for pointer, blocked in (((100.0, 100.0), False), ((1919.0, 1079.0), False), ((1920.0, 500.0), True),
+                                 ((-1.0, 500.0), True), ((500.0, 2000.0), True), (None, False)):
+            with self.subTest(pointer=pointer):
+                quartz.pointer = pointer
+                self.assertIs(native.scene_press_blocked(), blocked)
+        quartz.pointer = (5000.0, 0.0)
+        quartz.windows.clear()  # window gone: unknown, the unit decides
+        self.assertFalse(native.scene_press_blocked())
+
+    def test_foreground_input_asks_the_backend_and_win32_never_blocks(self):
+        from navigation.controller import ForegroundInput
+        inputs = ForegroundInput.__new__(ForegroundInput)
+        inputs.native = SimpleNamespace()  # Win32Input has no such notion
+        self.assertFalse(inputs.scene_press_blocked())
+        inputs.native = SimpleNamespace(scene_press_blocked=lambda: True)
+        self.assertTrue(inputs.scene_press_blocked())
+
+    class Inputs:
+        """Foreground inputs whose turns move a shared heading; counts middle presses."""
+        window_only = False
+
+        def __init__(self, state, blocked):
+            self.state, self.blocked, self.clicks, self.holds = state, blocked, 0, []
+
+        def check(self):
+            pass
+
+        def release(self):
+            pass
+
+        def ready(self):
+            return True
+
+        def foreground(self):
+            return True
+
+        def click_mouse(self, button):
+            self.clicks += 1
+            return True
+
+        def hold(self, key, seconds, restore=True):
+            self.holds.append(key)
+            self.state["heading"] = (self.state["heading"] + (45 if key == "right" else -45)) % 360
+
+    def navigator(self, blocked, *, has_check=True):
+        from navigation.engine import Navigator
+        from navigation.vision import Pose
+        state = {"heading": 0.0}
+        inputs = self.Inputs(state, blocked)
+        if has_check:
+            inputs.scene_press_blocked = lambda: inputs.blocked
+        events = []
+        locator = Mock(heading_diagnostics={})
+        navigator = Navigator(locator, inputs, Mock(), lambda: False, Mock(return_value=True),
+                              event=events.append, wasd_mode=True)
+        navigator.motion = None
+        pose = lambda: Pose(0, 0, 1, 1, state["heading"], 1)
+        navigator.stable_heading = lambda previous, deadline=None: pose()
+        return navigator, inputs, events, pose
+
+    def test_the_gate_reports_once_per_blocked_stretch_and_is_unchanged_without_the_check(self):
+        navigator, inputs, events, _ = self.navigator(blocked=True)
+        self.assertFalse(navigator._can_middle_align())
+        self.assertFalse(navigator._can_middle_align())
+        self.assertEqual([e["type"] for e in events], ["middle_align_unavailable"])
+        inputs.blocked = False
+        self.assertTrue(navigator._can_middle_align())
+        inputs.blocked = True
+        self.assertFalse(navigator._can_middle_align())
+        self.assertEqual(len(events), 2)
+        navigator, _, events, _ = self.navigator(blocked=True, has_check=False)  # Win32 inputs
+        self.assertTrue(navigator._can_middle_align())
+        self.assertEqual(events, [])
+
+    def test_a_stationary_turn_falls_back_to_keys_without_pressing(self):
+        navigator, inputs, events, pose = self.navigator(blocked=True)
+        result = navigator._wasd_turn_stationary(90, pose())
+        self.assertEqual(result.heading, 90)
+        self.assertEqual(inputs.clicks, 0)
+        self.assertEqual(inputs.holds, ["right", "right"])
+
+    def test_a_heading_recheck_probes_with_keys_without_pressing(self):
+        from navigation.engine import HeadingUncertain
+        navigator, inputs, events, pose = self.navigator(blocked=True)
+        navigator.locator.heading_diagnostics = {"method": "heading_uncertain", "position_reliable": True}
+        readings = iter([HeadingUncertain("unreadable"), None])
+
+        def stable_heading(previous, deadline=None):
+            reading = next(readings)
+            if reading is not None:
+                raise reading
+            return pose()
+        navigator.stable_heading = stable_heading
+        import time as clock
+        self.assertEqual(navigator.recheck_heading(pose(), clock.monotonic() + 10).heading, 45)
+        self.assertEqual(inputs.clicks, 0)
+        self.assertEqual(inputs.holds, ["right"])
 
 
 if __name__ == "__main__":

@@ -198,6 +198,12 @@ class ForegroundInput:
         finally:
             self.release_mouse(button)
 
+    def scene_press_blocked(self):
+        """Whether the backend knows a scene button press would be refused right now (macOS: the cursor
+        is outside the game window). Backends without the notion (Win32) never block."""
+        blocked = getattr(self.native, "scene_press_blocked", None)
+        return bool(blocked()) if callable(blocked) else False
+
     def force_key_up(self, key):
         # Cleanup only: do not require a working Agent channel or refocus.
         self.native.force_key_up(key)
