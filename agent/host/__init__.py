@@ -47,10 +47,10 @@ class Capabilities:
     tall_window: bool = False  # 16:9 healing and the temporary tall scan window
     work_area_bounds: bool = False  # click targets clipped to the monitor work area (taskbar, off-screen)
     pointer_hover: bool = False  # the cursor may rest on a UI control before and after a click
-    # The game keeps a cursor mode that the Alt binding leaves before camera turns (Windows). On macOS the
-    # key shows the pointer while held, leaves no lasting mode, and makes the game swallow the next
+    # Navigation presses Alt once before camera turns to leave the game's cursor mode (Windows). On macOS
+    # the key shows the pointer while held, leaves no lasting mode, and makes the game swallow the next
     # relative move (device investigation, 2026-11-24).
-    cursor_mode_key: bool = False
+    requires_alt_before_camera: bool = False
     launch_game: bool = False
     close_game: bool = False
     clipboard: bool = False

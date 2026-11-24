@@ -360,20 +360,30 @@ class MacOSBackendTests(unittest.TestCase):
         self.assertFalse(older.press_mouse(1))  # a patch-2 unit would hover-move and turn the camera
         self.assertEqual(controller.post_touch_down.call_count, 1)
 
-    def test_cursor_release_key_only_where_the_game_keeps_a_cursor_mode(self):
+    def test_alt_before_camera_turns_only_where_the_backend_requires_it(self):
         from navigation.engine import Navigator
-        def released(name):
+        def run(name, *, window_only=False, succeeded=True, reset=False):
             controller = Mock()
-            controller.post_click_key.return_value.wait.return_value.succeeded = True
-            nav = SimpleNamespace(_cursor_released=False, inputs=SimpleNamespace(controller=controller, window_only=False))
+            controller.post_click_key.return_value.wait.return_value.succeeded = succeeded
+            nav = SimpleNamespace(_cursor_released=False, inputs=SimpleNamespace(controller=controller, window_only=window_only))
             with backend(name):
                 Navigator._ensure_cursor_released(nav)
                 Navigator._ensure_cursor_released(nav)  # once per release state
+                if reset:  # a pause or a point action clears the state
+                    nav._cursor_released = False
+                    Navigator._ensure_cursor_released(nav)
             return nav._cursor_released, [call.args for call in controller.post_click_key.call_args_list]
-        self.assertEqual(released("win32"), (True, [(18,)]))  # Windows: Alt once, unchanged
-        self.assertEqual(released("macos"), (True, []))        # macOS: no key, the next move is not swallowed
-        self.assertTrue(host.capabilities("win32").cursor_mode_key)
-        self.assertFalse(host.capabilities("macos").cursor_mode_key)
+        # Windows, unchanged: Alt once, again after a reset, never for window-only input, a failure raises.
+        self.assertEqual(run("win32"), (True, [(18,)]))
+        self.assertEqual(run("win32", reset=True), (True, [(18,), (18,)]))
+        self.assertEqual(run("win32", window_only=True), (False, []))
+        with self.assertRaisesRegex(NavigationError, "光标模式"):
+            run("win32", succeeded=False)
+        # macOS: no key at all, also after a reset; the next camera move is not swallowed.
+        self.assertEqual(run("macos"), (True, []))
+        self.assertEqual(run("macos", reset=True), (True, []))
+        self.assertTrue(host.capabilities("win32").requires_alt_before_camera)
+        self.assertFalse(host.capabilities("macos").requires_alt_before_camera)
 
     def test_macos_capabilities_and_saved_controller_rule(self):
         capabilities = host.capabilities("macos")
