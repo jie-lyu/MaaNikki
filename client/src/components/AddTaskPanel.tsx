@@ -24,6 +24,8 @@ import {
   addTaskPanelResizeStep,
 } from '@/types/config';
 import { Tooltip } from './ui/Tooltip';
+import { MacTaskBadge, macTaskHint, macTaskNoteLine } from './MacTaskMarks';
+import { macExcludedText, macTaskMark, type MacTaskMark } from '@/utils/macTaskTiers';
 import type { TaskItem, ActionConfig, GroupItem, PretaskItem } from '@/types/interface';
 import type { MxuSpecialTaskDefinition } from '@/types/specialTasks';
 import {
@@ -54,6 +56,7 @@ function TaskButton({
   disabled,
   incompatibleReason,
   supportedControllerHint,
+  macMark = null,
   onClick,
 }: {
   task: TaskItem;
@@ -66,6 +69,8 @@ function TaskButton({
   disabled?: boolean;
   incompatibleReason?: string;
   supportedControllerHint?: string;
+  /** Mac tier mark (macOS only; null on Windows). */
+  macMark?: MacTaskMark | null;
   onClick: () => void;
 }) {
   const { t } = useTranslation();
@@ -82,11 +87,15 @@ function TaskButton({
   );
 
   const hasDescription = !!resolvedDescription.html || resolvedDescription.loading;
+  const macHint = macTaskHint(macMark);
+  const macNote = macTaskNoteLine(macMark);
 
   // 构建 Tooltip 内容
   const tooltipContent =
-    hasDescription || (disabled && incompatibleReason) ? (
+    hasDescription || (disabled && incompatibleReason) || macHint ? (
       <div className="space-y-2">
+        {/* Mac 试用 / 说明提示（仅 macOS） */}
+        {macHint && <div className="whitespace-pre-line text-warning">{macHint}</div>}
         {/* 任务描述 */}
         {resolvedDescription.loading ? (
           <div className="flex items-center gap-1.5 text-text-muted">
@@ -139,7 +148,15 @@ function TaskButton({
           </span>
         )}
         <Plus className={clsx('w-4 h-4 shrink-0', disabled ? 'text-text-muted' : 'text-accent')} />
-        <span className="min-w-0 flex-1 whitespace-normal [overflow-wrap:anywhere]">{label}</span>
+        {macNote ? (
+          <span className="min-w-0 flex-1">
+            <span className="block whitespace-normal [overflow-wrap:anywhere]">{label}</span>
+            <span className="mt-0.5 block text-[11px] leading-4 text-warning">{macNote}</span>
+          </span>
+        ) : (
+          <span className="min-w-0 flex-1 whitespace-normal [overflow-wrap:anywhere]">{label}</span>
+        )}
+        <MacTaskBadge mark={macMark} plain />
         {badge && (
           <span
             className={clsx(
@@ -192,6 +209,7 @@ export function AddTaskPanel() {
     resolveI18nText,
     language,
     basePath,
+    macTaskTiers,
     registerTaskIdName,
     // 新增任务标记
     newTaskNames,
@@ -554,6 +572,9 @@ export function AddTaskPanel() {
     const label = resolveI18nText(task.label, langKey) || task.name;
     const isNew = newTaskNames.includes(task.name);
     const { isIncompatible, reason, supportedControllerHint } = getTaskCompatibility(task);
+    // macOS：不开放的任务禁用并写明原因；Windows 上没有档位，macMark 为 null
+    const macMark = macTaskMark(macTaskTiers, task.entry);
+    const macExcluded = macExcludedText(macMark);
 
     return (
       <TaskButton
@@ -564,9 +585,10 @@ export function AddTaskPanel() {
         label={label}
         langKey={langKey}
         basePath={basePath}
-        disabled={isIncompatible}
-        incompatibleReason={reason}
+        disabled={isIncompatible || !!macExcluded}
+        incompatibleReason={[macExcluded, reason].filter(Boolean).join('；')}
         supportedControllerHint={supportedControllerHint}
+        macMark={macMark}
         onClick={() => handleAddTask(task.name)}
       />
     );
@@ -815,6 +837,14 @@ export function AddTaskPanel() {
         </div>
       </div>
 
+      {/* Mac 任务清单读不出来时的提示（仅 macOS；此时所有任务都会在下发前被拒绝） */}
+      {macTaskTiers?.error && (
+        <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-border text-xs text-warning">
+          <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+          <span>{macTaskTiers.error}</span>
+        </div>
+      )}
+
       {/* 任务列表（包含特殊任务） */}
       <div className="overflow-y-auto" style={{ maxHeight: addTaskPanelHeight }}>
         {filteredTasks.length === 0 && !instance ? (
@@ -905,13 +935,18 @@ export function AddTaskPanel() {
                     </button>
                     {/* 动态渲染所有注册的特殊任务按钮 */}
                     {specialTasks.map((specialTask) => {
+                      // macOS 不运行 MXU 内置任务（不在 Mac 任务清单中），禁用并写明原因；Windows 不变
+                      const macExcluded = macExcludedText(macTaskMark(macTaskTiers, specialTask.entry));
                       return (
                         <button
                           key={specialTask.taskName}
-                          onClick={() => handleAddSpecialTask(specialTask)}
+                          onClick={() => !macExcluded && handleAddSpecialTask(specialTask)}
+                          disabled={macExcluded ? true : undefined}
+                          title={macExcluded || undefined}
                           className={clsx(
                             'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs transition-colors',
                             'bg-bg-secondary/70 hover:bg-bg-hover text-text-secondary border border-border/70 hover:border-accent',
+                            macExcluded && 'opacity-50 cursor-not-allowed',
                           )}
                         >
                           <span>{t(specialTask.taskDef.label || specialTask.taskName)}</span>

@@ -8,6 +8,7 @@ import { RouteEditorPage } from '@/components/routes/RouteEditorPage';
 import { monitorResonance } from '@/services/resonanceService';
 import { monitorPearpal } from '@/services/pearpalService';
 import { explorationOwnsWindow, initializeExploration, monitorExploration, useExplorationStore } from '@/services/explorationService';
+import { loadMacTaskTiers } from '@/services/macTaskTiersService';
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import {
   useAppStore,
@@ -710,6 +711,13 @@ function App() {
       setDataPath(result.dataPath);
       // 缓存后端真实 OS/架构，供控制器过滤、更新资产匹配、useCmd 开关等消费
       if (result.backendOS) setBackendOS(result.backendOS, result.backendArch ?? '');
+      // Mac 任务档位（已验证 / 试用 / 不开放及说明）只在 macOS 后端加载；Windows 不请求，也不做任何标记
+      if (result.backendOS === 'macos') {
+        void loadMacTaskTiers().then((tiers) => {
+          useAppStore.getState().setMacTaskTiers(tiers);
+          if (tiers.error) toast.error(tiers.error, { id: 'mac-task-tiers' });
+        });
+      }
 
       // 设置翻译
       for (const [lang, trans] of Object.entries(result.translations)) {

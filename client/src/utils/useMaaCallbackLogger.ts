@@ -23,6 +23,7 @@ import {
 } from '@/services/contentResolver';
 import { hasRichTextFeatures } from '@/utils/richText';
 import { taskFailureHint } from '@/utils/taskFailureHints';
+import { MAC_EXPERIMENTAL_STARTED, macTaskMark } from '@/utils/macTaskTiers';
 import { withTimeout } from '@/utils/withTimeout';
 import { subscribeBackendEvent } from '@/utils/backendEvent';
 import type { FocusTemplate, FocusDisplayChannel } from '@/types/interface';
@@ -525,6 +526,11 @@ function handleCallback(
           name: taskName || details.entry || '',
         }),
       });
+      // macOS 试用任务（尚未在 Mac 上实机验证）开始时提示一次；Task.Starting 每个提交的任务只有一次，
+      // 定时运行也走这里。Windows 上没有档位，不会出现。
+      if (macTaskMark(useAppStore.getState().macTaskTiers, details.entry)?.tier === 'experimental') {
+        addLog(instanceId, { type: 'warning', message: MAC_EXPERIMENTAL_STARTED });
+      }
       break;
     }
 
