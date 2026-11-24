@@ -1369,6 +1369,8 @@ class Executors(Runtime):
             return options.get("allow_energy", True)
         if rule.key == "chat" and not options.get("allow_chat", False):
             return False
+        if rule.key == "chat" and not capabilities(platform_backend()).text_input:
+            return False  # macOS: public chat needs text input, not yet verified there
         if rule.key == "bubble" and not options.get("bubble_equipped", False):
             return False
         if rule.executor == "crystal":
@@ -1556,6 +1558,11 @@ class Executors(Runtime):
         return True
 
     def chat(self, mode):
+        if not capabilities(platform_backend()).text_input:
+            # Before sitting down or opening the channel: nothing is committed.
+            self.log("聚会聊天需要文字输入，Mac 版尚未验证，已跳过。")
+            return False
+
         def sit_on_couch():
             for _ in range(2):
                 if not self.main() or not self._wait_world_prompt(PROMPTS["chat"]):
@@ -2174,6 +2181,11 @@ class Executors(Runtime):
             if abs(desired - current) <= (45 if is_kg_unit else 8):
                 adjusted = step_adjust(current, desired)
             else:
+                if not capabilities(platform_backend()).text_input:
+                    from host import UnsupportedInput
+                    # Before clicking the field or Ctrl+A: a plain failure here would let the realm queue spend the
+                    # remaining energy on the default realm.
+                    raise UnsupportedInput(f"Mac 版暂不支持输入数量（需要从 {current} 改为 {desired}）")
                 if not self.action("Click", target=input_box):
                     return False
                 active = self._active_inputs()

@@ -1045,6 +1045,77 @@ class MacTextInputTests(unittest.TestCase):
         self.assertEqual(state["sent"], ["abc"])
 
 
+class MacTextGateTests(unittest.TestCase):
+    """macOS: sub-options that need typed text refuse before any committing input; Win32 is unchanged."""
+
+    def test_xinghai_chat_is_unavailable_and_refused_before_sitting_down(self):
+        from daily.runtime import Executors
+        from daily.planner import Card, XINGHAI
+        chat = next(rule for rule in XINGHAI if rule.key == "chat")
+        rt = Executors.__new__(Executors)
+        rt.task_selected = Mock(return_value=True)
+        rt.setting = Mock(return_value={"auto_complete": True, "allow_chat": True})
+        card = Card(1, "聚会", chat)
+        with backend("macos"):
+            self.assertFalse(rt.available("xinghai", card))
+        with backend("win32"):
+            self.assertTrue(rt.available("xinghai", card))
+        rt.log, rt.main, rt.key, rt._wait_world_prompt, rt.action = Mock(), Mock(), Mock(), Mock(), Mock()
+        with backend("macos"):
+            self.assertFalse(rt.chat("xinghai"))
+        for untouched in (rt.main, rt.key, rt._wait_world_prompt, rt.action):
+            untouched.assert_not_called()
+
+    def test_redeem_stops_the_code_instead_of_typing_it(self):
+        from daily import redeem_codes
+        codes = redeem_codes.RedeemCodes.__new__(redeem_codes.RedeemCodes)
+        codes.rt = SimpleNamespace(action=Mock(return_value=True), pause=Mock(return_value=True),
+                                   hit=Mock(return_value=True), input_text=Mock(return_value=True), log=Mock())
+        with backend("macos"), patch.object(redeem_codes, "set_clipboard_text", return_value=False):
+            self.assertFalse(codes._fill_code("ABCD1234"))
+        codes.rt.action.assert_not_called()  # neither the paste button nor the input box
+        codes.rt.input_text.assert_not_called()
+        with backend("win32"), patch.object(redeem_codes, "set_clipboard_text", return_value=False):
+            codes._fill_code("ABCD1234")
+        codes.rt.action.assert_any_call("Click", target=redeem_codes.INPUT_BOX_TARGET)
+
+    def runtime_for_amount(self):
+        from daily.runtime import Executors
+        rt = Executors.__new__(Executors)
+        rt.context = SimpleNamespace(get_node_data=lambda node: {"roi": [600, 300, 80, 30]})
+        rt.recognize = lambda *a, **k: SimpleNamespace(hit=True, best_result=SimpleNamespace(text="1"))
+        rt.frame = Mock(return_value=None)
+        rt.action = Mock(return_value=False)
+        rt.log, rt.diagnostic, rt.text = Mock(), Mock(), Mock(return_value="")
+        rt.pause = Mock(return_value=True)
+        rt._active_inputs, rt._use_window_input = Mock(return_value=None), Mock(return_value=False)
+        return rt
+
+    def test_a_typed_realm_amount_is_refused_before_the_field_is_clicked(self):
+        from host import UnsupportedInput
+        rt = self.runtime_for_amount()
+        with backend("macos"), self.assertRaisesRegex(UnsupportedInput, "暂不支持输入数量"):
+            rt.set_amount("jihua", 0, desired_count=20)  # 1 -> 20: beyond the +/- steps
+        rt.action.assert_not_called()
+        rt = self.runtime_for_amount()
+        with backend("win32"):
+            self.assertFalse(rt.set_amount("jihua", 0, desired_count=20))
+        self.assertEqual(rt.action.call_args_list[0].args[0], "Click")  # Windows still clicks the field first
+
+    def test_the_realm_queue_spends_nothing_on_an_unsupported_amount(self):
+        from action import realm_queue
+        from host import UnsupportedInput
+        rt = SimpleNamespace(log=Mock(), stopped=False, diagnostic=Mock())
+        context = Mock()
+        with patch.object(realm_queue, "Executors", return_value=rt), \
+                patch.object(realm_queue, "parameters", return_value={"order": "jihua"}), \
+                patch.object(realm_queue, "run_double_priority", side_effect=UnsupportedInput("Mac 版暂不支持输入数量")):
+            result = realm_queue.RealmQueueAction().run(context, SimpleNamespace(node_name="MaaNikki_RealmQueue"))
+        self.assertFalse(result)
+        context.override_pipeline.assert_not_called()  # no hand-off to the default realm
+        self.assertIn("剩余活跃能量未使用", rt.log.call_args.args[0])
+
+
 class MiddleAlignFallbackTests(unittest.TestCase):
     """macOS: a scene press the unit would refuse (cursor outside the game window) must not stop navigation;
     the optional middle-button alignment is reported unavailable and the keyboard fallbacks run."""

@@ -377,6 +377,11 @@ class RedeemCodes:
                 return False
             pasted = not self.rt.hit("MaaNikki_Redeem_ModalPlaceholder")
         if not pasted:
+            from host import capabilities, platform_backend
+            if not capabilities(platform_backend()).text_input:
+                # Stop this code before focusing the box or pressing 兑换: no typing fallback on macOS yet.
+                self.rt.log("兑换码未能通过剪贴板粘贴；Mac 版尚未验证文字输入，不改用手动输入。")
+                return False
             if not (self.rt.action("Click", target=INPUT_BOX_TARGET)
                     and self.rt.pause(0.25)
                     and self.rt.input_text(code)

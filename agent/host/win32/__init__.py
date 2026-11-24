@@ -16,6 +16,7 @@ CAPABILITIES = Capabilities(
     close_game=True,
     clipboard=True,
     credential_store=True,
+    text_input=True,
 )
 
 

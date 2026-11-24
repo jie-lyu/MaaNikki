@@ -54,10 +54,19 @@ class Capabilities:
     launch_game: bool = False
     close_game: bool = False
     clipboard: bool = False
+    # Typing a string into a game text field (InputText). macOS posts one character per request (patch 4) but is not
+    # yet device-verified there, so text-dependent sub-options refuse before any committing input.
+    text_input: bool = False
     credential_store: bool = False
 
 
 UNSUPPORTED = Capabilities("unsupported")
+
+
+class UnsupportedInput(Exception):
+    """An input this desktop cannot send yet. Deliberately not an OSError/RuntimeError/ValueError: callers that turn
+    those into a fallback (for example the realm queue spending the remaining energy on the default realm) must not
+    catch it; the task stops instead."""
 
 
 class Target(Protocol):

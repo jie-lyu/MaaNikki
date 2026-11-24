@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import traceback
+
+from host import UnsupportedInput
 import cv2
 from maa.custom_action import CustomAction
 
@@ -83,6 +85,10 @@ class RealmQueueAction(CustomAction):
                     handoff = "done"
         except TaskStopped:
             raise
+        except UnsupportedInput as error:
+            # No fallback: the default realm would spend the remaining energy the user did not choose.
+            rt.log(f"幻境挑战停止：{error}。剩余活跃能量未使用。")
+            return False
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, cv2.error) as error:
             if not rt.stopped:
                 rt.diagnostic("realm_queue", str(error), details={"traceback": traceback.format_exc()[-3000:]})
