@@ -553,6 +553,12 @@ class Navigator:
     def _ensure_cursor_released(self):
         if self._cursor_released or getattr(self.inputs, "window_only", False):
             return
+        from host import capabilities, platform_backend
+        if not capabilities(platform_backend()).cursor_mode_key:
+            # No lasting cursor mode to leave (macOS); the key would make the game swallow the next
+            # camera move, which calibration would read as too small a turn.
+            self._cursor_released = True
+            return
         if not self.inputs.controller.post_click_key(native_key(18)).wait().succeeded:
             raise NavigationError("未能解除游戏光标模式，尚未开始移动。")
         self._cursor_released = True

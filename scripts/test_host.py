@@ -360,6 +360,21 @@ class MacOSBackendTests(unittest.TestCase):
         self.assertFalse(older.press_mouse(1))  # a patch-2 unit would hover-move and turn the camera
         self.assertEqual(controller.post_touch_down.call_count, 1)
 
+    def test_cursor_release_key_only_where_the_game_keeps_a_cursor_mode(self):
+        from navigation.engine import Navigator
+        def released(name):
+            controller = Mock()
+            controller.post_click_key.return_value.wait.return_value.succeeded = True
+            nav = SimpleNamespace(_cursor_released=False, inputs=SimpleNamespace(controller=controller, window_only=False))
+            with backend(name):
+                Navigator._ensure_cursor_released(nav)
+                Navigator._ensure_cursor_released(nav)  # once per release state
+            return nav._cursor_released, [call.args for call in controller.post_click_key.call_args_list]
+        self.assertEqual(released("win32"), (True, [(18,)]))  # Windows: Alt once, unchanged
+        self.assertEqual(released("macos"), (True, []))        # macOS: no key, the next move is not swallowed
+        self.assertTrue(host.capabilities("win32").cursor_mode_key)
+        self.assertFalse(host.capabilities("macos").cursor_mode_key)
+
     def test_macos_capabilities_and_saved_controller_rule(self):
         capabilities = host.capabilities("macos")
         self.assertEqual(capabilities.backend, "macos")

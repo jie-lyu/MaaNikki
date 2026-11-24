@@ -11,6 +11,7 @@ CAPABILITIES = Capabilities(
     tall_window=True,
     work_area_bounds=True,
     pointer_hover=True,
+    cursor_mode_key=True,
     launch_game=True,
     close_game=True,
     clipboard=True,
