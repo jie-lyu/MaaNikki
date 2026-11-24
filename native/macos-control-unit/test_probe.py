@@ -52,6 +52,7 @@ class FakeController:
         self.interrupt = set(interrupt)  # event kinds whose wait() raises KeyboardInterrupt
         self.refuse_keys = set(refuse_keys)  # key codes whose key_down is refused
         self.inactive_ok = True
+        self.refuse_hovers = set()
 
     def _record(self, event, ok=True):
         self.events.append(event)
@@ -79,6 +80,15 @@ class FakeController:
 
     def post_click_key(self, key):
         return self._record(("click_key", key))
+
+    def post_click(self, x, y):
+        return self._record(("click", x, y))
+
+    def post_touch_move(self, *, contact, x, y, pressure):
+        return self._record(("hover", x, y), (x, y) not in self.refuse_hovers)
+
+    def post_input_text(self, text):
+        return self._record(("text", text))
 
 
 def run(argv, controller, abilities=("insect",), cursor=(100.0, 100.0), command="scene-button-check", sleep=None):
@@ -463,6 +473,79 @@ class TimingTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), mock.patch.object(sys, "argv", ["probe.py", "timing", "--samples", "0"]):
             with self.assertRaises(SystemExit):
                 probe.main()
+
+
+class UiProbeTests(unittest.TestCase):
+    """photo-mode-check, text-input-check, hover-check with scripted recognitions instead of resource/."""
+
+    def run_ui(self, command, argv, controller, hits=None, texts=()):
+        hits = hits or {}
+        readings = list(texts)
+
+        def detail(session, node, image, override=None):
+            if node == "ProbeReadText":
+                text = readings.pop(0) if readings else ""
+                return types.SimpleNamespace(hit=bool(text), all_results=[types.SimpleNamespace(text=text)])
+            value = hits.get(node, False)
+            return types.SimpleNamespace(hit=value(controller) if callable(value) else value)
+        with mock.patch.object(probe._UiSession, "_bind_resource", lambda session: None), \
+                mock.patch.object(probe._UiSession, "detail", detail):
+            return run(argv, controller, command=command)
+
+    def test_photo_mode_opens_with_p_and_leaves_with_esc_after_the_landmark(self):
+        controller = FakeController()
+        camera_open = lambda c: c.events[-1:] == [("key_up", probe.KEY_P)]
+        code, output, _ = self.run_ui("photo-mode-check", [], controller, {"MaaNikki_Daily_PhotoReady": camera_open})
+        self.assertEqual(code, 0, output)
+        self.assertEqual(controller.events, [("key_down", 35), ("key_up", 35), ("key_down", 53), ("key_up", 53)])
+
+    def test_photo_mode_sends_no_esc_without_the_landmark(self):
+        controller = FakeController()
+        code, output, _ = self.run_ui("photo-mode-check", [], controller)
+        self.assertEqual(code, 1)
+        self.assertEqual(controller.events, [("key_down", 35), ("key_up", 35)])
+        self.assertIn("Esc not sent", output)
+
+    def test_text_input_types_reads_back_and_clears_each_trial(self):
+        controller = FakeController()
+        code, output, _ = self.run_ui("text-input-check", [], controller, {"MaaNikki_CompendiumSearchReady": True},
+                                      texts=("输入名称", "Ab12", "", "星光", ""))
+        self.assertEqual(code, 0, output)
+        centre = (1040, 44)
+        self.assertEqual(controller.events, [("click", *centre), ("text", "Ab12"), ("click", 1202, 44),
+                                             ("click", *centre), ("text", "星光"), ("click", 1202, 44)])
+        self.assertIn('"matches": true', output)
+
+    def test_text_input_sends_nothing_unless_the_field_is_empty_on_the_search_page(self):
+        for hits, texts in (({}, ()), ({"MaaNikki_CompendiumSearchReady": True}, ("旧的文字",))):
+            with self.subTest(hits=hits):
+                controller = FakeController()
+                code, _, _ = self.run_ui("text-input-check", [], controller, hits, texts)
+                self.assertEqual(code, 1)
+                self.assertEqual(controller.events, [])
+
+    def test_hover_parks_hovers_parks_and_puts_the_cursor_back(self):
+        controller = FakeController()
+        code, output, _ = self.run_ui("hover-check", ["--point", "300", "400"], controller,
+                                      {"MaaNikki_Blessing_InventoryReady": True})
+        self.assertEqual(code, 0, output)
+        self.assertEqual(controller.events, [("hover", 900, 32), ("hover", 300, 400), ("hover", 900, 32), ("inactive",)])
+        self.assertIn('"back_where_it_was": true', output)
+
+    def test_a_refused_hover_still_ends_with_the_cursor_cleanup(self):
+        controller = FakeController()
+        controller.refuse_hovers = {(300, 400)}
+        code, output, _ = self.run_ui("hover-check", ["--point", "300", "400"], controller,
+                                      {"MaaNikki_Blessing_InventoryReady": True})
+        self.assertEqual(code, 1)
+        self.assertEqual(controller.events[-1], ("inactive",))
+        self.assertIn("refused the hover", output)
+
+    def test_hover_sends_nothing_off_the_warehouse(self):
+        controller = FakeController()
+        code, _, _ = self.run_ui("hover-check", ["--point", "300", "400"], controller)
+        self.assertEqual(code, 1)
+        self.assertEqual(controller.events, [])
 
 
 class AbilityReadingTests(unittest.TestCase):
