@@ -343,15 +343,62 @@ pub fn extra_tasks_allow(list: &str, entry: &str) -> bool {
     !entry.is_empty() && list.split(',').map(str::trim).any(|item| item == entry)
 }
 
-/// 判断清单 JSON（`{"entries": [...]}`）是否包含该任务入口；清单无法解析时报错。
-pub fn preview_task_allowed(manifest_json: &str, entry: &str) -> Result<bool, String> {
+/// macOS 任务清单的三个档位：已验证（entries）、试用（experimental）、不开放（excluded，入口到原因）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+pub struct TaskTiers {
+    pub verified: Vec<String>,
+    pub experimental: Vec<String>,
+    pub excluded: std::collections::BTreeMap<String, String>,
+}
+
+/// 严格解析任务清单（与 agent/host/macos/__init__.py 的 parse_task_tiers 规则相同）：entries 必需，
+/// experimental、excluded 可选（旧清单等于没有试用任务）；类型不对、空名字、重复、同一入口出现在多个档位都报错。
+pub fn parse_task_tiers(manifest_json: &str) -> Result<TaskTiers, String> {
     let manifest: serde_json::Value =
         serde_json::from_str(manifest_json).map_err(|e| format!("任务清单无法解析: {}", e))?;
-    let entries = manifest
-        .get("entries")
-        .and_then(|v| v.as_array())
-        .ok_or("任务清单缺少 entries")?;
-    Ok(entries.iter().any(|item| item.as_str() == Some(entry)))
+    let object = manifest.as_object().ok_or("任务清单不是对象")?;
+    let names = |key: &str, required: bool| -> Result<Vec<String>, String> {
+        let value = match object.get(key) {
+            Some(value) => value,
+            None if required => return Err(format!("任务清单缺少 {}", key)),
+            None => return Ok(Vec::new()),
+        };
+        let items = value.as_array().ok_or(format!("任务清单的 {} 无效", key))?;
+        let mut out: Vec<String> = Vec::new();
+        for item in items {
+            let name = item.as_str().filter(|s| !s.is_empty()).ok_or(format!("任务清单的 {} 无效", key))?;
+            if out.iter().any(|seen| seen == name) {
+                return Err(format!("任务清单的 {} 有重复", key));
+            }
+            out.push(name.to_string());
+        }
+        Ok(out)
+    };
+    let verified = names("entries", true)?;
+    let experimental = names("experimental", false)?;
+    let mut excluded = std::collections::BTreeMap::new();
+    if let Some(value) = object.get("excluded") {
+        let map = value.as_object().ok_or("任务清单的 excluded 无效")?;
+        for (entry, reason) in map {
+            let reason = reason.as_str().filter(|s| !s.is_empty()).ok_or("任务清单的 excluded 无效")?;
+            if entry.is_empty() {
+                return Err("任务清单的 excluded 无效".to_string());
+            }
+            excluded.insert(entry.clone(), reason.to_string());
+        }
+    }
+    let overlaps = verified.iter().any(|e| experimental.contains(e))
+        || verified.iter().chain(experimental.iter()).any(|e| excluded.contains_key(e));
+    if overlaps {
+        return Err("任务清单里同一入口出现在多个档位".to_string());
+    }
+    Ok(TaskTiers { verified, experimental, excluded })
+}
+
+/// 该入口在 macOS 上是否可以运行（已验证或试用）；清单无效时报错。
+pub fn preview_task_allowed(manifest_json: &str, entry: &str) -> Result<bool, String> {
+    let tiers = parse_task_tiers(manifest_json)?;
+    Ok(tiers.verified.iter().chain(tiers.experimental.iter()).any(|e| e == entry))
 }
 
 /// 把 agent 的运行计划（PI_MAANIKKI_RUN_PLAN 的 JSON）中的任务入口换成实际会执行的那些；
@@ -383,17 +430,17 @@ pub fn platform_refuses_task(entry: &str) -> Option<String> {
                 return None;
             }
         }
-        let allowed = get_exe_directory()
+        let tiers = get_exe_directory()
             .and_then(|root| {
                 std::fs::read_to_string(root.join(MACOS_PREVIEW_TASKS)).map_err(|e| e.to_string())
             })
-            .and_then(|json| preview_task_allowed(&json, entry));
-        match allowed {
-            Ok(true) => None,
-            Ok(false) => Some(format!(
-                "{} 暂不支持 Mac 测试预览版（只开放已验证的任务），已跳过。",
-                entry
-            )),
+            .and_then(|json| parse_task_tiers(&json));
+        match tiers {
+            Ok(tiers) if tiers.verified.iter().chain(tiers.experimental.iter()).any(|e| e == entry) => None,
+            Ok(tiers) => Some(match tiers.excluded.get(entry) {
+                Some(reason) => format!("{} 不在 Mac 测试预览版开放：{}已跳过。", entry, reason),
+                None => format!("{} 暂不支持 Mac 测试预览版，已跳过。", entry),
+            }),
             Err(e) => Some(format!("无法读取 Mac 任务清单（{}），已跳过 {}。", e, entry)),
         }
     }
@@ -588,11 +635,28 @@ mod preview_task_tests {
     #[test]
     fn the_shared_manifest_parses_and_allows_only_listed_entries() {
         let manifest = include_str!("../../../../agent/host/macos/preview_tasks.json");
-        for entry in ["MaaNikki_Mailbox", "MaaNikki_WeeklyFreeGifts", "MaaNikki_MonthlyPass", "MaaNikki_CollectStarlightCrystals"] {
+        for entry in ["MaaNikki_Mailbox", "MaaNikki_WeeklyFreeGifts", "MaaNikki_MonthlyPass", "MaaNikki_CollectStarlightCrystals",
+                      "MaaNikki_Home", "MaaNikki_Dig", "MaaNikki_RedeemCodes"] {
             assert_eq!(preview_task_allowed(manifest, entry), Ok(true), "{}", entry);
         }
-        for entry in ["MXU_LAUNCH", "MaaNikki_StartGame", "MaaNikki_Fishing", "MaaNikki_MonthlyCrystalExchange", "MaaNikki_Dig", ""] {
+        for entry in ["MXU_LAUNCH", "MaaNikki_StartGame", "MaaNikki_CloseGame", "MaaNikki_Fishing",
+                      "MaaNikki_MonthlyCrystalExchange", "MaaNikki_RouteTest", ""] {
             assert_eq!(preview_task_allowed(manifest, entry), Ok(false), "{}", entry);
+        }
+        let tiers = super::parse_task_tiers(manifest).unwrap();
+        assert_eq!(tiers.verified.len(), 4);
+        assert!(tiers.excluded.contains_key("MaaNikki_MonthlyCrystalExchange"));
+    }
+
+    #[test]
+    fn the_tier_list_is_parsed_strictly() {
+        use super::parse_task_tiers;
+        assert_eq!(parse_task_tiers(r#"{"entries":["A"]}"#).unwrap().experimental.len(), 0);
+        for bad in [r#"null"#, r#"[]"#, r#"{}"#, r#"{"entries":"A"}"#, r#"{"entries":["A",1]}"#, r#"{"entries":["A","A"]}"#,
+                    r#"{"entries":[""]}"#, r#"{"entries":["A"],"experimental":"B"}"#, r#"{"entries":["A"],"experimental":["A"]}"#,
+                    r#"{"entries":["A"],"excluded":{"A":"why"}}"#, r#"{"entries":["A"],"excluded":{"B":""}}"#,
+                    r#"{"entries":["A"],"excluded":["B"]}"#] {
+            assert!(parse_task_tiers(bad).is_err(), "{}", bad);
         }
     }
 

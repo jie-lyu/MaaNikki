@@ -30,10 +30,51 @@ def dev_extra_task_entries() -> frozenset[str]:
     return frozenset(item.strip() for item in os.environ.get(DEV_EXTRA_TASKS_ENV, "").split(",") if item.strip())
 
 
-def preview_task_entries() -> frozenset[str]:
+VERIFIED, EXPERIMENTAL = "verified", "experimental"
+
+
+def parse_task_tiers(data) -> tuple[frozenset[str], frozenset[str], dict[str, str]]:
+    """(verified, experimental, excluded) from the list file's JSON; ValueError unless every field is well formed.
+
+    entries is required; experimental and excluded are optional (an older list means no experimental
+    tasks). An entry may appear in only one of the three. The client applies the same rules
+    (client/src-tauri/src/commands/utils.rs, parse_task_tiers).
+    """
+    if not isinstance(data, dict):
+        raise ValueError("任务清单不是对象")
+
+    def names(key, required):
+        value = data.get(key, None if required else [])
+        if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+            raise ValueError(f"任务清单的 {key} 无效")
+        if len(set(value)) != len(value):
+            raise ValueError(f"任务清单的 {key} 有重复")
+        return frozenset(value)
+    verified, experimental = names("entries", True), names("experimental", False)
+    excluded = data.get("excluded", {})
+    if (not isinstance(excluded, dict)
+            or not all(isinstance(k, str) and k and isinstance(v, str) and v for k, v in excluded.items())):
+        raise ValueError("任务清单的 excluded 无效")
+    if verified & experimental or (verified | experimental) & set(excluded):
+        raise ValueError("任务清单里同一入口出现在多个档位")
+    return verified, experimental, dict(excluded)
+
+
+def task_tiers() -> tuple[frozenset[str], frozenset[str], dict[str, str]]:
     from app_paths import RESOURCE_ROOT
     path = RESOURCE_ROOT.joinpath(*PREVIEW_TASKS_FILE)
-    return frozenset(json.loads(path.read_text(encoding="utf-8"))["entries"])
+    return parse_task_tiers(json.loads(path.read_text(encoding="utf-8")))
+
+
+def task_tier(entry) -> str | None:
+    """VERIFIED, EXPERIMENTAL, or None (excluded or unknown); an unreadable list raises."""
+    verified, experimental, _ = task_tiers()
+    return VERIFIED if entry in verified else EXPERIMENTAL if entry in experimental else None
+
+
+def preview_task_entries() -> frozenset[str]:
+    """Entries verified on a real Mac."""
+    return task_tiers()[0]
 
 
 # interface.json names of the patched control unit's methods (client/src/types/maa.ts maps them).

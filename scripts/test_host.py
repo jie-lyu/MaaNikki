@@ -535,13 +535,42 @@ class TaskAllowlistTests(unittest.TestCase):
             self.assertTrue(all(host.task_entry_supported(entry) for entry in entries + ["MaaNikki_GameKeysRead", None]))
         with patch.dict(os.environ), backend("macos"):
             os.environ.pop("MAANIKKI_MACOS_EXTRA_TASKS", None)
-            self.assertEqual({entry for entry in entries if host.task_entry_supported(entry)},
-                             {"MaaNikki_Mailbox", "MaaNikki_WeeklyFreeGifts", "MaaNikki_MonthlyPass",
-                              "MaaNikki_CollectStarlightCrystals"})
-            for unverified in ("MaaNikki_MonthlyCrystalExchange", "MaaNikki_Dig", "MaaNikki_PersistentAbilities", "MaaNikki_RouteTest"):
-                self.assertFalse(host.task_entry_supported(unverified), unverified)
+            verified = {"MaaNikki_Mailbox", "MaaNikki_WeeklyFreeGifts", "MaaNikki_MonthlyPass",
+                        "MaaNikki_CollectStarlightCrystals"}
+            experimental = {"MaaNikki_Home", "MaaNikki_Xinghai", "MaaNikki_Zhaoxi", "MaaNikki_Crown",
+                            "MaaNikki_RealmChallenge", "MaaNikki_Dig", "MaaNikki_RedeemCodes", "MaaNikki_OpenWorldCollect",
+                            "MaaNikki_RouteRun", "MaaNikki_MinigameBling", "MaaNikki_PersistentAbilities"}
+            self.assertEqual({entry for entry in entries if host.task_entry_supported(entry)}, verified | experimental)
+            from host.macos import task_tier, task_tiers
+            self.assertEqual({e for e in verified | experimental if task_tier(e) == "verified"}, verified)
+            for excluded in ("MaaNikki_MonthlyCrystalExchange", "MaaNikki_RouteTest", "MaaNikki_CloseGame",
+                             "MaaNikki_StartGame", "MaaNikki_SubtaskTest_xinghai_chat"):
+                self.assertFalse(host.task_entry_supported(excluded), excluded)
+                self.assertIn(excluded, task_tiers()[2])  # with a reason for the user
+            # every task file entry is classified somewhere
+            classified = verified | experimental | set(task_tiers()[2])
+            self.assertEqual([e for e in entries if e not in classified], [])
             self.assertFalse(host.task_entry_supported("MaaNikki_GameKeysRead"))
             self.assertFalse(host.task_entry_supported(None))
+
+    def test_the_tier_list_is_parsed_strictly(self):
+        from host.macos import parse_task_tiers
+        self.assertEqual(parse_task_tiers({"entries": ["A"]}), (frozenset({"A"}), frozenset(), {}))  # older list
+        self.assertEqual(parse_task_tiers({"entries": ["A"], "experimental": ["B"], "excluded": {"C": "why"}}),
+                         (frozenset({"A"}), frozenset({"B"}), {"C": "why"}))
+        for bad in (None, [], {}, {"entries": "A"}, {"entries": ["A", 1]}, {"entries": ["A", "A"]}, {"entries": [""]},
+                    {"entries": ["A"], "experimental": "B"}, {"entries": ["A"], "experimental": ["A"]},
+                    {"entries": ["A"], "excluded": {"A": "why"}}, {"entries": ["A"], "excluded": {"B": ""}},
+                    {"entries": ["A"], "excluded": ["B"]}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                parse_task_tiers(bad)
+
+    def test_a_malformed_list_refuses_everything_on_macos(self):
+        with patch.dict(os.environ), backend("macos"), \
+                patch("host.macos.task_tiers", side_effect=ValueError("bad")):
+            os.environ.pop("MAANIKKI_MACOS_EXTRA_TASKS", None)
+            self.assertFalse(host.task_entry_supported("MaaNikki_Mailbox"))
+            self.assertFalse(host.task_entry_supported("MaaNikki_Home"))
 
     def test_background_mode_falls_back_to_pause_without_window_input(self):
         from task_control import focus_lost_mode
