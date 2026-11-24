@@ -651,11 +651,29 @@ pub fn get_exe_directory() -> Result<PathBuf, String> {
     #[cfg(not(debug_assertions))]
     {
         let exe_path = std::env::current_exe().map_err(|e| format!("获取 exe 路径失败: {}", e))?;
-        exe_path
+        let exe_dir = exe_path
             .parent()
             .map(|p| p.to_path_buf())
-            .ok_or_else(|| "无法获取 exe 所在目录".to_string())
+            .ok_or_else(|| "无法获取 exe 所在目录".to_string())?;
+        // macOS 应用包：只读资源在 Contents/Resources，Contents/MacOS 只放可执行文件（签名要求）。
+        #[cfg(target_os = "macos")]
+        if let Some(resources) = macos_bundle_resources_dir(&exe_dir) {
+            return Ok(resources);
+        }
+        Ok(exe_dir)
     }
+}
+
+/// 可执行文件位于 `<名称>.app/Contents/MacOS/` 时，返回同一应用包的 `Contents/Resources`；
+/// 否则（例如直接运行 target/release 下的程序）返回 None。只在 macOS 发布构建中使用。
+#[cfg(any(target_os = "macos", test))]
+fn macos_bundle_resources_dir(exe_dir: &std::path::Path) -> Option<PathBuf> {
+    let contents = exe_dir.parent()?;
+    let bundle = contents.parent()?;
+    let is_bundle = exe_dir.file_name()? == "MacOS"
+        && contents.file_name()? == "Contents"
+        && bundle.extension()? == "app";
+    is_bundle.then(|| contents.join("Resources"))
 }
 
 /// 获取可执行文件所在目录下的 maafw 子目录
@@ -872,5 +890,39 @@ mod preview_task_tests {
     fn a_broken_manifest_is_an_error() {
         assert!(preview_task_allowed("{}", "MaaNikki_Mailbox").is_err());
         assert!(preview_task_allowed("not json", "MaaNikki_Mailbox").is_err());
+    }
+}
+
+#[cfg(test)]
+mod macos_bundle_tests {
+    use super::macos_bundle_resources_dir;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn an_app_bundle_reads_its_resources_from_contents_resources() {
+        assert_eq!(
+            macos_bundle_resources_dir(Path::new("/Applications/MaaNikki.app/Contents/MacOS")),
+            Some(PathBuf::from("/Applications/MaaNikki.app/Contents/Resources"))
+        );
+        // Gatekeeper's App Translocation runs the bundle from a random read-only path.
+        assert_eq!(
+            macos_bundle_resources_dir(Path::new("/private/var/folders/x/T/AppTranslocation/1/d/MaaNikki.app/Contents/MacOS")),
+            Some(PathBuf::from("/private/var/folders/x/T/AppTranslocation/1/d/MaaNikki.app/Contents/Resources"))
+        );
+    }
+
+    #[test]
+    fn anything_else_keeps_the_executable_directory() {
+        for dir in [
+            "/repo/client/src-tauri/target/release",
+            "/x/Contents/MacOS",
+            "/x/MaaNikki.app/MacOS",
+            "/x/MaaNikki.app/Contents/Frameworks",
+            "MacOS",
+            "/",
+            "C:\\MaaNikki",
+        ] {
+            assert_eq!(macos_bundle_resources_dir(Path::new(dir)), None, "{}", dir);
+        }
     }
 }
