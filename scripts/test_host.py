@@ -1114,6 +1114,39 @@ class MacTextInputTests(unittest.TestCase):
             self.assertFalse(rt.input_text("abc"))
         self.assertEqual(state["sent"], ["a"])
 
+    def test_a_resume_before_the_first_character_ends_mac_text(self):
+        def resumed_once(rt):
+            calls = []
+
+            def check_focus():
+                calls.append(1)
+                if len(calls) == 1:  # the pause ended here: the resume is consumed by this call
+                    rt._focus_generation += 1
+                    return True
+                return False
+            return check_focus
+
+        for where in ("first check", "ensure_frame"):
+            with self.subTest(where=where):
+                rt, state = self.runtime()
+                rt._focus_generation = 4
+                if where == "first check":
+                    rt.check_focus = resumed_once(rt)
+                else:
+                    rt.ensure_frame = Mock(side_effect=lambda: setattr(rt, "_focus_generation", 5) or True)
+                with patch("daily.runtime.platform_backend", return_value="macos"), \
+                        patch("daily.runtime.active_session", return_value=None):
+                    self.assertFalse(rt.input_text("abc"))
+                self.assertEqual(state["sent"], [])
+                rt.log.assert_called_once()
+        rt, state = self.runtime()
+        rt._focus_generation = 4
+        rt.check_focus = resumed_once(rt)
+        with patch("daily.runtime.platform_backend", return_value="win32"), \
+                patch("daily.runtime.active_session", return_value=None):
+            self.assertTrue(rt.input_text("abc"))  # Windows: unchanged
+        self.assertEqual(state["sent"], ["abc"])
+
     def test_windows_still_sends_the_whole_string_at_once(self):
         rt, state = self.runtime()
         with patch("daily.runtime.platform_backend", return_value="win32"), \
@@ -1173,6 +1206,45 @@ class MacTextGateTests(unittest.TestCase):
         with backend("win32"), patch.object(redeem_codes, "set_clipboard_text", return_value=True):
             self.assertTrue(codes._fill_code("ABCD1234"))  # Win32: the placeholder check, as before
         codes.rt.text.assert_not_called()
+
+    def test_redeem_rechecks_the_field_on_a_fresh_frame_after_the_cooldown_before_clicking(self):
+        import time
+        from contextlib import nullcontext
+        from daily import redeem_codes
+        button = (600, 450, 80, 40)
+
+        def attempt(platform, *, read="ABCD1234", modal=True, reward=False, use_hit=True):
+            events = []
+            codes = redeem_codes.RedeemCodes.__new__(redeem_codes.RedeemCodes)
+            codes.last_use_at = time.monotonic()  # the previous code was just used: the cooldown applies
+            codes._reset_modal_if_dirty = Mock(return_value=True)
+            codes._fill_code = Mock(side_effect=lambda code: events.append("filled") or True)
+            codes._poll_submit_outcome = Mock(return_value=("redeemed", ""))
+            hits = {"MaaNikki_Redeem_ModalReady": modal, "MaaNikki_RewardLayer": reward}
+            codes.rt = SimpleNamespace(
+                stopped=False, log=Mock(), observe=lambda: nullcontext(),
+                pause=Mock(side_effect=lambda seconds: events.append("cooldown") or True),
+                capture=Mock(side_effect=lambda: events.append("capture") or "fresh frame"),
+                hit=lambda node, image=None: hits.get(node, False) and image == "fresh frame",
+                text=Mock(side_effect=lambda roi, image=None: read if image == "fresh frame" else ""),
+                recognize=Mock(return_value=SimpleNamespace(hit=use_hit, box=button if use_hit else None)),
+                action=Mock(side_effect=lambda *a, **k: events.append(("click", tuple(k["target"]))) or True))
+            with backend(platform):
+                return codes._redeem_one("ABCD1234"), events, codes
+
+        result, events, _ = attempt("macos")
+        self.assertEqual(result, ("redeemed", ""))
+        self.assertEqual(events, ["filled", "cooldown", "capture", ("click", button)])  # checked after the wait
+        for change in ({"read": ""}, {"read": "ABCD123"}, {"modal": False}, {"reward": True}, {"use_hit": False}):
+            with self.subTest(change=change):
+                result, events, codes = attempt("macos", **change)
+                self.assertEqual(result, ("error", "兑换前复核未通过"))
+                self.assertNotIn("click", [e[0] for e in events if isinstance(e, tuple)])  # not even [639, 469]
+                codes._poll_submit_outcome.assert_not_called()
+        # Win32 as before: no re-check, and the fixed target when the button template misses.
+        result, events, _ = attempt("win32", read="", use_hit=False)
+        self.assertEqual(result, ("redeemed", ""))
+        self.assertEqual(events, ["filled", "cooldown", ("click", tuple(redeem_codes.MODAL_USE_TARGET))])
 
     def runtime_for_amount(self):
         from daily.runtime import Executors

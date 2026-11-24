@@ -705,6 +705,9 @@ class Runtime:
     def input_text(self, content):
         if self.stopped:
             return False
+        # Taken before the first focus check: a pause and resume consumed by it or by ensure_frame()
+        # still ends the Mac text (the field may no longer have focus).
+        start = getattr(self, "_focus_generation", 0)
         self.check_focus()
         if not self.ensure_frame():
             return False
@@ -714,18 +717,18 @@ class Runtime:
             with measure("input.text"):
                 return bool(inputs.input_window_text(content))
         if platform_backend() == "macos":
-            return self._input_text_by_character(content)
+            return self._input_text_by_character(content, start)
         with measure("input.text"):
             return self.controller.post_input_text(content).wait().succeeded
 
-    def _input_text_by_character(self, content):
+    def _input_text_by_character(self, content, start):
         """macOS: one character per controller request, checking Stop and focus before each.
 
         The patched unit posts each character as its own keyboard event, but one request is one job that
         a Stop cannot interrupt part-way; submitting characters separately lets a Stop end the text at the
-        next character. The pause keeps each character in its own game frame.
+        next character. The pause keeps each character in its own game frame. ``start`` is the focus generation
+        when input_text was called.
         """
-        start = getattr(self, "_focus_generation", 0)
 
         def focus_kept():
             # A focus loss and return part-way (the user may have clicked another field to bring the game

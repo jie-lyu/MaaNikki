@@ -405,6 +405,30 @@ class RedeemCodes:
         self.rt.log("未能确认兑换码已正确填入（Mac 版），停止这个码，不点兑换。")
         return False
 
+    @staticmethod
+    def _typing_supported() -> bool:
+        from host import capabilities, platform_backend
+        return capabilities(platform_backend()).text_input
+
+    def _recheck_before_use(self, code: str):
+        """macOS, immediately before 兑换: the field evidence from filling may be stale after the cooldown wait, so
+        one fresh frame must show the modal still open, exactly this code in the field and the 兑换 button itself
+        (no fixed-coordinate fallback). Returns the button box, or None to end this code without clicking."""
+        frame = self.rt.capture()
+        if frame is not None:
+            with self.rt.observe():
+                modal = bool(
+                    self.rt.hit("MaaNikki_Redeem_ModalReady", image=frame)
+                    and not self.rt.hit("MaaNikki_RewardLayer", image=frame)
+                    and not self.rt.hit("MaaNikki_Monthly_ParadiseReward", image=frame)
+                )
+                read = re.sub(r"\s+", "", self.rt.text(CODE_FIELD_ROI, image=frame) or "") if modal else ""
+                use_btn = self.rt.recognize("MaaNikki_Redeem_ModalUse", image=frame) if modal else None
+            if modal and read == re.sub(r"\s+", "", code) and use_btn and use_btn.hit and use_btn.box:
+                return list(use_btn.box)
+        self.rt.log("点兑换前复核：弹窗、输入框里的兑换码或兑换按钮对不上（Mac 版），停止这个码，不点兑换。")
+        return None
+
     def _dismiss_reward_to_modal(self) -> bool:
         if not self.rt.pause(0.5):
             return False
@@ -480,8 +504,13 @@ class RedeemCodes:
                 remaining = USE_COOLDOWN_SECONDS - (time.monotonic() - self.last_use_at)
                 if remaining > 0.0 and not self.rt.pause(remaining):
                     return "error", "任务已停止"
-            use_btn = self.rt.recognize("MaaNikki_Redeem_ModalUse")
-            target = list(use_btn.box) if use_btn and use_btn.hit and use_btn.box else MODAL_USE_TARGET
+            if self._typing_supported():
+                use_btn = self.rt.recognize("MaaNikki_Redeem_ModalUse")
+                target = list(use_btn.box) if use_btn and use_btn.hit and use_btn.box else MODAL_USE_TARGET
+            else:
+                target = self._recheck_before_use(code)
+                if target is None:
+                    return "error", "兑换前复核未通过"
             if not self.rt.action("Click", target=target):
                 return "error", "未能点击使用按钮"
             self.last_use_at = time.monotonic()
