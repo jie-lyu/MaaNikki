@@ -16,6 +16,7 @@
 - [如何保证 Windows 不回归](#如何保证-windows-不回归)
 - [阶段 2 实机验收](#阶段-2-实机验收)
 - [实机验收计划（2026-11-24 夜间整理）](#实机验收计划2026-11-24-夜间整理)
+- [交接：阶段 3 截至 2026-11-24](#交接阶段-3-截至-2026-11-24)
 - [打包与分发](#打包与分发)
 - [风险](#风险)
 - [附录：实机验证记录](#附录实机验证记录)
@@ -255,6 +256,101 @@ Mac 白名单（`agent/host/macos/preview_tasks.json`）现为邮箱、每周免
 
 - 运行中按 Stop 的边界情形（维护者：暂不做太边缘的情况）；风险 10 记录的界面 Stop 与场景键的限制留到常驻能力正式放开前。
 - 消耗每日进度的整条任务（星海、朝夕、家园、钓鱼、小游戏等），等 B2 的导航通过后再逐个排。
+
+## 交接：阶段 3 截至 2026-11-24
+
+写给没有参与前面对话的接手者。所有事实都可以在仓库、日志或本节列出的路径里核对；工作规则见维护者保存的记忆说明（`~/.claude/projects/-Users-jie-Developer-MaaNikki/memory/macos-port-working-rules.md`），这里只列要点：每一步先经 Codex 复审再进行下一步；只在本地小步提交，不推送、不开 PR、不改版本号和 CHANGELOG，签核后把 tip 交给编排方推送；向游戏发输入、启动或退出游戏、跑任务都要维护者在场并逐项批准，截图随时可以；Windows 契约（`interface.json` 字节不变、安装包清单不变）不能动。维护者的方向是「往完整日常推进」。
+
+### 分支、PR 与 CI
+
+| 分支 | 内容 | 状态 |
+| --- | --- | --- |
+| `plan-macos-support` | 阶段 1、2：Windows 回归门槛和不改变行为的重构（`agent/host/` 包等），tip `00d5531` | fork 的草稿 PR #1（→ `main`），等 Windows 实机对照（本文「阶段 2 实机验收」） |
+| `macos-phase3` | 阶段 3：自编译 Mac 控制模块补丁、Mac 后端、客户端 Mac 生命周期、开发探针、CI；本节写作时已推送到 `ecaf1d1`，之后的提交见 `git log origin/macos-phase3..macos-phase3` | fork 的草稿 PR #2（→ `plan-macos-support`） |
+| `macos-phase3-step2-fixed`、`macos-phase3-step3-wip` | 本地旧分支（`0334931`、`3f59625`），内容已并入 `macos-phase3` | 可以删除，不要基于它们工作 |
+
+CI（fork `jie-lyu/MaaNikki`）：`Test Windows x64`（`test-windows.yml`，Windows 契约、离线测试、`cargo test --lib`）每次推送都跑；`test-macos-imports.yml` 只由 PR 触发，`imports` 在 `macos-15-intel` 上跑 agent 的导入和 Mac 后端测试，`control-unit` 在 `macos-15-intel` 上分两步：交叉编译 arm64 单元并检查加载命令与架构（不执行），以及用同一份源码在 x86_64 上构建并运行输入逻辑测试（不是发布的二进制）。Apple silicon 托管 runner 一直分配不到；发布的 arm64 单元的行为只在这台 Mac 上验证过（风险 11）。
+
+### 在这台 Mac 上工作
+
+- 控制模块：`python3 -I native/macos-control-unit/build.py --runtime-out .build/macos-control-unit/runtime-patched`（默认构建 arm64 补丁版并在本机运行假平台测试，写 `.build/macos-control-unit/out/patched/build.json`）。截至本节，单元 SHA-256 为 `7d927573…`，补丁版本 3。`--unit-only`、`--tests-only --test-arch x86_64` 是给 Intel CI 用的。
+- 开发目录：`python3 -I scripts/macos_dev_home.py`，生成 `.build/macos-dev-home`，其中 `agent/`、`resource/`、`tasks/` 等是**指向仓库工作区的链接**，`maafw/` 指向上面的运行时，`interface.json` 是仓库的加上 `build/macos/interface-overlay.json`（`nikki_macos` 控制器）。
+- 启动开发客户端：`MAANIKKI_DEV_HOME=<仓库>/.build/macos-dev-home pnpm --dir client tauri dev`。要在有人值守的测试里放行未验证的任务，前面再加 `MAANIKKI_MACOS_EXTRA_TASKS=入口1,入口2`（只在开发构建生效）。已验证的白名单在 `agent/host/macos/preview_tasks.json`：邮箱、每周免费礼包、月卡。
+- 改设置：客户端运行时每次界面改动都会重写配置，所以要改配置文件（`~/Library/Application Support/MaaNikki/config/mxu-MaaNikki.json`）就先停客户端、备份、按前端代码里的格式改（选项是 `{"type":"select","caseName":…}`、`{"type":"input","values":{…}}`、`{"type":"switch","value":…}`，任务条目见现有的 `tasks` 数组），再带同样的环境变量重启，并核对客户端启动后保留了改动。
+- 日志（都在 `~/Library/Application Support/MaaNikki/` 下）：
+  - `debug/maafw.log`：主库和控制单元的日志，包括每个动作、识别、截图、单元的按下/松开/滚动行，以及界面上显示的 focus 消息（**「游戏已离开前台，任务暂停」「游戏已回到前台，任务继续」只在这里和客户端界面里，不在消息日志里**）。
+  - `debug/messages/<日期>-<agent 进程号>.log`：任务自己写的进度消息。
+  - `debug/on_error/`：失败现场（截图加 JSON）。
+  - `logs/navigation/<时间>-route-test/events.jsonl`：导航事件（`camera_probe`、`camera_calibrated`、`camera_turn`、`forward`、`arrived` 等）。
+  - 开发客户端的标准输出（启动时重定向到哪里就在哪里）：控制器连接、`start_tasks`、`Task completed`、`Released macOS controller`。
+- 控制单元的日志行：`hover settled, press accepted`（各阶段用时：`first_check_ms` 及其中的 `hit_test_ms`、`settle_ms` 悬停等待、`second_check_ms`、`press_ms`、`total_ms`）、`release posted [... cursor=restored]`（光标放回结果）、`scroll posted [lines_y=…] [restored=…]`、`hover moved`、`scene press accepted [contact=…]`、`press abandoned after the hover`（带原因）。拒绝时是 `ERR` 行，写明原因（不在前台、命中测试指向别的进程、几何变了等）。
+- 开发探针 `native/macos-control-unit/probe.py`（都要 `--runtime .build/macos-control-unit/runtime-patched`，碰游戏的要 `--profile maanikki --game --out <新空目录>`）：`windows`（列窗口）、`capture`（截一帧，不发输入）、`lifecycle`（连接与销毁）、`hit-test`、`refusal-check`、`input-check`（M、点地图返回、按住 W 后销毁；W 的判定只是筛查，要看画面）、`camera-check`（相对位移 ±400；`--option` 是 Option 实验）、`scene-button-check`（场景鼠标键；`--no-turn` 在镜头已转开时只按一次中键）。凡是发输入的探针都要维护者批准。
+- 一个能用的日志监视必须盯 `debug/maafw.log` 本身，匹配：`游戏已离开前台|游戏已回到前台|press accepted|release posted|scroll posted|scene press|abandoned|not sending|Tasker.Task.(Succeeded|Failed)`，并确认它在运行（我设的两个监视都无声失败过：一个匹配词没覆盖实际日志，一个写到了标准错误）。最可靠的做法是运行结束后直接读日志。
+
+### 验证情况（2026-11-24）
+
+| 项目 | 实机验证 | 只有测试 | 只按代码推断 |
+| --- | --- | --- | --- |
+| 截图（DisplayWindow，3840×2160 → 1280×720） | 是，中位约 56–61 毫秒 | | |
+| 按键定向发给进程（M、Esc、F、J、H、W 长按） | 是 | | |
+| 点击（悬停 0.3 秒、两次检查、光标放回） | 是，数十次，没有拒绝 | | |
+| 地图拖拽 | 是（B2 两次） | | |
+| 滚轮 | 是（礼包列表 27 次，方向正确） | | 单行幅度未测 |
+| 相对镜头（Camera 转向、校准、转向命中目标） | 是 | | |
+| Wasd 长按与细调 | 是（一条不需转向的路线） | | 需转向的路线未测 |
+| 场景鼠标键 | 中键是 | 右键、左键（假平台） | 右键、左键、长按、移动中按下未实测 |
+| 失去前台时暂停、回到前台恢复 | 是 | | |
+| Mac 上不发 Option | 是（B2 没有发，镜头照常） | | 其他界面之后的状态未测 |
+| 停止与按下、悬停、滚动的各种交错；最短按住 40 毫秒；悬停后的光标归属 | | 是（控制单元假平台测试 38 项以上） | |
+| 客户端 Mac 运行生命周期（同时一轮、迟到回调、启动中停止） | | 是（Rust 测试与 Codex 复审） | |
+| 后台模式在 Mac 上改按暂停；开发开关的隔离 | | 是 | |
+| 收藏库存的悬停读浮窗（朝夕每日升级） | | 是（单元假平台） | 游戏上未测 |
+| 文字输入、剪贴板 | | | 未测；剪贴板在 Mac 上没有后端 |
+| 任务：邮箱、每周免费礼包、月卡（旅行任务、旅行秘宝）、路线测试 | 是 | | 月卡的乐园构想（账号未解锁）未测 |
+
+### 未解的现象（附证据）
+
+- **落地后第一次相对位移测不到转角**：B2（Camera）传送落地后第一次探测 180 像素，导航日志 `camera_probe rotation 0.0`，之后 360 像素转 29°；当时没有发 Option。上午打开再关闭大地图后的第一次位移是转了的。引擎会把探测量加倍后恢复。日志分不清是游戏吞掉了输入还是朝向测量没反映。
+- **真实指针有时随相对位移移动**：调查里 +200 像素对应约 100 点（并非每次）；中键探针第一次运行（游戏刚重启）+400 像素让指针移动 +199 点；A1 重跑时完全没动。单元的相对位移事件位置是当前指针、只带 delta、定向发给游戏进程，推断是游戏自己挪的指针。
+- **细调脉冲按住时间比请求长**：Wasd 路线请求 30 毫秒，实际 59、105、118 毫秒（与客户端收到按下、松开请求的时间差一致）；不是 40 毫秒下限造成的，现有日志不足以确定是调度、通信还是检查间隔。
+- **地图拖拽要几秒**：300 毫秒的拖拽从按下到松开约 2.6–3.0 秒；推测是每一步移动都做检查（单元不记录拖动的每一步），未核实。
+- **网页端**（风险 12）：无头浏览器改转向设置未能可靠保存；`PUT /api/config` 偶发 500，WebSocket 没有升级，下拉框不生效。客户端界面里改设置正常。
+
+### 操作上的教训
+
+- 开发目录直接运行**工作区里的** agent 和资源：实机会话期间工作区要始终是可以直接跑的状态，不能留半截改动；跑之前告诉编排方比已签核的 tip 多了哪些提交。改了控制单元要重新构建运行时并**重启客户端**才会加载（已加载的单元留在进程内存里）。
+- 维护者是远程操作这台 Mac 的：远程会话断开后 Mac 会锁屏，游戏失去前台，正在跑的任务按设计暂停，解锁后游戏一回到前台就自动继续（风险 13）。
+- 「开始」要维护者自己在客户端里按；用无头浏览器点网页端没有成功。截图、改配置文件、重启客户端可以由我们做（重启不向游戏发任何东西，事前事后各截一张图作证）。
+- 游戏重启后窗口 id 会变，客户端实例的连接要重新连接（开始任务时会重连）。
+
+### 完整日常：「全套日常」实例的任务（按实例顺序）
+
+| 任务 | Mac 状态 | 实机测试之前还缺什么 | 消耗 |
+| --- | --- | --- | --- |
+| 启动游戏（前置） | 不支持（`launch_game` 能力为假） | 维护者手动启动游戏，这一项保持不勾 | — |
+| 挖掘 | 代码可跑（按键、点击） | 维护者暂缓实机测试；不需要新能力 | 领取并重新派遣挖掘 |
+| 朝夕 | 需要多种输入 | 场景左键（战斗）、右键加相对镜头（捕虫）、文字输入与 Ctrl+A（结晶数量）、收藏库存的悬停（每日升级）、幻境部分 | 活跃能量等每日进度 |
+| 幻境挑战 | 未单独梳理 | 计划把幻境整体放在后面；需要按代码梳理 | 活跃能量 |
+| 星光结晶 | 依赖导航（已验证的路径为主） | 传送时的地区列表滚动、地图拖拽、Wasd 转向与中键 | 每日收集 |
+| 星海 | 子项多 | 场景左键（摆放）、文字输入（聊天）、右键与镜头 | 每日进度 |
+| 家园 | 依赖导航和钓鱼 | 场景右键（能力、收杆）、Ctrl 朝向对齐 | 每日进度 |
+| 月卡 | 白名单内 | 乐园构想（这个账号未解锁）未验证 | 月卡奖励 |
+| 邮箱 | 白名单内 | — | — |
+| 兑换码 | 被结构性问题挡住 | Mac 上没有剪贴板后端（`host.clipboard()` 会拒绝），还要文字输入 | 兑换码 |
+| 每周免费礼包 | 白名单内 | 单行滚动幅度未测 | 本周免费项 |
+| 每月结晶兑换 | 不放开 | 既有缺陷 `agent/daily/monthly_exchange.py:41`（`self.rt.back` 不存在，Windows 同样存在），维护者决定暂不修 | — |
+| 奇迹之冠巅峰赛 | 未梳理 | 需要按代码梳理 | 本期挑战 |
+
+另外：钓鱼、探索辅助、路线工作室、键位读取这些客户端功能用 `selectGameController` 只挑 Win32 控制器，Mac 上会提示「请先加载项目资源」；常驻能力需要测试账号没有的衣服。
+
+建议的推进顺序和理由：
+1. **场景右键、左键的实机验证**（扩展 `scene-button-check`，找一个不需要特定衣服、不消耗东西的场景动作；右键是能力和收杆，左键是攻击和放置）——它挡住朝夕、星海、家园三项。
+2. **挖掘**（维护者同意后）——不需要新能力，最快多放开一项。
+3. **星光结晶**——主要用已验证的导航，能顺带验证传送时的地区列表滚动和 Wasd 转向下的中键。
+4. **家园**——需要右键和 Ctrl 朝向对齐。
+5. **星海**——需要左键、文字输入。
+6. **朝夕**——最复杂，最后。
+7. 幻境挑战、奇迹之冠先按代码梳理；兑换码要先做 Mac 剪贴板后端（`NSPasteboard`，按惯例用 ctypes，不用 PyObjC）。
 
 ## 打包与分发
 
