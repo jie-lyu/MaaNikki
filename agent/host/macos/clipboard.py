@@ -16,6 +16,10 @@ from functools import lru_cache
 _UTF8 = 0x08000100  # kCFStringEncodingUTF8
 
 
+class CFRange(ctypes.Structure):
+    _fields_ = [("location", ctypes.c_long), ("length", ctypes.c_long)]
+
+
 @lru_cache(maxsize=1)
 def _runtime():
     objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
@@ -33,11 +37,11 @@ def _runtime():
     cf.CFStringCreateWithBytes.restype = ctypes.c_void_p
     cf.CFStringGetLength.argtypes = [ctypes.c_void_p]
     cf.CFStringGetLength.restype = ctypes.c_long
-    cf.CFStringGetMaximumSizeForEncoding.argtypes = [ctypes.c_long, ctypes.c_uint32]
-    cf.CFStringGetMaximumSizeForEncoding.restype = ctypes.c_long
-    cf.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
-    cf.CFStringGetCString.restype = ctypes.c_bool
+    cf.CFStringGetBytes.argtypes = [ctypes.c_void_p, CFRange, ctypes.c_uint32, ctypes.c_uint8, ctypes.c_bool,
+                                    ctypes.c_char_p, ctypes.c_long, ctypes.POINTER(ctypes.c_long)]
+    cf.CFStringGetBytes.restype = ctypes.c_long
     cf.CFRelease.argtypes = [ctypes.c_void_p]
+    cf.CFRelease.restype = None
     pasteboard_class = objc.objc_getClass(b"NSPasteboard")
     string_type = ctypes.c_void_p.in_dll(appkit, "NSPasteboardTypeString").value
     if not pasteboard_class or not string_type:
@@ -59,11 +63,16 @@ def _runtime():
 
 
 def _python_string(cf, ref) -> str | None:
-    size = cf.CFStringGetMaximumSizeForEncoding(cf.CFStringGetLength(ref), _UTF8) + 1
-    buffer = ctypes.create_string_buffer(size)
-    if not cf.CFStringGetCString(ref, buffer, size, _UTF8):
+    """The whole string, by length: a C-string copy would stop at an embedded NUL and the restore would
+    then put back only the text before it."""
+    whole = CFRange(0, cf.CFStringGetLength(ref))
+    size = ctypes.c_long(0)
+    if cf.CFStringGetBytes(ref, whole, _UTF8, 0, False, None, 0, ctypes.byref(size)) != whole.length:
         return None
-    return buffer.value.decode("utf-8")
+    buffer = ctypes.create_string_buffer(max(size.value, 1))
+    if cf.CFStringGetBytes(ref, whole, _UTF8, 0, False, buffer, size.value, ctypes.byref(size)) != whole.length:
+        return None
+    return buffer.raw[:size.value].decode("utf-8")
 
 
 def _board(rt):

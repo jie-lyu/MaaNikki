@@ -700,7 +700,7 @@ class SelectionTests(unittest.TestCase):
         try:
             with patch.object(module, "_board", lambda rt: board):
                 self.assertEqual(module.get_clipboard_text(), (False, ""))  # no text: nothing to restore
-                for text in ("ABCD1234", "兑换码 测试 ✓"):
+                for text in ("ABCD1234", "兑换码 测试 ✓😀", "left\0right", ""):
                     self.assertTrue(module.set_clipboard_text(text))
                     self.assertEqual(module.get_clipboard_text(), (True, text))
         finally:

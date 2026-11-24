@@ -415,6 +415,7 @@
     "MacOSPreviewPathTests.test_wrong_frame_size_skips_window_resizing_without_the_capability",
     "OverlayThemeTests.test_theme_resolves_without_a_windows_registry",
     "SelectionTests.test_backend_follows_platform_and_controller_type",
+    "SelectionTests.test_macos_clipboard_round_trips_text_on_a_private_pasteboard",
     "SelectionTests.test_non_windows_host_rejects_with_the_previous_message",
     "SelectionTests.test_optional_adapters_follow_capabilities",
     "SelectionTests.test_process_helpers_are_windows_only_and_delegate_unchanged",
@@ -442,7 +443,9 @@
     "WindowsRuleTests.test_window_only_capture_rule"
    ],
    "known_failures": [],
-   "skips": []
+   "skips": [
+    "SelectionTests.test_macos_clipboard_round_trips_text_on_a_private_pasteboard"
+   ]
   },
   "test_host_imports.py": {
    "tests": [

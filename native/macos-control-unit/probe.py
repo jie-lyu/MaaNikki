@@ -837,7 +837,7 @@ def cmd_scene_button_check(args) -> int:
     if turn_limit >= 100:
         # No change can exceed the limit: a press could never be judged, so do not send one.
         steps.append({"step": "still frames", "ambient_changed_pct": ambient, "change_limit_pct": round(turn_limit, 1)})
-        fail("the scene changes too much while standing still to judge a turn or a recentre; nothing sent")
+        fail("the scene changes too much while standing still to judge a turn or a recentre; no scene button pressed")
     # Only the middle button needs the camera turned away first (so that a recentre has something to
     # undo). Left (净化) and right (the selected ability) act on their own; their result is judged
     # from the saved frames.
