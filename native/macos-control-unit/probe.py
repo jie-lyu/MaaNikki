@@ -596,8 +596,9 @@ def cmd_camera_check(args) -> int:
             fail("the unit refused the absorbing move")
         time.sleep(0.4)
         absorbed = _cursor()
-        steps.append({"step": "absorbing move +1", "cursor": absorbed})
-        if abs(absorbed[0] - after_option[0]) > 1 or abs(absorbed[1] - after_option[1]) > 1:
+        steps.append({"step": "absorbing move +1", "cursor": absorbed,
+                      "cursor_moved_by": (round(absorbed[0] - after_option[0], 1), round(absorbed[1] - after_option[1], 1))})
+        if (abs(absorbed[0] - after_option[0]) > 1 or abs(absorbed[1] - after_option[1]) > 1) and not args.record_cursor:
             fail("the real cursor moved after the absorbing move: relative moves must not move it")
         start = frame("after-absorb")
 
@@ -616,10 +617,10 @@ def cmd_camera_check(args) -> int:
         cursor = _cursor()
         steps.append({"step": name, "sent": sent, "scene_changed_pct": changed, "cursor": cursor,
                       **({"vs_start_pct": _changed(start[band], after[band])} if sign < 0 else {})})
-        moved = (round(cursor[0] - previous[0], 1), round(cursor[1] - previous[1], 1))
-        steps[-1]["cursor_moved_by"] = moved
+        # Reported per move; judged (strict mode) against the baseline, so small drifts cannot add up unnoticed.
+        steps[-1]["cursor_moved_by"] = (round(cursor[0] - previous[0], 1), round(cursor[1] - previous[1], 1))
         previous = cursor
-        if (abs(moved[0]) > 1 or abs(moved[1]) > 1) and not args.record_cursor:
+        if (abs(cursor[0] - baseline[0]) > 1 or abs(cursor[1] - baseline[1]) > 1) and not args.record_cursor:
             fail(f"the real cursor moved after {name}: relative moves must not move it")
         if changed < 1:
             fail(f"{name} did not change the scene: the camera did not turn")
@@ -701,16 +702,23 @@ def cmd_key_sequence_check(args) -> int:
     steps.append({"step": "still frames", "frame_changed_pct": _changed(start, still), "cursor": cursor})
     held = []
     began = time.perf_counter()
+    down_started = None
     try:
         for kind, value in KEY_SEQUENCES[args.sequence]:
             at = round(time.perf_counter() - began, 3)
             if kind == "wait":
-                time.sleep(value)
+                # Like the agent's holds: the clock starts before the preceding press is submitted, so the
+                # submission time counts toward the wait.
+                origin = down_started if down_started is not None else time.perf_counter()
+                time.sleep(max(0.0, value - (time.perf_counter() - origin)))
+                down_started = None
                 continue
             if kind == "down":
                 held.append(value)  # counted before submitting: once submitted it may have reached the unit
+                down_started = time.perf_counter()
                 sent = controller.post_key_down(value).wait().succeeded
             else:
+                down_started = None
                 # Forgotten only once confirmed: a refused or interrupted release is retried by the cleanup.
                 sent = controller.post_key_up(value).wait().succeeded
                 if sent:
@@ -719,7 +727,9 @@ def cmd_key_sequence_check(args) -> int:
             if not sent:
                 fail(f"the unit refused key {kind} {value}")
     finally:
-        # Release what is still held, last pressed first, whatever stopped the sequence.
+        # Release every key still held, last pressed first, whatever stopped the sequence; only then, if any
+        # release was not confirmed, ask inactive() and stop.
+        unconfirmed = []
         for key in reversed(held):
             try:
                 released = controller.post_key_up(key).wait().succeeded
@@ -727,12 +737,20 @@ def cmd_key_sequence_check(args) -> int:
                 released = False
             steps.append({"step": f"cleanup key up {key}", "released": released})
             if not released:
-                try:
-                    inactive = controller.post_inactive().wait().succeeded
-                except BaseException:
-                    inactive = False
-                steps.append({"step": "inactive", "succeeded": inactive})
-                fail(f"the release of key {key} was not confirmed; inactive() was asked to release it")
+                unconfirmed.append(key)
+        if unconfirmed:
+            try:
+                inactive = controller.post_inactive().wait().succeeded
+            except BaseException:
+                inactive = False
+            steps.append({"step": "inactive", "succeeded": inactive})
+            fail(f"the release of key(s) {unconfirmed} was not confirmed; inactive() was asked to release them "
+                 f"({'confirmed' if inactive else 'NOT confirmed'})")
+    if args.sequence == "face-camera":
+        # The agent judges the alignment 0.4 s after releasing Ctrl.
+        time.sleep(0.4)
+        settled = frame("settled")
+        steps.append({"step": "settled (0.4 s)", "frame_changed_pct": _changed(still, settled)})
     time.sleep(1.0)
     after = frame("after")
     steps.append({"step": "after", "frame_changed_pct": _changed(still, after), "cursor": _cursor()})
@@ -767,9 +785,20 @@ def cmd_timing(args) -> int:
         options = 0x00FFFFFF & ~(1 << 20)  # NSActivityUserInitiatedAllowingIdleSystemSleep
         if args.activity == "latency-critical":
             options |= 0xFF00000000  # NSActivityLatencyCritical
+        cf.CFRelease.argtypes, cf.CFRelease.restype = [ctypes.c_void_p], None
         reason = cf.CFStringCreateWithCString(None, b"MaaNikki timing probe", 0x08000100)
         token = message(ctypes.c_void_p, ctypes.c_uint64, ctypes.c_void_p)(
             info, objc.sel_registerName(b"beginActivityWithOptions:reason:"), options, reason)
+        cf.CFRelease(reason)  # the activity keeps its own reference
+        if not token:
+            sys.exit("NSProcessInfo returned no activity; nothing measured")
+
+    def hid_idle():
+        hid = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True).stdout
+        idle = next((int(line.split()[-1]) / 1e9 for line in hid.splitlines() if "HIDIdleTime" in line), None)
+        return None if idle is None else round(idle, 1)
+
+    front_start, idle_start = _front_bundle_id(), hid_idle()
     try:
         samples = []
         for _ in range(args.samples):
@@ -780,12 +809,12 @@ def cmd_timing(args) -> int:
         if token:
             message(None, ctypes.c_void_p)(info, objc.sel_registerName(b"endActivity:"), token)
     samples.sort()
-    hid = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True).stdout
-    idle = next((int(line.split()[-1]) / 1e9 for line in hid.splitlines() if "HIDIdleTime" in line), None)
+
+    def percentile(p):  # nearest rank: the smallest sample with at least p% of the samples at or below it
+        return round(samples[max(0, -(-len(samples) * p // 100) - 1)], 1)
     print(json.dumps({"request_ms": args.request_ms, "activity": args.activity, "samples": args.samples,
-                      "p50_ms": round(samples[len(samples) // 2], 1), "p95_ms": round(samples[int(len(samples) * .95) - 1], 1),
-                      "max_ms": round(samples[-1], 1), "front_bundle": _front_bundle_id(),
-                      "hid_idle_s": None if idle is None else round(idle, 1)}))
+                      "p50_ms": percentile(50), "p95_ms": percentile(95), "max_ms": round(samples[-1], 1),
+                      "front_bundle": [front_start, _front_bundle_id()], "hid_idle_s": [idle_start, hid_idle()]}))
     return 0
 
 
@@ -1087,7 +1116,7 @@ def main() -> int:
     timing = sub.add_parser("timing")
     timing.add_argument("--activity", choices=("none", "user-initiated", "latency-critical"), default="none")
     timing.add_argument("--request-ms", type=float, default=30.0)
-    timing.add_argument("--samples", type=int, default=30)
+    timing.add_argument("--samples", type=int, choices=range(5, 1001), default=30, metavar="5-1000")
     for name in ("windows", "lifecycle", "capture", "input-check", "refusal-check", "hit-test", "camera-check",
                  "scene-button-check", "key-sequence-check"):
         command = sub.add_parser(name)

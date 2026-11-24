@@ -51,6 +51,7 @@ class FakeController:
         self.info = {"type": "macos", "maanikki_patch": patch}
         self.interrupt = set(interrupt)  # event kinds whose wait() raises KeyboardInterrupt
         self.refuse_keys = set(refuse_keys)  # key codes whose key_down is refused
+        self.inactive_ok = True
 
     def _record(self, event, ok=True):
         self.events.append(event)
@@ -74,10 +75,13 @@ class FakeController:
         return self._record(("key_up", key), self.key_up_ok)
 
     def post_inactive(self):
-        return self._record(("inactive",))
+        return self._record(("inactive",), self.inactive_ok)
+
+    def post_click_key(self, key):
+        return self._record(("click_key", key))
 
 
-def run(argv, controller, abilities=("insect",), cursor=(100.0, 100.0), command="scene-button-check"):
+def run(argv, controller, abilities=("insect",), cursor=(100.0, 100.0), command="scene-button-check", sleep=None):
     """Run scene-button-check with fakes; returns (exit code or "interrupted", stdout, saved frame names).
 
     The HUD reads ``abilities`` in turn and keeps the last one for any further reading.
@@ -105,7 +109,7 @@ def run(argv, controller, abilities=("insect",), cursor=(100.0, 100.0), command=
             mock.patch.object(probe, "_map_back_score", lambda image: 0.5), \
             mock.patch.object(probe, "_cursor", cursor if callable(cursor) else (lambda: cursor)), \
             mock.patch.object(probe, "_game_window_bounds", lambda window: (0, 0, 1920, 1080)), \
-            mock.patch.object(probe.time, "sleep", lambda seconds: None), \
+            mock.patch.object(probe.time, "sleep", sleep or (lambda seconds: None)), \
             mock.patch.object(sys, "argv", ["probe.py", command, "--profile", "maanikki", "--game",
                                             "--out", str(Path(out) / "run"), *argv]), \
             mock.patch.object(probe, "_ensure_runtime", lambda runtime: None), \
@@ -331,8 +335,50 @@ class KeySequenceCheckTests(unittest.TestCase):
         controller = FakeController(refuse_keys={13}, key_up_ok=False)
         code, output, _ = self.sequence("face-camera", controller)
         self.assertEqual(code, 1)
-        self.assertEqual(controller.events, [("key_down", 59), ("key_down", 13), ("key_up", 13), ("inactive",)])
-        self.assertIn("release of key 13 was not confirmed", output)
+        # Every remaining key is tried (W, then Ctrl) before inactive() is asked.
+        self.assertEqual(controller.events, [("key_down", 59), ("key_down", 13), ("key_up", 13), ("key_up", 59),
+                                             ("inactive",)])
+        self.assertIn("release of key(s) [13, 59] was not confirmed", output)
+
+    def test_an_interrupted_w_with_failing_releases_still_tries_ctrl_before_inactive(self):
+        class InterruptW(FakeController):
+            def post_key_down(self, key):
+                job = super().post_key_down(key)
+                job.interrupt = key == 13  # Ctrl+C while waiting for W's press
+                return job
+
+            def post_key_up(self, key):
+                return self._record(("key_up", key), key != 13)  # W's release fails
+
+        controller = InterruptW()
+        controller.inactive_ok = False
+        code, output, _ = self.sequence("face-camera", controller)
+        self.assertEqual(controller.events, [("key_down", 59), ("key_down", 13), ("key_up", 13), ("key_up", 59),
+                                             ("inactive",)])
+        self.assertEqual(code, 1)
+        self.assertIn("release of key(s) [13] was not confirmed", output)
+        self.assertIn("NOT confirmed", output)
+
+    def test_face_camera_counts_the_submission_time_toward_the_80_ms_pulse(self):
+        clock = {"t": 0.0}
+        slept = []
+
+        class SlowAck(FakeController):
+            def post_key_down(self, key):
+                clock["t"] += 0.06  # a 60 ms acknowledgement
+                return super().post_key_down(key)
+
+        def sleep(seconds):
+            slept.append(round(seconds, 3))
+            clock["t"] += seconds
+        controller = SlowAck()
+        with mock.patch.object(probe.time, "perf_counter", lambda: clock["t"]):
+            code, output, frames = run(["--sequence", "face-camera"], controller, command="key-sequence-check",
+                                       sleep=sleep)
+        self.assertEqual(code, 0, output)
+        self.assertIn(0.02, slept)  # 80 ms from before the W submission, not 80 ms after its acknowledgement
+        self.assertIn(0.4, slept)
+        self.assertTrue(any("settled" in name for name in frames), frames)
 
 
 class CameraCheckCursorTests(unittest.TestCase):
@@ -349,12 +395,51 @@ class CameraCheckCursorTests(unittest.TestCase):
         self.assertIn('"cursor_moved_by": [\n      200.0', output)
         self.assertIn('"cursor_moved_by": [\n      -200.0', output)
 
+    def test_strict_mode_judges_against_the_baseline_so_small_drifts_add_up(self):
+        controller = FakeController()
+
+        def creeping():  # 0.8 points per move: each step alone is within 1 point, the total is not
+            return (100.0 + 0.8 * sum(1 for e in controller.events if e[0] == "move"), 100.0)
+        code, output, _ = run([], controller, cursor=creeping, command="camera-check")
+        self.assertEqual(code, 1)
+        self.assertIn("the real cursor moved after relative move -400", output)
+
+    def test_record_cursor_with_option_records_the_absorbing_move(self):
+        controller = FakeController()
+        code, output, _ = run(["--record-cursor", "--option"], controller, cursor=self.dragging_cursor(controller),
+                              command="camera-check")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(controller.events[1], ("move", 1, 0))
+        self.assertIn('"step": "absorbing move +1"', output)
+        self.assertIn('"cursor_moved_by": [\n      0.5', output)
+
     def test_without_the_flag_a_moved_cursor_still_stops_the_check(self):
         controller = FakeController()
         code, output, _ = run([], controller, cursor=self.dragging_cursor(controller), command="camera-check")
         self.assertEqual(code, 1)
         self.assertEqual(controller.events, [("move", 400, 0)])
         self.assertIn("the real cursor moved", output)
+
+
+class TimingTests(unittest.TestCase):
+    def test_percentiles_are_ordered_nearest_rank(self):
+        durations = iter([0.050, 0.030, 0.040, 0.100, 0.035])
+        clock = {"t": 0.0}
+
+        def sleep(seconds):
+            clock["t"] += next(durations)
+        with mock.patch.object(probe.time, "sleep", sleep), mock.patch.object(probe.time, "perf_counter", lambda: clock["t"]), \
+                mock.patch.object(probe, "_front_bundle_id", lambda: "x"), \
+                mock.patch.object(sys, "argv", ["probe.py", "timing", "--samples", "5"]), \
+                mock.patch("subprocess.run", return_value=types.SimpleNamespace(stdout="")):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(probe.main(), 0)
+        result = json.loads(stdout.getvalue())
+        self.assertEqual((result["p50_ms"], result["p95_ms"], result["max_ms"]), (40.0, 100.0, 100.0))
+        with contextlib.redirect_stderr(io.StringIO()), mock.patch.object(sys, "argv", ["probe.py", "timing", "--samples", "0"]):
+            with self.assertRaises(SystemExit):
+                probe.main()
 
 
 class AbilityReadingTests(unittest.TestCase):
