@@ -1259,8 +1259,10 @@ function App() {
       }
 
       // 检查是否有待安装的更新（上次下载完成但未安装）
-      // 调试版本跳过待安装更新检测
-      if (!isDebugVersion(result.interface.version)) {
+      // 调试版本跳过待安装更新检测；interface 未配置任何更新源时（Mac 测试包）也不恢复安装，
+      // 与 checkAutomaticUpdate 的条件一致，保存的记录原样保留。
+      const updatesConfigured = !!(result.interface.mirrorchyan_rid || result.interface.github);
+      if (updatesConfigured && !isDebugVersion(result.interface.version)) {
         const pendingUpdate = await getPendingUpdateInfo(result.interface.version);
         if (pendingUpdate) {
           log.info('检测到待安装更新:', pendingUpdate.versionName);
