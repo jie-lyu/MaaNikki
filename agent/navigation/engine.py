@@ -746,7 +746,7 @@ class Navigator:
         # macOS: a press the unit would refuse (cursor outside the game window) would raise and stop the
         # route; report the alignment unavailable so the callers' keyboard fallbacks run. Win32: never.
         blocked = getattr(self.inputs, "scene_press_blocked", None)
-        if callable(blocked) and blocked():
+        if callable(blocked) and blocked() is True:
             if not self._middle_blocked_reported:
                 self._middle_blocked_reported = True
                 self.event({"type": "middle_align_unavailable", "reason": "cursor_outside_window"})

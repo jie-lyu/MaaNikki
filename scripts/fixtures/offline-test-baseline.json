@@ -414,6 +414,7 @@
     "MacOSPreviewPathTests.test_windows_still_releases_directly_after_focus_loss",
     "MacOSPreviewPathTests.test_wrong_frame_size_skips_window_resizing_without_the_capability",
     "MiddleAlignFallbackTests.test_a_heading_recheck_probes_with_keys_without_pressing",
+    "MiddleAlignFallbackTests.test_a_required_scene_press_outside_the_window_says_what_to_do_and_presses_nothing",
     "MiddleAlignFallbackTests.test_a_stationary_turn_falls_back_to_keys_without_pressing",
     "MiddleAlignFallbackTests.test_foreground_input_asks_the_backend_and_win32_never_blocks",
     "MiddleAlignFallbackTests.test_the_gate_reports_once_per_blocked_stretch_and_is_unchanged_without_the_check",

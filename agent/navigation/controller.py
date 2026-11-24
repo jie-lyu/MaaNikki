@@ -202,7 +202,7 @@ class ForegroundInput:
         """Whether the backend knows a scene button press would be refused right now (macOS: the cursor
         is outside the game window). Backends without the notion (Win32) never block."""
         blocked = getattr(self.native, "scene_press_blocked", None)
-        return bool(blocked()) if callable(blocked) else False
+        return callable(blocked) and blocked() is True  # only a backend's real answer; never a stand-in object
 
     def force_key_up(self, key):
         # Cleanup only: do not require a working Agent channel or refocus.
@@ -269,6 +269,10 @@ class ForegroundInput:
         if button not in (0, 1, 2, 3, 4):
             raise NavigationError("鼠标按键未登记。")
         self.check()
+        if self.scene_press_blocked():
+            # macOS: the control unit presses where the cursor is and refuses outside the game window; say
+            # what to do instead of a generic failure. Nothing was pressed, so nothing is tracked.
+            raise NavigationError("鼠标指针不在游戏画面内，无法按场景鼠标键；请把鼠标指针移回游戏窗口后重新开始。")
         self.buttons.add(button)
         # Press only; the backend never moves the cursor (that could turn the camera).
         if not self.native.press_mouse(button):

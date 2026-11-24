@@ -997,6 +997,20 @@ class MiddleAlignFallbackTests(unittest.TestCase):
         inputs.native = SimpleNamespace(scene_press_blocked=lambda: True)
         self.assertTrue(inputs.scene_press_blocked())
 
+    def test_a_required_scene_press_outside_the_window_says_what_to_do_and_presses_nothing(self):
+        from navigation.controller import ForegroundInput
+        inputs = ForegroundInput.__new__(ForegroundInput)
+        inputs.check, inputs.buttons = Mock(), set()
+        inputs.native = SimpleNamespace(scene_press_blocked=lambda: True, press_mouse=Mock(return_value=True))
+        with self.assertRaisesRegex(NavigationError, "鼠标指针不在游戏画面内"):
+            inputs.mouse_down(1)
+        inputs.native.press_mouse.assert_not_called()
+        self.assertEqual(inputs.buttons, set())
+        inputs.native = SimpleNamespace(press_mouse=Mock(return_value=True))  # Win32: no such check
+        inputs.mouse_down(1)
+        inputs.native.press_mouse.assert_called_once_with(1)
+        self.assertEqual(inputs.buttons, {1})
+
     class Inputs:
         """Foreground inputs whose turns move a shared heading; counts middle presses."""
         window_only = False
