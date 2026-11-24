@@ -50,7 +50,7 @@
   "notes": {
     "MaaNikki_WeeklyFreeGifts": "Mac 实测（2026-11-24）：靠滚动找到并领取了三个免费礼包；每滚动一行的距离未测。",
     "MaaNikki_MonthlyPass": "Mac 实测（2026-11-24）：领取了旅行任务和旅行秘宝；测试账号的乐园构想未解锁、按设计跳过，乐园构想领取在 Mac 上未验证。",
-    "MaaNikki_CollectStarlightCrystals": "Mac 实测一次（2026-11-24，由维护者决定加入）：跑图收集走完 8 条路线中的 xinghai_crystal_3，收集数经维护者确认；原地转向与中键回正未触发过；「星忆晶树」子项在 Mac 上没跑过，维护者接受。",
+    "MaaNikki_CollectStarlightCrystals": "Mac 实测一次（2026-11-24，由维护者决定加入）：跑图收集走完 8 条路线中的 xinghai_crystal_3，收集数经维护者确认；日志看不出走路时是否用到原地转向与中键回正；「星忆晶树」子项在 Mac 上没跑过，维护者接受。",
     "MaaNikki_MinigameBling": "每次进场或付费重试消耗 100 噗灵，默认 267 轮",
     "MaaNikki_Crown": "可选的商店兑换会按最大数量兑换",
     "MaaNikki_Home": "可能把能力保存进能力方案的槽位（永久改动）",
@@ -60,6 +60,7 @@
     "MaaNikki_RouteRun": "会执行所选路线文件里的动作",
     "MaaNikki_Xinghai": "会放置摆饰、给星绘图册照片点赞；Mac 上不做聚会聊天",
     "MaaNikki_RedeemCodes": "Mac 上只用剪贴板粘贴（游戏的粘贴按钮在 Mac 上未实测），粘贴失败的码会停下，不手动输入",
-    "MaaNikki_RealmChallenge": "素材激化需要输入数量时在 Mac 上会停止，不改用默认副本"
+    "MaaNikki_RealmChallenge": "默认会用掉活跃能量：先用双倍次数、挑战每周幻境，剩下的活跃能量全部用于默认副本（默认祝福闪光关卡）；素材激化需要输入数量时在 Mac 上会停止，不改用默认副本",
+    "MaaNikki_Dig": "默认开启「再次派遣」：收取本轮奖励后沿用当前挖掘目标再次派遣，可在任务设置里关闭"
   }
 }
