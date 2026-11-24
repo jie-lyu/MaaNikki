@@ -13,6 +13,7 @@ import {
   WARDROBE_INSTANCE_ID,
 } from '@/services/wardrobeService';
 import { isTauri } from '@/utils/paths';
+import { useGameTargetUnsupportedReason } from '@/utils/macFeatures';
 import { LogsPanel } from './LogsPanel';
 import { primaryButton, secondaryButton } from './ui/FeaturePage';
 
@@ -41,11 +42,13 @@ export function ManualReadButton({
   const { status, mode } = useWardrobeStore();
   const busy = ['starting', 'reading', 'stopping'].includes(status);
   const busyHere = busy && mode === targetMode;
+  const macUnsupported = useGameTargetUnsupportedReason();
 
   return (
     <button
       type="button"
-      disabled={!isTauri() || (busy && !busyHere) || status === 'stopping'}
+      disabled={!isTauri() || (busy && !busyHere) || status === 'stopping' || (!busyHere && !!macUnsupported)}
+      title={macUnsupported || undefined}
       onClick={(event) => {
         if (stopPropagation) {
           event.preventDefault();

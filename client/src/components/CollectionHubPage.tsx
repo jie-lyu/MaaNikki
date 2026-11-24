@@ -13,6 +13,7 @@ import {
   WARDROBE_INSTANCE_ID,
 } from '@/services/wardrobeService';
 import { isTauri } from '@/utils/paths';
+import { useGameTargetUnsupportedReason } from '@/utils/macFeatures';
 import { LogsPanel } from './LogsPanel';
 import { FeaturePage, primaryButton, secondaryButton, StatusBar, Tabs } from './ui/FeaturePage';
 import { useWardrobePlanStore } from '@/services/scoring/wardrobePlanStore';
@@ -50,6 +51,7 @@ export function CollectionHubPage({ onClose }: { onClose: () => void }) {
   const [showDetails, setShowDetails] = useState(false);
   const [refreshToken, setRefreshToken] = useState(0);
   const busy = ['starting', 'reading', 'stopping'].includes(status);
+  const macUnsupported = useGameTargetUnsupportedReason();
   const closetBusy = busy && (mode === 'wardrobe' || mode === 'renewal' || mode === 'renewal_inc');
   const scan = data?.wardrobe?.last_scan ?? data?.wardrobe?.inventory;
   const renewalScan = data?.wardrobe?.renewal_scan;
@@ -85,10 +87,10 @@ export function CollectionHubPage({ onClose }: { onClose: () => void }) {
   const compendiumBusy = busy && mode === 'wardrobe';
   const readButton = (
     <button
-      disabled={!isTauri() || (busy && !primaryBusy) || status === 'stopping'}
+      disabled={!isTauri() || (busy && !primaryBusy) || status === 'stopping' || (!primaryBusy && !!macUnsupported)}
       onClick={() => (primaryBusy ? stopWardrobeRead() : void (hasClosetBaseline ? startRenewalIncrementalRead() : startRenewalRead()))}
       className={primaryBusy ? secondaryButton : primaryButton}
-      title={hasClosetBaseline ? '按获得时间扫描新增服装与近期升级，几秒完成' : '从「服装焕新」一次同步所有可养成服装与等级'}
+      title={macUnsupported || (hasClosetBaseline ? '按获得时间扫描新增服装与近期升级，几秒完成' : '从「服装焕新」一次同步所有可养成服装与等级')}
     >
       {primaryBusy ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
       {primaryBusy ? '停止读取' : hasClosetBaseline ? '快速增量同步' : '从服装焕新读取'}
@@ -96,10 +98,10 @@ export function CollectionHubPage({ onClose }: { onClose: () => void }) {
   );
   const fullRenewalButton = hasClosetBaseline ? (
     <button
-      disabled={!isTauri() || (busy && !renewalFullBusy) || status === 'stopping'}
+      disabled={!isTauri() || (busy && !renewalFullBusy) || status === 'stopping' || (!renewalFullBusy && !!macUnsupported)}
       onClick={() => (renewalFullBusy ? stopWardrobeRead() : void startRenewalRead())}
       className={secondaryButton}
-      title="完整遍历「服装焕新」全部分类，重新核对每件服装等级"
+      title={macUnsupported || '完整遍历「服装焕新」全部分类，重新核对每件服装等级'}
     >
       {renewalFullBusy ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
       {renewalFullBusy ? '停止读取' : '完整焕新读取'}
@@ -107,10 +109,10 @@ export function CollectionHubPage({ onClose }: { onClose: () => void }) {
   ) : null;
   const compendiumButton = (
     <button
-      disabled={!isTauri() || (busy && !compendiumBusy) || status === 'stopping'}
+      disabled={!isTauri() || (busy && !compendiumBusy) || status === 'stopping' || (!compendiumBusy && !!macUnsupported)}
       onClick={() => (compendiumBusy ? stopWardrobeRead() : void startWardrobeRead())}
       className={secondaryButton}
-      title="额外读取妆容部件及同款进化染色数量（焕新页不包含妆容与进化数）"
+      title={macUnsupported || '额外读取妆容部件及同款进化染色数量（焕新页不包含妆容与进化数）'}
     >
       {compendiumBusy ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
       {compendiumBusy ? '停止读取' : '博物图鉴校准'}
@@ -139,7 +141,7 @@ export function CollectionHubPage({ onClose }: { onClose: () => void }) {
     }))} />
     {opened.has('closet') && <div className={clsx('space-y-4', tab !== 'closet' && 'hidden')}>
       <StatusBar tone={tone} title={closetBusy ? (READ_SPECS[mode]?.busyText ?? wardrobeLabels[status]) : !scan || errorHere || accountError ? wardrobeLabels['idle'] : scan.complete ? '衣柜记录完整' : '衣柜记录未读完'}
-        detail={errorHere || accountError || summary}>
+        detail={errorHere || accountError || (macUnsupported ? <>{summary}{summary && ' · '}<span className="text-warning">{macUnsupported}</span></> : summary)}>
         {(scan || closetBusy) && <button type="button" onClick={() => setShowDetails((value) => !value)} aria-expanded={showDetails || closetBusy} className={secondaryButton}>
           读取详情<ChevronDown className={clsx('h-3.5 w-3.5 transition-transform', (showDetails || closetBusy) && 'rotate-180')} />
         </button>}

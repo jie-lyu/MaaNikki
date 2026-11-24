@@ -5,6 +5,7 @@ import { EXPLORATION_INSTANCE_ID, explorationFeatures } from '@/types/exploratio
 import { explorationStatusLabels, setExplorationEnabled, useExplorationStore } from '@/services/explorationService';
 import { getPearpalLoginState, openPearpalLogin, usePearpalStore } from '@/services/pearpalService';
 import { isTauri } from '@/utils/paths';
+import { useGameTargetUnsupportedReason } from '@/utils/macFeatures';
 import { startFishing, stopFishing, useFishingStore } from '@/services/fishingService';
 import { OptionEditor } from './OptionEditor';
 import { Card, FeaturePage, primaryButton, secondaryButton, StatusBar } from './ui/FeaturePage';
@@ -28,13 +29,16 @@ function FeatureRows({ features }: { features: readonly (typeof explorationFeatu
 function FishingCard() {
   const status = useFishingStore((state) => state.status);
   const busy = status !== 'idle';
-  return <Card icon={Fish} title="当前位置钓鱼" aside={<button type="button" disabled={!isTauri() || status === 'stopping'}
+  const macUnsupported = useGameTargetUnsupportedReason();
+  return <Card icon={Fish} title="当前位置钓鱼" aside={<button type="button" disabled={!isTauri() || status === 'stopping' || (!busy && !!macUnsupported)}
+    title={macUnsupported || undefined}
     onClick={() => busy ? stopFishing() : void startFishing()} className={busy ? secondaryButton : primaryButton}>
     {status === 'starting' || status === 'stopping' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : busy ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
     {status === 'stopping' ? '正在停止' : busy ? '停止钓鱼' : '开始钓鱼'}
   </button>}>
     <div className="space-y-3 px-4 py-3">
       <p className="text-xs leading-5 text-text-secondary">先站在钓点面向水面，再点开始。软件会切回游戏，准备能力并自动抛竿，鱼钓光或到达次数后结束。</p>
+      {macUnsupported && <p className="text-xs leading-5 text-warning">{macUnsupported}</p>}
       {['FishingCastCount', 'FishingAbilityPlan', 'FishingRhythms'].map((key) => <OptionEditor key={key} optionKey={key} globalScope disabled={busy} />)}
     </div>
   </Card>;
@@ -42,6 +46,7 @@ function FishingCard() {
 
 export function ExplorationPage({ onClose }: { onClose: () => void }) {
   const { enabled, status, error } = useExplorationStore();
+  const macUnsupported = useGameTargetUnsupportedReason();
   const explorationSettings = useAppStore((state) => state.explorationSettings);
   const pearpalStatus = usePearpalStore((state) => state.status);
   const pearpalBusy = usePearpalStore((state) => state.busy);
@@ -54,10 +59,10 @@ export function ExplorationPage({ onClose }: { onClose: () => void }) {
 
   return <FeaturePage icon={Compass} title="辅助功能" onBack={onClose} actions={<PearpalStatusPill />}>
     <StatusBar tone={status === 'error' ? 'warn' : status === 'running' ? 'ok' : status === 'off' ? 'idle' : 'busy'} title={explorationStatusLabels[status]}
-      detail={error || '日常运行时自动暂停，结束后继续。设置自动保存，软件启动后手动开启辅助。'}>
-      <label className="flex cursor-pointer items-center gap-2 text-xs text-text-secondary">
+      detail={error || macUnsupported || '日常运行时自动暂停，结束后继续。设置自动保存，软件启动后手动开启辅助。'}>
+      <label className="flex cursor-pointer items-center gap-2 text-xs text-text-secondary" title={macUnsupported || undefined}>
         启用辅助功能
-        <input type="checkbox" role="switch" className="peer sr-only" disabled={!isTauri()} checked={enabled} onChange={(event) => setExplorationEnabled(event.target.checked)} />
+        <input type="checkbox" role="switch" className="peer sr-only" disabled={!isTauri() || (!enabled && !!macUnsupported)} checked={enabled} onChange={(event) => setExplorationEnabled(event.target.checked)} />
         <SwitchTrack checked={enabled} />
       </label>
     </StatusBar>

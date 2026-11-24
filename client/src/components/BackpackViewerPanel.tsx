@@ -6,6 +6,7 @@ import { useAccountStateStore } from '@/stores/accountStateStore';
 import { useWardrobePlanStore } from '@/services/scoring/wardrobePlanStore';
 import { startBackpackRead, stopWardrobeRead, useWardrobeStore, WARDROBE_INSTANCE_ID } from '@/services/wardrobeService';
 import { isTauri } from '@/utils/paths';
+import { useGameTargetUnsupportedReason } from '@/utils/macFeatures';
 import { LogsPanel } from './LogsPanel';
 import { primaryButton, secondaryButton, Segmented, StatusBar, Tile } from './ui/FeaturePage';
 
@@ -49,6 +50,7 @@ export function BackpackViewerPanel({ refreshToken }: { refreshToken: number }) 
   }, [search, tabFilter, catFilter, onlyStocked]);
 
   const busy = ['starting', 'reading', 'stopping'].includes(status);
+  const macUnsupported = useGameTargetUnsupportedReason();
   const readingBackpack = busy && mode === 'backpack';
   const inventory = materials.inventory ?? {};
   const summary = materials.backpack_summary;
@@ -124,7 +126,8 @@ export function BackpackViewerPanel({ refreshToken }: { refreshToken: number }) 
   const readBtn = (
     <button
       type="button"
-      disabled={!isTauri() || (busy && !readingBackpack) || status === 'stopping'}
+      disabled={!isTauri() || (busy && !readingBackpack) || status === 'stopping' || (!readingBackpack && !!macUnsupported)}
+      title={macUnsupported || undefined}
       onClick={() => (readingBackpack ? stopWardrobeRead() : void startBackpackRead())}
       className={readingBackpack ? secondaryButton : primaryButton}
     >
@@ -150,7 +153,7 @@ export function BackpackViewerPanel({ refreshToken }: { refreshToken: number }) 
 
   return (
     <div className="space-y-4">
-      <StatusBar tone={tone} title={statusTitle} detail={statusDetail}>
+      <StatusBar tone={tone} title={statusTitle} detail={macUnsupported ? <>{statusDetail} <span className="text-warning">{macUnsupported}</span></> : statusDetail}>
         <button
           type="button"
           onClick={() => setShowLogs((value) => !value)}

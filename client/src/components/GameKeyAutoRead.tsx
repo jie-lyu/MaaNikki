@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   applyGameKeysRead, dismissGameKeysRead, startGameKeysRead, stopGameKeysRead, useGameKeysReadStore,
 } from '@/services/gameKeysReadService';
+import { useGameTargetUnsupportedReason } from '@/utils/macFeatures';
 
 const STATUS_TEXT = { idle: '', starting: '正在连接游戏…', reading: '正在读取游戏键位…', stopping: '正在停止…' } as const;
 
@@ -11,6 +12,7 @@ export function GameKeyAutoRead() {
   const status = useGameKeysReadStore((state) => state.status);
   const result = useGameKeysReadStore((state) => state.result);
   const busy = status !== 'idle';
+  const macUnsupported = useGameTargetUnsupportedReason();
 
   return (
     <div className="rounded-lg border border-border/60 bg-bg-primary/60 p-3">
@@ -18,10 +20,12 @@ export function GameKeyAutoRead() {
         <div className="min-w-0 flex-1 basis-[16rem] text-xs text-text-secondary">
           让游戏停在可以移动的主界面，软件会打开「设置 → 控制 → 键位设置」读取当前键位，读完后返回游戏并列出差异供确认。
           {busy && <span className="ml-1 text-accent">{STATUS_TEXT[status]}</span>}
+          {macUnsupported && <span className="ml-1 text-warning">{macUnsupported}</span>}
         </div>
         <button
           type="button"
-          disabled={status === 'stopping'}
+          disabled={status === 'stopping' || (!busy && !!macUnsupported)}
+          title={macUnsupported || undefined}
           onClick={() => { if (busy) stopGameKeysRead(); else void startGameKeysRead(); }}
           className="shrink-0 rounded-lg border border-border px-3 py-1.5 text-sm text-accent hover:bg-bg-active disabled:opacity-50"
         >{busy ? '停止读取' : '自动读取键位'}</button>

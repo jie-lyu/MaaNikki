@@ -9,6 +9,7 @@ import { generateTaskPipelineOverride } from '@/utils/pipelineOverride';
 import { buildPiEnvVars } from '@/utils/piEnv';
 import { getInterfaceLangKey } from '@/i18n';
 import { isTauri } from '@/utils/paths';
+import { currentGameTargetUnsupportedReason } from '@/utils/macFeatures';
 import { loggers } from '@/utils/logger';
 import { startGlobalCallbackListener, waitForCtrlResult, waitForResResult } from '@/components/connection/callbackCache';
 import { maaService } from './maaService';
@@ -204,6 +205,9 @@ export function setExplorationEnabled(enabled: boolean) {
 /** Hydrate the persisted preference after the project config is loaded. */
 export function initializeExploration(enabled: boolean) {
   revision++;
+  // macOS cannot select the game window for built-in features yet: a preference carried over from a Windows
+  // config stays saved but does not start (and fail) at launch. Windows is unchanged.
+  if (enabled && currentGameTargetUnsupportedReason()) enabled = false;
   useExplorationStore.setState({ enabled, error: '', status: enabled ? 'starting' : 'off' });
   if (enabled) void serialize(reconcileSafely);
 }
