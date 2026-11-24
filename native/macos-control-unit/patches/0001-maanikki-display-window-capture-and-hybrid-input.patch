@@ -211,10 +211,10 @@ index 344f217..2744be9 100644
 +endif()
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.h b/source/MaaMacOSControlUnit/Input/HybridInput.h
 new file mode 100644
-index 0000000..1e07764
+index 0000000..1642c25
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.h
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,168 @@
 +#pragma once
 +
 +#include <map>
@@ -283,6 +283,8 @@ index 0000000..1e07764
 +    // the hover move: in the game scene a cursor move turns the camera. The agent sends it for ability
 +    // buttons; the release is an ordinary touch_up of the same contact.
 +    static constexpr int kScenePressPressure = 0x4D4E5343;
++    // Pause between the characters of input_text, so that each keyboard event lands in its own frame.
++    static constexpr int kTextCharacterGapMs = 30;
 +
 +    HybridInput(uint32_t window_id, std::shared_ptr<CaptureGeometry> geometry,
 +                std::shared_ptr<InputPlatform> platform = system_input_platform());
@@ -383,10 +385,10 @@ index 0000000..1e07764
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/HybridInput.mm b/source/MaaMacOSControlUnit/Input/HybridInput.mm
 new file mode 100644
-index 0000000..2476792
+index 0000000..8496026
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/HybridInput.mm
-@@ -0,0 +1,751 @@
+@@ -0,0 +1,773 @@
 +#include "HybridInput.h"
 +
 +#include "InputUtils.h"
@@ -919,17 +921,39 @@ index 0000000..2476792
 +
 +bool HybridInput::input_text(const std::string& text)
 +{
-+    std::lock_guard lock(mutex_);
-+    auto pid = foreground_target("input_text");
-+    if (!pid) {
-+        return false;
-+    }
 +    std::vector<UniChar> chars;
 +    if (!text_to_unichars(text, chars)) {
 +        LogError << "failed to convert text" << VAR(text);
 +        return false;
 +    }
-+    return platform_->post_text(*pid, chars);
++    // One keyboard event per character (a surrogate pair stays together): the game reads one character
++    // per event, so the whole string in one event typed only its first character (device, 2026-11-24).
++    // The lock is held per character, not across the gaps, so a stop's releases are not held up; the game
++    // must still be in front before every character.
++    for (size_t i = 0; i < chars.size();) {
++        const size_t n = (CFStringIsSurrogateHighCharacter(chars[i]) && i + 1 < chars.size()
++                          && CFStringIsSurrogateLowCharacter(chars[i + 1]))
++                             ? 2
++                             : 1;
++        {
++            std::lock_guard lock(mutex_);
++            auto pid = foreground_target("input_text");
++            if (!pid) {
++                if (i > 0) {
++                    LogError << "input_text stopped part-way" << VAR(i) << VAR(chars.size());
++                }
++                return false;
++            }
++            if (!platform_->post_text(*pid, std::vector<UniChar>(chars.begin() + i, chars.begin() + i + n))) {
++                return false;
++            }
++        }
++        i += n;
++        if (i < chars.size()) {
++            platform_->sleep_ms(kTextCharacterGapMs);
++        }
++    }
++    return true;
 +}
 +
 +bool HybridInput::key_down(int key)
@@ -1193,10 +1217,10 @@ index 0000000..2f3f97e
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/InputPlatform.mm b/source/MaaMacOSControlUnit/Input/InputPlatform.mm
 new file mode 100644
-index 0000000..3e27a9e
+index 0000000..e811825
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/InputPlatform.mm
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,207 @@
 +#include "InputPlatform.h"
 +
 +#include "MaaUtils/Logger.h"
@@ -1205,6 +1229,9 @@ index 0000000..3e27a9e
 +#include <unistd.h>
 +
 +MAA_CTRL_UNIT_NS_BEGIN
++
++// Virtual key code carried by text events (kVK_F20): the characters travel in the event's Unicode string.
++constexpr CGKeyCode kTextCarrierKey = 0x5A;
 +
 +namespace
 +{
@@ -1342,7 +1369,8 @@ index 0000000..3e27a9e
 +    bool post_text(pid_t pid, const std::vector<UniChar>& chars) override
 +    {
 +        for (bool down : { true, false }) {
-+            CGEventRef event = CGEventCreateKeyboardEvent(nullptr, 0, down);
++            // Not 0, which is kVK_ANSI_A (a movement key in the game); F20 has no character and no binding.
++            CGEventRef event = CGEventCreateKeyboardEvent(nullptr, kTextCarrierKey, down);
 +            if (!event) {
 +                LogError << "failed to create keyboard event";
 +                return false;
@@ -1486,7 +1514,7 @@ index 1d30e69..823eb4c 100644
  }
  
 diff --git a/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.h b/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.h
-index 4d8be65..6f3896e 100644
+index 4d8be65..5069c24 100644
 --- a/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.h
 +++ b/source/MaaMacOSControlUnit/Manager/MacOSControlUnitMgr.h
 @@ -2,6 +2,7 @@
@@ -1497,7 +1525,7 @@ index 4d8be65..6f3896e 100644
  #include "Base/UnitBase.h"
  #include "MaaControlUnit/ControlUnitAPI.h"
  #include "MaaFramework/MaaDef.h"
-@@ -55,6 +56,19 @@ private:
+@@ -55,6 +56,20 @@ private:
      bool connected_ = false;
      std::shared_ptr<InputBase> input_ = nullptr;
      std::shared_ptr<ScreencapBase> screencap_ = nullptr;
@@ -1513,8 +1541,9 @@ index 4d8be65..6f3896e 100644
 +inline constexpr MaaMacOSInputMethod MaaMacOSInputMethod_Hybrid = MaaMacOSInputMethod_GlobalEvent | MaaMacOSInputMethod_PostToPid;
 +
 +// Reported in get_info() so the agent can tell this build from the official unit.
-+// 2: get_info() reports geometry_changed; 3: scroll and scene mouse buttons (HybridInput)
-+inline constexpr int kMaaNikkiPatchLevel = 3;
++// 2: get_info() reports geometry_changed; 3: scroll and scene mouse buttons (HybridInput);
++// 4: input_text posts one keyboard event per character
++inline constexpr int kMaaNikkiPatchLevel = 4;
 +
  MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Screencap/DisplayWindowScreencap.h b/source/MaaMacOSControlUnit/Screencap/DisplayWindowScreencap.h
@@ -1826,10 +1855,10 @@ index 0000000..c17723a
 +MAA_CTRL_UNIT_NS_END
 diff --git a/test/maanikki/HybridInputTest.mm b/test/maanikki/HybridInputTest.mm
 new file mode 100644
-index 0000000..c264501
+index 0000000..b7b9f30
 --- /dev/null
 +++ b/test/maanikki/HybridInputTest.mm
-@@ -0,0 +1,804 @@
+@@ -0,0 +1,836 @@
 +// Deterministic tests for HybridInput over a fake InputPlatform: orderings a real desktop cannot
 +// reproduce on demand (a stop racing a press), and every refusal path. Nothing reaches the system.
 +// Built only with -DMAANIKKI_UNIT_TESTS=ON; never part of the shipped unit.
@@ -1956,11 +1985,17 @@ index 0000000..c264501
 +        return true;
 +    }
 +
-+    bool post_text(pid_t, const std::vector<UniChar>&) override
++    bool post_text(pid_t pid, const std::vector<UniChar>& chars) override
 +    {
-+        record("text");
++        if (reject_text_after >= 0 && texts++ >= reject_text_after) {
++            return false;
++        }
++        NSString* text = [NSString stringWithCharacters:chars.data() length:chars.size()];
++        record(std::string("text ") + text.UTF8String + " pid=" + std::to_string(pid));
 +        return true;
 +    }
++    int reject_text_after = -1; // post_text fails from this call on (counting from 0); -1 never
++    int texts = 0;
 +
 +    bool post_relative_move(pid_t, int dx, int dy) override
 +    {
@@ -2591,6 +2626,30 @@ index 0000000..c264501
 +
 +} // namespace
 +
++void text_is_posted_one_character_at_a_time()
++{
++    Fixture t;
++    const int slept = t.platform->slept;
++    CHECK(t.input->input_text("Ab\xe6\x98\x9f\xf0\x9f\x98\x80")); // A, b, 星 and an emoji (a surrogate pair)
++    CHECK((t.platform->take()
++           == Events { "text A pid=100", "text b pid=100", "text \xe6\x98\x9f pid=100", "text \xf0\x9f\x98\x80 pid=100" }));
++    CHECK(t.platform->slept - slept == 3 * HybridInput::kTextCharacterGapMs);
++    CHECK(t.input->input_text(""));
++    CHECK(t.platform->take().empty());
++}
++
++void text_stops_when_the_game_leaves_the_front_or_a_character_fails()
++{
++    Fixture t;
++    t.platform->on_sleep = [&] { t.platform->front = 999; };
++    CHECK(!t.input->input_text("abc"));
++    CHECK((t.platform->take() == Events { "text a pid=100" }));
++    Fixture u;
++    u.platform->reject_text_after = 1;
++    CHECK(!u.input->input_text("abc"));
++    CHECK((u.platform->take() == Events { "text a pid=100" }));
++}
++
 +int main()
 +{
 +    accepted_click_maps_once_and_restores_cursor();
@@ -2631,6 +2690,8 @@ index 0000000..c264501
 +    a_refused_swipe_never_hovers_along_its_path();
 +    a_click_whose_restore_fails_is_retried_by_the_cleanup();
 +    a_refused_move_also_forgets_the_old_scroll_target();
++    text_is_posted_one_character_at_a_time();
++    text_stops_when_the_game_leaves_the_front_or_a_character_fails();
 +    std::printf(failures ? "HybridInputTest: %d failure(s)\n" : "HybridInputTest: all passed\n", failures);
 +    return failures ? 1 : 0;
 +}

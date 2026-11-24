@@ -211,7 +211,7 @@ Mac 白名单（`agent/host/macos/preview_tasks.json`）现为邮箱、每周免
 
 ### 准备（不向游戏发输入）
 
-1. 写明比已签核 tip 多了哪些提交（开发目录直接运行工作区里的 agent 和探针）。控制单元没有变化时不必重建（仍是 `7d927573…`，补丁版本 3）。
+1. 写明比已签核 tip 多了哪些提交（开发目录直接运行工作区里的 agent 和探针）。控制单元没有变化时不必重建（2026-11-24 夜里改为 `84a64839…`，补丁版本 4（文字输入逐字符），已在本机跑过假平台测试和生命周期探针）。
 2. 日志监视：`scripts/macos_watch_log.sh "$HOME/Library/Application Support/MaaNikki/debug/maafw.log" 120`。它在开始时报 `WATCH START`，任务开始和结束报 `TASK START/OK/FAILED <入口>`，失去前台和回到前台报 `PAUSE`、`RESUME`，另外报场景键、放弃、拒发和 `[ERR]` 行，每 120 秒报一次 `WATCH ALIVE`，所以没有消息时也能分清是安静还是监视已经停了。2026-11-24 用一份演示文件验证过：追加真实日志里的「任务开始、暂停、恢复、任务成功」四行（第二次追加前把文件改名轮转）都逐条报出；第一版因为启动竞争漏掉了紧接着写入的第一行，已改为从启动前量好的文件长度开始读，再测通过；真实的「任务失败」行也能匹配。运行结束后仍以直接读日志为准。
 3. 维护者把游戏切到前台后，先截一张图（`probe.py capture`，不发输入）确认前置条件：大世界、无弹窗、全屏窗口模式、外接 16:9 显示器，**系统光标在游戏窗口内**（场景键的前提，见下面「场景键与光标位置」），并读出右下角当前选中的能力。
 
@@ -320,7 +320,7 @@ CI（fork `jie-lyu/MaaNikki`）：三个测试工作流都只由 PR 或手动触
 ### 在这台 Mac 上工作
 
 - Python 环境：先用 Python 3.12（CI 用 3.12.10）在仓库根目录建 `.venv` 并 `.venv/bin/python -m pip install -r requirements.txt`（`maafw==5.16.1`）。不要用系统的 `/usr/bin/python3`（3.9），构建脚本解包依赖时用的 `tarfile` `filter` 参数它没有；已有的依赖缓存会掩盖这个问题。客户端依赖：`pnpm --dir client install --frozen-lockfile`。下面的脚本都用 `.venv/bin/python -I` 运行。
-- 控制模块：`.venv/bin/python -I native/macos-control-unit/build.py --runtime-out .build/macos-control-unit/runtime-patched`（默认构建 arm64 补丁版并在本机运行假平台测试，写 `.build/macos-control-unit/out/patched/build.json`）。截至本节，单元 SHA-256 为 `7d927573…`，补丁版本 3。`--unit-only`、`--tests-only --test-arch x86_64` 是给 Intel CI 用的。
+- 控制模块：`.venv/bin/python -I native/macos-control-unit/build.py --runtime-out .build/macos-control-unit/runtime-patched`（默认构建 arm64 补丁版并在本机运行假平台测试，写 `.build/macos-control-unit/out/patched/build.json`）。截至本节，单元 SHA-256 为 `84a64839…`，补丁版本 4（11-24 夜里起；此前的实机测试用的是 `7d927573…`、补丁版本 3）。`--unit-only`、`--tests-only --test-arch x86_64` 是给 Intel CI 用的。
 - 开发目录：`.venv/bin/python -I scripts/macos_dev_home.py`，生成 `.build/macos-dev-home`，其中 `agent/`、`resource/`、`tasks/` 等是**指向仓库工作区的链接**，`maafw/` 指向上面的运行时，`interface.json` 是仓库的加上 `build/macos/interface-overlay.json`（`nikki_macos` 控制器）。
 - 启动开发客户端：`MAANIKKI_DEV_HOME=<仓库>/.build/macos-dev-home pnpm --dir client tauri dev`。要在有人值守的测试里放行未验证的任务，前面再加 `MAANIKKI_MACOS_EXTRA_TASKS=入口1,入口2`（只在开发构建生效）。已验证的白名单在 `agent/host/macos/preview_tasks.json`：邮箱、每周免费礼包、月卡。
 - 改设置：客户端运行时每次界面改动都会重写配置，所以要改配置文件（`~/Library/Application Support/MaaNikki/config/mxu-MaaNikki.json`）就先停客户端、备份、按前端代码里的格式改（选项是 `{"type":"select","caseName":…}`、`{"type":"input","values":{…}}`、`{"type":"switch","value":…}`，任务条目见现有的 `tasks` 数组），再带同样的环境变量重启，并核对客户端启动后保留了改动。
