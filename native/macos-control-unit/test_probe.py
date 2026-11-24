@@ -91,12 +91,14 @@ class FakeController:
         return self._record(("text", text))
 
 
-def run(argv, controller, abilities=("insect",), cursor=(100.0, 100.0), command="scene-button-check", sleep=None):
+def run(argv, controller, abilities=("insect",), cursor=(100.0, 100.0), command="scene-button-check", sleep=None,
+        grab=None):
     """Run scene-button-check with fakes; returns (exit code or "interrupted", stdout, saved frame names).
 
     The HUD reads ``abilities`` in turn and keeps the last one for any further reading.
     """
     readings = list(abilities)
+    grab_override = grab
 
     def selected_ability(image):
         return (readings.pop(0) if len(readings) > 1 else readings[0]), {}
@@ -115,7 +117,7 @@ def run(argv, controller, abilities=("insect",), cursor=(100.0, 100.0), command=
             mock.patch.object(probe, "_bundle_pid", lambda bundle: 42), \
             mock.patch.object(probe, "_front_pid", lambda: 42), \
             mock.patch.object(probe, "_connect", lambda window, raw: (controller, True, 1.0)), \
-            mock.patch.object(probe, "_grab", grab), \
+            mock.patch.object(probe, "_grab", grab_override or grab), \
             mock.patch.object(probe, "_map_back_score", lambda image: 0.5), \
             mock.patch.object(probe, "_cursor", cursor if callable(cursor) else (lambda: cursor)), \
             mock.patch.object(probe, "_game_window_bounds", lambda window: (0, 0, 1920, 1080)), \
@@ -478,7 +480,7 @@ class TimingTests(unittest.TestCase):
 class UiProbeTests(unittest.TestCase):
     """photo-mode-check, text-input-check, hover-check with scripted recognitions instead of resource/."""
 
-    def run_ui(self, command, argv, controller, hits=None, texts=()):
+    def run_ui(self, command, argv, controller, hits=None, texts=(), grab=None):
         hits = hits or {}
         readings = list(texts)
 
@@ -490,7 +492,7 @@ class UiProbeTests(unittest.TestCase):
             return types.SimpleNamespace(hit=value(controller) if callable(value) else value)
         with mock.patch.object(probe._UiSession, "_bind_resource", lambda session: None), \
                 mock.patch.object(probe._UiSession, "detail", detail):
-            return run(argv, controller, command=command)
+            return run(argv, controller, command=command, grab=grab)
 
     def test_photo_mode_opens_with_p_and_leaves_with_esc_after_the_landmark(self):
         controller = FakeController()
@@ -609,6 +611,18 @@ class UiProbeTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(controller.events, [("hover", 900, 32), ("inactive",)])
         self.assertIn("interrupted during the hovers (KeyboardInterrupt); inactive() was not confirmed", output)
+
+    def test_a_wrong_sized_frame_stops_the_hovers_and_still_restores(self):
+        controller = FakeController()
+        good = np.zeros((720, 1280, 3), np.uint8)
+        frames = iter([good])  # the start frame; every later capture is the wrong size
+        code, output, saved = self.run_ui("hover-check", ["--point", "300", "400"], controller,
+                                          {"MaaNikki_Blessing_InventoryReady": True},
+                                          grab=lambda c: (next(frames, np.zeros((720, 1195, 3), np.uint8)), 1.0))
+        self.assertEqual(code, 1)
+        self.assertEqual(controller.events, [("hover", 900, 32), ("inactive",)])
+        self.assertIn('"frame_saved": false', output)
+        self.assertIn("no 1280x720 frame saved after the hover to parked", output)
 
     def test_a_refused_hover_still_ends_with_the_cursor_cleanup(self):
         controller = FakeController()

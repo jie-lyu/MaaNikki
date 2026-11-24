@@ -1134,15 +1134,15 @@ def cmd_hover_check(args) -> int:
             moved = ui.controller.post_touch_move(contact=0, x=point[0], y=point[1], pressure=0).wait().succeeded
             time.sleep(0.6)
             image, _ = _grab(ui.controller)  # not ui.frame(): a capture failure must not skip the report below
-            if image is not None and image.shape[:2] == (720, 1280):
-                ui.cv2.imwrite(str(ui.out / f"{len(ui.steps):02d}-{name}.png"), image)
+            saved = bool(image is not None and image.shape[:2] == (720, 1280)
+                         and ui.cv2.imwrite(str(ui.out / f"{len(ui.steps):02d}-{name}.png"), image))
             ui.steps.append({"step": f"hover {name}", "point": list(point), "sent": moved, "cursor": _cursor(),
-                             "frame_saved": image is not None})
+                             "frame_saved": saved})
             if not moved:
                 failure = f"the unit refused the hover to {name} (see maafw.log)"
                 break
-            if image is None:
-                failure = f"no frame after the hover to {name}"
+            if not saved:
+                failure = f"no 1280x720 frame saved after the hover to {name}"
                 break
     except BaseException as error:  # an interrupt: still restore and report before exiting
         failure = f"interrupted during the hovers ({type(error).__name__})"
