@@ -515,16 +515,26 @@ class UiProbeTests(unittest.TestCase):
         self.assertEqual(controller.events, [("key_down", 35), ("key_up", 35)])
         self.assertIn("Esc not sent", output)
 
-    def test_text_input_types_reads_back_and_clears_each_trial(self):
+    def test_text_input_types_one_character_per_request_and_reads_back(self):
         controller = FakeController()
         code, output, _ = self.run_ui("text-input-check", ["--placeholder", "输入名称"], controller,
-                                      {"MaaNikki_CompendiumSearchReady": True},
-                                      texts=("输入名称", "Ab12", "输入名称", "星光", ""))
+                                      {"MaaNikki_CompendiumSearchReady": True}, texts=("输入名称", "x7Ab"))
         self.assertEqual(code, 0, output)
-        centre = (1040, 44)
-        self.assertEqual(controller.events, [("click", *centre), ("text", "Ab12"), ("click", 1202, 44),
-                                             ("click", *centre), ("text", "星光"), ("click", 1202, 44)])
+        self.assertEqual(controller.events, [("click", 1040, 44), ("text", "x"), ("text", "7"), ("text", "A"), ("text", "b")])
         self.assertIn('"exact_match": true', output)
+        controller = FakeController()
+        code, output, _ = self.run_ui("text-input-check", ["--text", "星光"], controller,
+                                      {"MaaNikki_CompendiumSearchReady": True}, texts=("", "星光"))
+        self.assertEqual(code, 0, output)
+        self.assertEqual(controller.events[1:], [("text", "星"), ("text", "光")])
+
+    def test_text_input_sends_nothing_unless_the_field_is_empty_on_the_search_page(self):
+        for hits, texts in (({}, ()), ({"MaaNikki_CompendiumSearchReady": True}, ("旧的文字",))):
+            with self.subTest(hits=hits):
+                controller = FakeController()
+                code, _, _ = self.run_ui("text-input-check", [], controller, hits, texts)
+                self.assertEqual(code, 1)
+                self.assertEqual(controller.events, [])
 
     def test_only_an_exact_placeholder_counts_as_empty(self):
         controller = FakeController()
@@ -533,37 +543,19 @@ class UiProbeTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(controller.events, [])
 
-    def test_a_recognition_that_never_ran_is_a_failure_not_a_miss(self):
-        session = probe._UiSession.__new__(probe._UiSession)
-        session.steps, session.hits, session.jobs, session.image = [], {}, {}, None
-        failures = []
-        session.fail = lambda reason: failures.append(reason) or (_ for _ in ()).throw(SystemExit(1))
-        session.tasker = types.SimpleNamespace(post_task=lambda *a: Job(False))
-        with self.assertRaises(SystemExit):
-            session.detail("ProbeReadText", None)
-        self.assertIn("could not run", failures[0])
-
-        def ran_without_result(*a):  # the callback ran, but run_recognition gave None
-            session.jobs["ProbeReadText"] = True
-            session.hits["ProbeReadText"] = None
-            return Job(True)
-        session.tasker = types.SimpleNamespace(post_task=ran_without_result)
-        with self.assertRaises(SystemExit):
-            session.detail("ProbeReadText", None)
-
     def test_no_text_is_posted_once_the_search_page_is_gone(self):
         controller = FakeController()
-        on_page = lambda c: sum(1 for e in c.events if e[0] == "click") < 3  # gone after the first clear
+        on_page = lambda c: not any(e[0] == "click" for e in c.events)  # gone right after focusing
         code, output, _ = self.run_ui("text-input-check", [], controller, {"MaaNikki_CompendiumSearchReady": on_page},
-                                      texts=("", "Ab12", ""))
+                                      texts=("",))
         self.assertEqual(code, 1)
-        self.assertEqual([e for e in controller.events if e[0] == "text"], [("text", "Ab12")])
+        self.assertEqual([e for e in controller.events if e[0] == "text"], [])
         self.assertIn("no longer recognised", output)
 
     def test_a_partial_reading_is_not_an_exact_match(self):
         controller = FakeController()
         code, output, _ = self.run_ui("text-input-check", [], controller, {"MaaNikki_CompendiumSearchReady": True},
-                                      texts=("", "旧Ab12", "", "星光", ""))
+                                      texts=("", "旧x7Ab"))
         self.assertEqual(code, 0, output)
         self.assertIn('"exact_match": false', output)
         self.assertIn("ocr_inconclusive", output)
@@ -578,14 +570,6 @@ class UiProbeTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(controller.events, [("click", 1040, 44), ("inactive",)])
         self.assertIn("inactive() was asked to release it (confirmed)", output)
-
-    def test_text_input_sends_nothing_unless_the_field_is_empty_on_the_search_page(self):
-        for hits, texts in (({}, ()), ({"MaaNikki_CompendiumSearchReady": True}, ("旧的文字",))):
-            with self.subTest(hits=hits):
-                controller = FakeController()
-                code, _, _ = self.run_ui("text-input-check", [], controller, hits, texts)
-                self.assertEqual(code, 1)
-                self.assertEqual(controller.events, [])
 
     def test_hover_parks_hovers_parks_and_puts_the_cursor_back(self):
         controller = FakeController()

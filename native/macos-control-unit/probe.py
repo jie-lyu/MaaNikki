@@ -1058,16 +1058,16 @@ def cmd_photo_mode_check(args) -> int:
 
 
 COMPENDIUM_SEARCH_BOX = [850, 20, 380, 48]  # agent/wardrobe/scanner.py SEARCH_BOX
-COMPENDIUM_SEARCH_CLEAR = [1202, 44]  # agent/wardrobe/scanner.py SEARCH_CLEAR
-TEXT_TRIALS = ("Ab12", "星光")
+TEXT_DEFAULT = "x7Ab"  # not starting with A: keycode 0 is the A key, so a lone "A" told nothing (G2, 2026-11-24)
 
 
 def cmd_text_input_check(args) -> int:
-    """Type into the 博物图鉴 检索 field with the unit's input_text, read it back, clear it. Spends nothing.
+    """Type one --text into the 博物图鉴 检索 field with the unit's input_text and read it back. Spends nothing.
 
-    The operator opens 博物图鉴 → 检索 with an empty field. Each trial clicks the field, posts the text
-    (no Enter, no clipboard, nothing submitted), reads the field back by OCR, then clicks the field's own
-    clear button. Stops at the first refusal or unexpected page.
+    The operator opens 博物图鉴 → 检索 with an empty field (and empties it again between runs: one trial per
+    run, so a clear button that misses cannot hide the next result). The probe clicks the field, posts the
+    text one character per request like the agent on macOS (no Enter, no clipboard, nothing submitted) and
+    reads the field back by OCR. Stops at the first refusal or unexpected page.
     """
     ui = _UiSession(args)
     start = ui.frame("start")
@@ -1088,29 +1088,28 @@ def cmd_text_input_check(args) -> int:
             ui.fail(f"the search page is no longer recognised ({name}); nothing more sent")
         return image
 
-    for index, wanted in enumerate(TEXT_TRIALS, 1):
-        ui.click(centre, "the search field")
-        time.sleep(0.3)
-        on_search_page(f"focused-{index}")  # verified on this frame before any text is posted
-        sent = ui.controller.post_input_text(wanted).wait().succeeded
-        time.sleep(1.0)
-        typed = on_search_page(f"typed-{index}")
-        read = ui.text(box, typed)
-        ui.steps.append({"step": f"input_text {wanted!r}", "sent": sent, "field_reads": read,
-                         "exact_match": read == wanted,
-                         **({} if read == wanted else {"ocr_inconclusive": "judge the typed frame by eye"})})
+    wanted = args.text
+    ui.click(centre, "the search field")
+    time.sleep(0.3)
+    on_search_page("focused")  # verified on this frame before any text is posted
+    sent = True
+    for index, character in enumerate(wanted):
+        if index:
+            time.sleep(0.03)
+        sent = ui.controller.post_input_text(character).wait().succeeded
         if not sent:
-            ui.fail("the unit refused input_text")
-        ui.click(COMPENDIUM_SEARCH_CLEAR, "the field's clear button")
-        time.sleep(1.0)
-        cleared = on_search_page(f"cleared-{index}")
-        after = ui.text(box, cleared)
-        ui.steps.append({"step": "field after clear", "text": after})
-        if after not in ("", placeholder):
-            ui.fail(f"the field did not clear ({after!r}); nothing more sent")
-    return ui.done("Each typed-N frame should show exactly the trial text in the search field "
-                   f"({', '.join(TEXT_TRIALS)}); OCR readings are listed above. The search may filter the list; "
-                   "nothing is submitted or saved.")
+            break
+    time.sleep(1.0)
+    typed = on_search_page("typed")
+    read = ui.text(box, typed)
+    ui.steps.append({"step": f"input_text {wanted!r} (one character per request)", "sent": sent, "field_reads": read,
+                     "exact_match": read == wanted,
+                     **({} if read == wanted else {"ocr_inconclusive": "judge the typed frame by eye"})})
+    if not sent:
+        ui.fail("the unit refused input_text")
+    return ui.done(f"The typed frame should show exactly {wanted!r} in the search field; the OCR reading is listed "
+                   "above. The search may filter the list; nothing is submitted or saved. Empty the field by hand "
+                   "before the next run.")
 
 
 HOVER_PARK = (900, 32)  # agent/collection/locking.py park point on the 祝福闪光 warehouse
@@ -1486,6 +1485,7 @@ def main() -> int:
         if name == "key-sequence-check":
             command.add_argument("--sequence", choices=sorted(KEY_SEQUENCES), required=True)
         if name == "text-input-check":
+            command.add_argument("--text", default=TEXT_DEFAULT, help="the text to type (one trial per run)")
             command.add_argument("--placeholder", default="",
                                  help="the exact OCR reading of the empty field, from a capture beforehand")
         if name == "hover-check":
