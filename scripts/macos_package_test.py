@@ -111,6 +111,27 @@ class InterfaceTests(unittest.TestCase):
         problems = mi.test_build_violations(packaged, self.repository, self.overlay)
         self.assertIn("key 'telemetry' is still present", problems)
 
+    def test_a_copied_production_url_is_caught_even_if_the_repository_has_it_twice(self):
+        repository = json.loads(self.repository_bytes)
+        endpoint = repository["telemetry"]["sentry"]["failure_upload_endpoint"]
+        repository["description"] = endpoint  # also present outside the removed keys
+        packaged = mi.apply_test_build_overlay(mi.apply_overlay(repository, mi.read_json(mi.OVERLAY)),
+                                               self.overlay, "0123abc")
+        problems = mi.test_build_violations(packaged, repository, self.overlay)
+        self.assertTrue(any(endpoint[:40] in problem for problem in problems), problems)
+
+    def test_ordinary_text_is_not_mistaken_for_a_removed_value(self):
+        packaged = mi.apply_test_build_overlay(mi.macos_interface(), self.overlay, "0123abc")
+        packaged["description"] = "Local reproduction steps for MaaNikki"
+        self.assertEqual(mi.test_build_violations(packaged, self.repository, self.overlay), [])
+
+    def test_the_four_services_are_required_even_if_the_overlay_forgets_one(self):
+        overlay = dict(self.overlay, remove=["telemetry"])
+        packaged = mi.apply_test_build_overlay(mi.macos_interface(), overlay, "0123abc")
+        problems = mi.test_build_violations(packaged, self.repository, overlay)
+        for key in ("statistics", "mirrorchyan_rid", "github"):
+            self.assertIn(f"key {key!r} is still present", problems)
+
     def test_commit_must_be_a_revision(self):
         for bad in ("", "main", "abc", "0123abc; rm", "0123ABC"):
             with self.subTest(commit=bad), self.assertRaises(ValueError):

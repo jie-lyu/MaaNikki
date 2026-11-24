@@ -50,23 +50,29 @@ def apply_test_build_overlay(interface: dict, overlay: dict, commit: str) -> dic
     return result
 
 
-def test_build_violations(packaged: dict, repository: dict, overlay: dict) -> list[str]:
-    """What a test package's interface still carries that the test overlay is meant to remove.
+# What a test package must never carry, whatever the overlay file says: Sentry telemetry and
+# failure uploads, statistics, and both update sources (the client checks for updates while either
+# of the last two is present).
+REQUIRED_REMOVED = ("telemetry", "statistics", "mirrorchyan_rid", "github")
 
-    Checks both that every removed key is gone and that no value of a removed key in the
-    repository's interface.json (for example the Sentry DSN or the mirror id) appears anywhere
-    in the packaged document, so a later rename or move of these fields is caught too.
+
+def test_build_violations(packaged: dict, repository: dict, overlay: dict) -> list[str]:
+    """What a test package's interface still carries that must be gone.
+
+    Every key in REQUIRED_REMOVED and in the overlay's remove list must be absent, and no URL that
+    those keys hold in the repository's interface.json (the Sentry DSN, the failure-upload, statistics
+    and repository URLs) may appear anywhere in the packaged document, so a copy of one of them under
+    another key is caught too. Only URLs are compared: the other values (the mirror id is the
+    project name, the Sentry environment is "production") also occur legitimately elsewhere, and
+    the key check covers them.
     """
-    removed = overlay.get("remove", [])
+    removed = [*REQUIRED_REMOVED, *(key for key in overlay.get("remove", []) if key not in REQUIRED_REMOVED)]
     problems = [f"key {key!r} is still present" for key in removed if key in packaged]
     text = json.dumps(packaged, ensure_ascii=False)
-    # Values that the repository also uses outside the removed keys (the mirror id is the
-    # project name, for example) cannot tell anything; every other value must be gone.
-    kept = json.dumps({key: value for key, value in repository.items() if key not in removed}, ensure_ascii=False)
     for key in removed:
         for value in _strings(repository.get(key)):
-            if value and value in text and value not in kept:
-                problems.append(f"value of removed key {key!r} still appears: {value[:40]}")
+            if value.startswith(("https://", "http://")) and value in text:
+                problems.append(f"URL from removed key {key!r} still appears: {value[:40]}")
     return problems
 
 
