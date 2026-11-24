@@ -49,6 +49,7 @@ import {
   consumeUpdateCompleteInfo,
   savePendingUpdateInfo,
   getPendingUpdateInfo,
+  peekPendingUpdateInfo,
   clearPendingUpdateInfo,
   isDebugVersion,
 } from '@/services/updateService';
@@ -1263,7 +1264,7 @@ function App() {
       // 与 checkAutomaticUpdate 的条件一致，保存的记录原样保留。
       const updatesConfigured = !!(result.interface.mirrorchyan_rid || result.interface.github);
       if (!updatesConfigured && !isDebugVersion(result.interface.version)) {
-        const skipped = await getPendingUpdateInfo(result.interface.version);
+        const skipped = peekPendingUpdateInfo(result.interface.version);
         if (skipped) {
           log.warn('未配置更新源，不安装待安装更新:', skipped.versionName);
           toast.warning(t('update.pendingSkippedNoSource', {
