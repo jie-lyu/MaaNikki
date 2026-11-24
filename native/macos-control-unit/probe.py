@@ -721,9 +721,11 @@ def cmd_scene_button_check(args) -> int:
     if abs(steps[-1]["cursor"][0] - cursor[0]) > 1 or abs(steps[-1]["cursor"][1] - cursor[1]) > 1:
         fail("the real cursor moved with the relative move; no button pressed")
     button = SCENE_BUTTONS[args.button]
-    pressed = released = False
+    attempted = pressed = released = False
     try:
-        # The binding's order is (x, y, contact, pressure): name them.
+        # The binding's order is (x, y, contact, pressure): name them. Once submitted, the press may have
+        # reached the unit even if waiting for it is interrupted.
+        attempted = True
         pressed = controller.post_touch_down(x=0, y=0, contact=button, pressure=SCENE_PRESS_PRESSURE).wait().succeeded
         time.sleep(0.05)
     finally:
@@ -733,7 +735,7 @@ def cmd_scene_button_check(args) -> int:
             released = controller.post_touch_up(contact=button).wait().succeeded
         except Exception:
             released = False
-        if pressed and not released:
+        if attempted and not released:
             # Handle it now, before any wait or capture can fail first and hide it.
             steps.append({"step": "release not confirmed", "contact": button})
             try:
