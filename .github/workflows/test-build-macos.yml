@@ -1,0 +1,86 @@
+name: Test build macOS arm64
+
+# Builds the ad-hoc signed Apple silicon test package (scripts/macos_package.py) for a handful of
+# testers and uploads the DMG and its checksum as a workflow artifact. It never bumps versions,
+# commits, tags, creates releases or triggers the publish/mirror workflows.
+#
+# No Apple silicon runner has been assigned to this repository (November 2026), so everything is
+# cross-compiled on Intel and nothing arm64 is executed here: the job proves that the package
+# assembles, that every Mach-O file is arm64 only and loads nothing outside the bundle and the
+# system, and that the ad-hoc signature verifies. Running it (`macos_package.py verify`, the control
+# unit's lifecycle probe) happens on Apple silicon with this exact DMG, checked by SHA-256.
+#
+# Pull requests: add the `test-build-macos` label; later pushes to a labelled PR rebuild.
+# Manual: Actions -> Test build macOS arm64 -> Run workflow, once this file is on the default branch.
+on:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Adding any other label to a labelled PR does not start another build.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (contains(github.event.pull_request.labels.*.name, 'test-build-macos') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'test-build-macos'))
+    # Job-level, so a skipped run (another label added) cannot cancel a build in progress.
+    concurrency:
+      group: test-build-macos-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    runs-on: macos-15-intel
+    timeout-minutes: 120
+    env:
+      COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Build the branch commit itself, not the synthetic merge with the base branch.
+          ref: ${{ env.COMMIT }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - uses: actions/setup-python@v5
+        with:
+          # Also compiles the package's bytecode, so it must match the embedded Python's minor version.
+          python-version: '3.12.10'
+      - name: Install the pinned Rust toolchain and the arm64 macOS target
+        run: |
+          rustup show
+          rustup target add aarch64-apple-darwin
+      - name: Cache pinned downloads
+        # Files are re-verified against the lock files' SHA-256 values before use.
+        uses: actions/cache@v4
+        with:
+          path: .build/downloads
+          key: macos-package-downloads-${{ hashFiles('build/macos/runtime.lock.json') }}
+      - name: Offline checks of the package inputs
+        run: |
+          python -B scripts/macos_package_test.py
+          python scripts/release.py check
+      - name: arm64 control unit (cross-compiled, not executed) and the official runtime with it
+        run: >-
+          python -I native/macos-control-unit/build.py --unit-only
+          --work "$RUNNER_TEMP/macos-control-unit"
+          --runtime-out "$RUNNER_TEMP/macos-runtime"
+      - name: Client app for aarch64-apple-darwin (cross-compiled)
+        run: python -I scripts/macos_package.py client
+      - name: Assemble, sign and check the test package
+        run: >-
+          python -I scripts/macos_package.py package
+          --runtime "$RUNNER_TEMP/macos-runtime"
+          --unit-manifest "$RUNNER_TEMP/macos-control-unit/out/patched/build.json"
+          --commit "$COMMIT"
+          --output artifacts/macos
+      - name: Name the test artifact
+        id: name
+        run: echo "artifact=MaaNikki-macOS-arm64-test-${COMMIT::7}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.artifact }}
+          path: artifacts/macos/*
+          if-no-files-found: error
+          retention-days: 14
