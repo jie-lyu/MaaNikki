@@ -24,7 +24,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-OVERLAY = ROOT / "build" / "macos" / "interface-overlay.json"
+# Run with -I, which leaves this directory off sys.path.
+sys.path.insert(0, str(ROOT / "scripts"))
+from macos_interface import macos_interface, render  # noqa: E402
+
 PATCHED_BUILD = ROOT / ".build" / "macos-control-unit" / "out" / "patched" / "build.json"
 LINKED = ("agent", "ai", "resource", "tasks", "options", "docs", "licenses")
 MARKER = ".maanikki-macos-dev-home"
@@ -71,16 +74,10 @@ def main() -> int:
     link(home / "maafw", runtime)
     link(home / "python", venv)
 
-    interface = json.loads((ROOT / "interface.json").read_text(encoding="utf-8"))
-    overlay = json.loads(OVERLAY.read_text(encoding="utf-8"))
-    agents = interface["agent"] if isinstance(interface["agent"], list) else [interface["agent"]]
-    for agent in agents:
-        agent.update(overlay["agent"])
-    interface["controller"] = [*interface["controller"], *overlay["controller"]]
     target = home / "interface.json"
     if target.is_symlink():
         target.unlink()
-    target.write_text(json.dumps(interface, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    target.write_text(render(macos_interface()), encoding="utf-8")
     for name in ("README.md", "CHANGELOG.md", "LICENSE"):
         if (ROOT / name).exists():
             link(home / name, ROOT / name)

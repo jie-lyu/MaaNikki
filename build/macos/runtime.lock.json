@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "platform": "macos-arm64",
+  "comment": "Pinned runtime of the macOS test package (scripts/macos_package.py). Same Python, MaaFramework and package versions as build/runtime.lock.json, arm64 macOS builds. The MaaFramework runtime itself is pinned in native/macos-control-unit/upstream.lock.json (stock_runtime) and gets the patched control unit.",
+  "python_version": "3.12.10",
+  "maafw_version": "5.16.1",
+  "minimum_macos": "14.0",
+  "python": {
+    "source": "python-build-standalone",
+    "release": "20250529",
+    "name": "cpython-3.12.10+20250529-aarch64-apple-darwin-install_only_stripped.tar.gz",
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20250529/cpython-3.12.10%2B20250529-aarch64-apple-darwin-install_only_stripped.tar.gz",
+    "sha256": "2579c9ffcbb0a745f1de3d645612c7466269eb9a23316a54ece49d50c1c9122f"
+  },
+  "wheels": [
+    {
+      "package": "maafw",
+      "version": "5.16.1",
+      "name": "maafw-5.16.1-py3-none-macosx_13_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/e1/45/f1ec971246c0a9c883cc6e10dbeb7fe54ca9bec27fa33ec0cf51c0f2971d/maafw-5.16.1-py3-none-macosx_13_0_arm64.whl",
+      "sha256": "c8d8411d7a9b2f60310427c65b886964335df8cb667e1bf923ed79ee0a77c776"
+    },
+    {
+      "package": "MaaAgentBinary",
+      "version": "1.0.1",
+      "name": "MaaAgentBinary-1.0.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/b9/89/6b173d2e151517a8a24c3194bc8783643f49186547ae53c8b635be19d310/MaaAgentBinary-1.0.1-py3-none-any.whl",
+      "sha256": "d97bcc9f35b52add199b287932511ecfcddcb83930c6b532d1c7010b432ec8bf"
+    },
+    {
+      "package": "numpy",
+      "version": "1.26.4",
+      "name": "numpy-1.26.4-cp312-cp312-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/75/5b/ca6c8bd14007e5ca171c7c03102d17b4f4e0ceb53957e8c44343a9546dcc/numpy-1.26.4-cp312-cp312-macosx_11_0_arm64.whl",
+      "sha256": "03a8c78d01d9781b28a6989f6fa1bb2c4f2d51201cf99d3dd875df6fbd96b23b"
+    },
+    {
+      "package": "opencv-python",
+      "version": "4.10.0.84",
+      "name": "opencv_python-4.10.0.84-cp37-abi3-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/66/82/564168a349148298aca281e342551404ef5521f33fba17b388ead0a84dc5/opencv_python-4.10.0.84-cp37-abi3-macosx_11_0_arm64.whl",
+      "sha256": "fc182f8f4cda51b45f01c64e4cbedfc2f00aff799debebc305d8d0210c43f251"
+    },
+    {
+      "package": "scipy",
+      "version": "1.13.1",
+      "name": "scipy-1.13.1-cp312-cp312-macosx_12_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/dc/5a/2043a3bde1443d94014aaa41e0b50c39d046dda8360abd3b2a1d3f79907d/scipy-1.13.1-cp312-cp312-macosx_12_0_arm64.whl",
+      "sha256": "017367484ce5498445aade74b1d5ab377acdc65e27095155e448c88497755a5d"
+    },
+    {
+      "package": "StrEnum",
+      "version": "0.4.15",
+      "name": "StrEnum-0.4.15-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/81/69/297302c5f5f59c862faa31e6cb9a4cd74721cd1e052b38e464c5b402df8b/StrEnum-0.4.15-py3-none-any.whl",
+      "sha256": "a30cda4af7cc6b5bf52c8055bc4bf4b2b6b14a93b574626da33df53cf7740659"
+    }
+  ]
+}
