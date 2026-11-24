@@ -3,10 +3,12 @@
   "entries": [
     "MaaNikki_Mailbox",
     "MaaNikki_WeeklyFreeGifts",
-    "MaaNikki_MonthlyPass"
+    "MaaNikki_MonthlyPass",
+    "MaaNikki_CollectStarlightCrystals"
   ],
   "notes": {
     "MaaNikki_WeeklyFreeGifts": "Device run 2026-11-24: three gifts found by scrolling and claimed; the distance per scroll line is not measured.",
-    "MaaNikki_MonthlyPass": "Device run 2026-11-24: 旅行任务 and 旅行秘宝 claimed; 乐园构想 was locked on the test account and skipped as designed, so that path is unverified on macOS."
+    "MaaNikki_MonthlyPass": "Device run 2026-11-24: 旅行任务 and 旅行秘宝 claimed; 乐园构想 was locked on the test account and skipped as designed, so that path is unverified on macOS.",
+    "MaaNikki_CollectStarlightCrystals": "Added 2026-11-24 on the maintainer's decision after one supervised run: 跑图收集 matched and walked xinghai_crystal_3 (one of eight routes), collected 星之魄 3/3, 星光结晶 30/30, 星光微尘 90/100, count and full route confirmed by the maintainer. In-place turning with the middle button was not exercised. The entry also opens the 星忆晶树 branch, which has not been run on macOS; the maintainer accepted that."
   }
 }
