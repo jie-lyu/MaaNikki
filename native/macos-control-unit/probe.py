@@ -824,6 +824,26 @@ def cmd_timing(args) -> int:
     return 0
 
 
+def _agent_ui_template():
+    """The agent's nikki.ui_template recognition class (MaaNikki_MainDetected uses it), loaded without the
+    agent's registration module: that imports maa.agent.agent_server, which switches the binding into
+    agent-server mode where this process can no longer create its own Resource."""
+    import types
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "agent"))
+    stand_in = types.ModuleType("registration")
+    stand_in.agent_recognition = lambda name: (lambda cls: cls)
+    saved = sys.modules.get("registration")
+    sys.modules["registration"] = stand_in
+    try:
+        from recognition.ui_template import UITemplateRecognition
+    finally:
+        if saved is None:
+            sys.modules.pop("registration", None)
+        else:
+            sys.modules["registration"] = saved
+    return UITemplateRecognition
+
+
 class _UiSession:
     """Shared setup of the UI probes (camera-check, text-input-check, hover-check): wait for the game to be in
     front (never activate it), connect, save numbered frames, and recognise with the agent's own pipeline
@@ -857,28 +877,58 @@ class _UiSession:
         self.steps = []
         self.image = None
         self.hits = {}
+        self.jobs = {}
         self._bind_resource()
 
     def _bind_resource(self):
+        """Recognition runs on its own in-memory controller: a Tasker calls inactive() on its controller after
+        every task, which on the game's controller would release contacts and put the cursor back."""
+        import numpy as np
+        from maa.controller import CustomController
         from maa.custom_action import CustomAction
         from maa.resource import Resource
         from maa.tasker import Tasker
+        UITemplateRecognition = _agent_ui_template()
         session = self
+
+        class FrameOnly(CustomController):
+            """Serves the frame being judged; every input is a no-op that touches nothing."""
+            def connect(self): return True
+            def request_uuid(self): return "maanikki-probe-recognition"
+            def screencap(self):
+                return session.image if session.image is not None else np.zeros((720, 1280, 3), np.uint8)
+            def click(self, *a): return True
+            def swipe(self, *a): return True
+            def touch_down(self, *a): return True
+            def touch_move(self, *a): return True
+            def touch_up(self, *a): return True
+            def click_key(self, *a): return True
+            def input_text(self, *a): return True
+            def key_down(self, *a): return True
+            def key_up(self, *a): return True
+            def start_app(self, *a): return True
+            def stop_app(self, *a): return True
+            def scroll(self, *a): return True
 
         class Recognise(CustomAction):
             def run(self, context, argv):
                 param = json.loads(argv.custom_action_param)
                 detail = context.run_recognition(param["node"], session.image, param.get("override") or {})
                 session.hits[param["node"]] = detail
+                session.jobs[param["node"]] = True
                 return True
         self.resource = Resource()
         if not self.resource.post_bundle(str(RESOURCE)).wait().succeeded:
             sys.exit("could not load resource/; nothing sent")
         self.resource.register_custom_action("ProbeRecognise", Recognise())
+        self.resource.register_custom_recognition("nikki.ui_template", UITemplateRecognition())
+        self.frame_only = FrameOnly()
+        if not self.frame_only.post_connection().wait().succeeded:
+            sys.exit("could not set up the recognition controller; nothing sent")
         self.tasker = Tasker()
-        self.tasker.bind(self.resource, self.controller)
+        self.tasker.bind(self.resource, self.frame_only)
         if not self.tasker.inited:
-            sys.exit("could not bind the resource to the controller; nothing sent")
+            sys.exit("could not bind the resource for recognition; nothing sent")
 
     def frame(self, name):
         image, _ = _grab(self.controller)
@@ -893,12 +943,16 @@ class _UiSession:
         sys.exit(1)
 
     def detail(self, node, image, override=None):
-        """The recognition detail of an agent pipeline node (or an override node) on this image, or None."""
+        """The recognition detail of an agent pipeline node (or an override node) on this image; stops the
+        probe when the recognition itself could not run (that is not a miss)."""
         self.image = image
         self.hits.pop(node, None)
+        self.jobs.pop(node, None)
         self.tasker.post_task("ProbeRecognise", {"ProbeRecognise": {
             "action": "Custom", "custom_action": "ProbeRecognise",
             "custom_action_param": {"node": node, "override": override or {}}}}).wait()
+        if not self.jobs.get(node):
+            self.fail(f"the recognition of {node} could not run")
         return self.hits.get(node)
 
     def hit(self, node, image, override=None):
@@ -906,10 +960,12 @@ class _UiSession:
         return bool(found and found.hit)
 
     def text(self, roi, image):
-        """OCR text inside roi, read with the resource's OCR model (empty when nothing is read)."""
+        """OCR text inside roi in reading order (top to bottom, left to right), spaces removed; "" when nothing
+        is read."""
         found = self.detail("ProbeReadText", image, {"ProbeReadText": {"recognition": "OCR", "roi": roi}})
-        results = getattr(found, "all_results", None) or []
-        return "".join(getattr(item, "text", "") for item in results)
+        results = list(getattr(found, "filtered_results", None) or [])
+        results.sort(key=lambda item: (getattr(item, "box", (0, 0))[1], getattr(item, "box", (0, 0))[0]))
+        return "".join(getattr(item, "text", "") for item in results).replace(" ", "")
 
     def wait_for(self, name, test, seconds):
         for attempt in range(int(seconds / 0.3) + 1):  # a fixed number of looks, 0.3 s apart
@@ -947,11 +1003,21 @@ class _UiSession:
             self.fail(f"the unit refused {what}")
 
     def click(self, point, what):
-        """A UI click: the unit hovers 0.3 s, presses, releases and puts the cursor back."""
-        sent = self.controller.post_click(*point).wait().succeeded
-        self.steps.append({"step": f"click {what}", "point": list(point), "sent": sent})
-        if not sent:
-            self.fail(f"the unit refused the click on {what}")
+        """A UI click: the unit hovers 0.3 s, presses, releases and puts the cursor back. A click that fails or
+        is interrupted may have left the press held (the core sends down and up): ask inactive()."""
+        sent = False
+        try:
+            sent = self.controller.post_click(*point).wait().succeeded
+        finally:
+            self.steps.append({"step": f"click {what}", "point": list(point), "sent": sent})
+            if not sent:
+                try:
+                    inactive = self.controller.post_inactive().wait().succeeded
+                except BaseException:
+                    inactive = False
+                self.steps.append({"step": "inactive", "succeeded": inactive})
+                self.fail(f"the click on {what} failed; inactive() was asked to release it "
+                          f"({'confirmed' if inactive else 'NOT confirmed'})")
 
     def done(self, message):
         self.steps.append({"verdict": "needs_review", "frames": str(self.out)})
@@ -972,10 +1038,9 @@ def cmd_photo_mode_check(args) -> int:
     """
     ui = _UiSession(args)
     start = ui.frame("start")
-    if _map_back_score(start) >= MAP_CLOSED_SCORE:
-        ui.fail("the big map is open; start in the open world")
-    if ui.hit("MaaNikki_Daily_PhotoReady", start):
-        ui.fail("the camera already looks open; start in the open world. Nothing sent")
+    if not ui.hit("MaaNikki_MainDetected", start) or ui.hit("MaaNikki_Daily_PhotoReady", start):
+        ui.fail("the open-world HUD (MaaNikki_MainDetected) is not recognised, or the camera already looks open; "
+                "start in the open world. Nothing sent")
     ui.tap(KEY_P, "P (camera)")
     opened = ui.wait_for("camera", lambda image: ui.hit("MaaNikki_Daily_PhotoReady", image), 5)
     ui.steps.append({"step": "camera landmark", "seen": opened is not None})
@@ -983,10 +1048,10 @@ def cmd_photo_mode_check(args) -> int:
         ui.fail("the camera landmark never appeared after P; Esc not sent (look at the last frame)")
     ui.tap(KEY_ESC, "Esc (leave the camera)")
     closed = ui.wait_for("after-esc", lambda image: not ui.hit("MaaNikki_Daily_PhotoReady", image)
-                         and _map_back_score(image) < MAP_CLOSED_SCORE, 5)
+                         and ui.hit("MaaNikki_MainDetected", image), 5)
     ui.steps.append({"step": "camera closed", "seen": closed is not None})
     if closed is None:
-        ui.fail("the camera landmark is still there after Esc; nothing more sent")
+        ui.fail("the open-world HUD did not come back after Esc; nothing more sent")
     return ui.done("P should open the camera (大喵相机) and Esc should bring back the open world. "
                    "The shutter, saving and deleting photos are not exercised.")
 
@@ -1009,29 +1074,36 @@ def cmd_text_input_check(args) -> int:
         ui.fail("the 博物图鉴 检索 page is not recognised (MaaNikki_CompendiumSearchReady); nothing sent")
     box = COMPENDIUM_SEARCH_BOX
     centre = (box[0] + box[2] // 2, box[1] + box[3] // 2)
-    before = ui.text(box, start)
-    ui.steps.append({"step": "field before", "text": before})
-    if before and "输入名称" not in before and "搜索" not in before:
-        ui.fail(f"the search field is not empty ({before!r}); clear it first. Nothing sent")
+    placeholder = ui.text(box, start)
+    ui.steps.append({"step": "field before", "text": placeholder})
+    if placeholder and "输入名称" not in placeholder:
+        ui.fail(f"the search field is not empty ({placeholder!r}); clear it first. Nothing sent")
+
+    def on_search_page(name):
+        image = ui.frame(name)
+        if not ui.hit("MaaNikki_CompendiumSearchReady", image):
+            ui.fail(f"the search page is no longer recognised ({name}); nothing more sent")
+        return image
+
     for index, wanted in enumerate(TEXT_TRIALS, 1):
         ui.click(centre, "the search field")
         time.sleep(0.3)
+        on_search_page(f"focused-{index}")  # verified on this frame before any text is posted
         sent = ui.controller.post_input_text(wanted).wait().succeeded
         time.sleep(1.0)
-        typed = ui.frame(f"typed-{index}")
+        typed = on_search_page(f"typed-{index}")
         read = ui.text(box, typed)
         ui.steps.append({"step": f"input_text {wanted!r}", "sent": sent, "field_reads": read,
-                         "matches": wanted in read})
+                         "exact_match": read == wanted,
+                         **({} if read == wanted else {"ocr_inconclusive": "judge the typed frame by eye"})})
         if not sent:
             ui.fail("the unit refused input_text")
-        if not ui.hit("MaaNikki_CompendiumSearchReady", typed):
-            ui.fail("the search page is no longer recognised after typing; nothing more sent")
         ui.click(COMPENDIUM_SEARCH_CLEAR, "the field's clear button")
         time.sleep(1.0)
-        cleared = ui.frame(f"cleared-{index}")
+        cleared = on_search_page(f"cleared-{index}")
         after = ui.text(box, cleared)
         ui.steps.append({"step": "field after clear", "text": after})
-        if after and "输入名称" not in after and "搜索" not in after:
+        if after not in ("", placeholder):
             ui.fail(f"the field did not clear ({after!r}); nothing more sent")
     return ui.done("Each typed-N frame should show exactly the trial text in the search field "
                    f"({', '.join(TEXT_TRIALS)}); OCR readings are listed above. The search may filter the list; "
@@ -1053,6 +1125,7 @@ def cmd_hover_check(args) -> int:
         ui.fail("the 祝福闪光 warehouse is not recognised (MaaNikki_Blessing_InventoryReady); nothing sent")
     original = _cursor()
     ui.steps.append({"step": "cursor before", "cursor": original})
+    failure = None
     try:
         for name, point in (("parked", HOVER_PARK), ("hovered", tuple(args.point)), ("parked-again", HOVER_PARK)):
             moved = ui.controller.post_touch_move(contact=0, x=point[0], y=point[1], pressure=0).wait().succeeded
@@ -1060,7 +1133,8 @@ def cmd_hover_check(args) -> int:
             ui.frame(name)
             ui.steps.append({"step": f"hover {name}", "point": list(point), "sent": moved, "cursor": _cursor()})
             if not moved:
-                ui.fail(f"the unit refused the hover to {name} (see maafw.log)")
+                failure = f"the unit refused the hover to {name} (see maafw.log)"
+                break
     finally:
         # The end-of-task cleanup the core sends: the unit puts the user's cursor back.
         try:
@@ -1068,8 +1142,13 @@ def cmd_hover_check(args) -> int:
         except BaseException:
             restored = False
         after = _cursor()
+        back = abs(after[0] - original[0]) <= 1 and abs(after[1] - original[1]) <= 1
         ui.steps.append({"step": "inactive (cursor back)", "succeeded": restored, "cursor": after,
-                         "back_where_it_was": abs(after[0] - original[0]) <= 1 and abs(after[1] - original[1]) <= 1})
+                         "back_where_it_was": back})
+    problems = [p for p in (failure, None if restored else "inactive() was not confirmed",
+                            None if back else "the cursor did not come back where it was") if p]
+    if problems:
+        ui.fail("; ".join(problems))
     return ui.done("The hovered frame should show the selected card's tooltip and both parked frames none; "
                    "the cursor should end where it started.")
 

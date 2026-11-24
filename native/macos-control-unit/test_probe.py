@@ -485,7 +485,7 @@ class UiProbeTests(unittest.TestCase):
         def detail(session, node, image, override=None):
             if node == "ProbeReadText":
                 text = readings.pop(0) if readings else ""
-                return types.SimpleNamespace(hit=bool(text), all_results=[types.SimpleNamespace(text=text)])
+                return types.SimpleNamespace(hit=bool(text), filtered_results=[types.SimpleNamespace(text=text, box=(0, 0, 1, 1))])
             value = hits.get(node, False)
             return types.SimpleNamespace(hit=value(controller) if callable(value) else value)
         with mock.patch.object(probe._UiSession, "_bind_resource", lambda session: None), \
@@ -495,13 +495,20 @@ class UiProbeTests(unittest.TestCase):
     def test_photo_mode_opens_with_p_and_leaves_with_esc_after_the_landmark(self):
         controller = FakeController()
         camera_open = lambda c: c.events[-1:] == [("key_up", probe.KEY_P)]
-        code, output, _ = self.run_ui("photo-mode-check", [], controller, {"MaaNikki_Daily_PhotoReady": camera_open})
+        code, output, _ = self.run_ui("photo-mode-check", [], controller, {"MaaNikki_Daily_PhotoReady": camera_open,
+                                                                           "MaaNikki_MainDetected": True})
         self.assertEqual(code, 0, output)
         self.assertEqual(controller.events, [("key_down", 35), ("key_up", 35), ("key_down", 53), ("key_up", 53)])
 
+    def test_photo_mode_sends_nothing_without_the_open_world_hud(self):
+        controller = FakeController()
+        code, output, _ = self.run_ui("photo-mode-check", [], controller)  # e.g. a black frame
+        self.assertEqual(code, 1)
+        self.assertEqual(controller.events, [])
+
     def test_photo_mode_sends_no_esc_without_the_landmark(self):
         controller = FakeController()
-        code, output, _ = self.run_ui("photo-mode-check", [], controller)
+        code, output, _ = self.run_ui("photo-mode-check", [], controller, {"MaaNikki_MainDetected": True})
         self.assertEqual(code, 1)
         self.assertEqual(controller.events, [("key_down", 35), ("key_up", 35)])
         self.assertIn("Esc not sent", output)
@@ -514,7 +521,35 @@ class UiProbeTests(unittest.TestCase):
         centre = (1040, 44)
         self.assertEqual(controller.events, [("click", *centre), ("text", "Ab12"), ("click", 1202, 44),
                                              ("click", *centre), ("text", "星光"), ("click", 1202, 44)])
-        self.assertIn('"matches": true', output)
+        self.assertIn('"exact_match": true', output)
+
+    def test_no_text_is_posted_once_the_search_page_is_gone(self):
+        controller = FakeController()
+        on_page = lambda c: sum(1 for e in c.events if e[0] == "click") < 3  # gone after the first clear
+        code, output, _ = self.run_ui("text-input-check", [], controller, {"MaaNikki_CompendiumSearchReady": on_page},
+                                      texts=("", "Ab12", ""))
+        self.assertEqual(code, 1)
+        self.assertEqual([e for e in controller.events if e[0] == "text"], [("text", "Ab12")])
+        self.assertIn("no longer recognised", output)
+
+    def test_a_partial_reading_is_not_an_exact_match(self):
+        controller = FakeController()
+        code, output, _ = self.run_ui("text-input-check", [], controller, {"MaaNikki_CompendiumSearchReady": True},
+                                      texts=("", "旧Ab12", "", "星光", ""))
+        self.assertEqual(code, 0, output)
+        self.assertIn('"exact_match": false', output)
+        self.assertIn("ocr_inconclusive", output)
+
+    def test_a_failed_click_asks_inactive(self):
+        class FailingClick(FakeController):
+            def post_click(self, x, y):
+                return self._record(("click", x, y), False)
+        controller = FailingClick()
+        code, output, _ = self.run_ui("text-input-check", [], controller, {"MaaNikki_CompendiumSearchReady": True},
+                                      texts=("",))
+        self.assertEqual(code, 1)
+        self.assertEqual(controller.events, [("click", 1040, 44), ("inactive",)])
+        self.assertIn("inactive() was asked to release it (confirmed)", output)
 
     def test_text_input_sends_nothing_unless_the_field_is_empty_on_the_search_page(self):
         for hits, texts in (({}, ()), ({"MaaNikki_CompendiumSearchReady": True}, ("旧的文字",))):
@@ -531,6 +566,14 @@ class UiProbeTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertEqual(controller.events, [("hover", 900, 32), ("hover", 300, 400), ("hover", 900, 32), ("inactive",)])
         self.assertIn('"back_where_it_was": true', output)
+
+    def test_an_unconfirmed_cursor_restore_fails_the_hover_check(self):
+        controller = FakeController()
+        controller.inactive_ok = False
+        code, output, _ = self.run_ui("hover-check", ["--point", "300", "400"], controller,
+                                      {"MaaNikki_Blessing_InventoryReady": True})
+        self.assertEqual(code, 1)
+        self.assertIn("inactive() was not confirmed", output)
 
     def test_a_refused_hover_still_ends_with_the_cursor_cleanup(self):
         controller = FakeController()
