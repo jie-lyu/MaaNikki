@@ -269,7 +269,7 @@ Mac 白名单（`agent/host/macos/preview_tasks.json`）现为邮箱、每周免
 | `macos-phase3` | 阶段 3：自编译 Mac 控制模块补丁、Mac 后端、客户端 Mac 生命周期、开发探针、CI；本节写作时已推送到 `ecaf1d1`，之后的提交见 `git log origin/macos-phase3..macos-phase3` | fork 的草稿 PR #2（→ `plan-macos-support`） |
 | `macos-phase3-step2-fixed`、`macos-phase3-step3-wip` | 本地旧分支（`0334931`、`3f59625`），内容已并入 `macos-phase3` | 可以删除，不要基于它们工作 |
 
-CI（fork `jie-lyu/MaaNikki`）：`Test Windows x64`（`test-windows.yml`，Windows 契约、离线测试、`cargo test --lib`）每次推送都跑；`test-macos-imports.yml` 只由 PR 触发，`imports` 在 `macos-15-intel` 上跑 agent 的导入和 Mac 后端测试，`control-unit` 在 `macos-15-intel` 上分两步：交叉编译 arm64 单元并检查加载命令与架构（不执行），以及用同一份源码在 x86_64 上构建并运行输入逻辑测试（不是发布的二进制）。Apple silicon 托管 runner 一直分配不到；发布的 arm64 单元的行为只在这台 Mac 上验证过（风险 11）。
+CI（fork `jie-lyu/MaaNikki`，都由 PR 或手动触发，向两个草稿 PR 的分支推送就会跑）：`Test Windows x64`（`test-windows.yml`，Windows 契约、离线测试、`cargo test --lib`）；`Test build Windows x64`（`test-build-windows.yml`）只在 PR 带 `test-build` 标签时打 Windows 包；`Test macOS agent imports`（`test-macos-imports.yml`）里 `imports` 在 `macos-15-intel` 上跑 agent 的导入和 Mac 后端测试，`control-unit` 在 `macos-15-intel` 上分两步：交叉编译 arm64 单元并检查加载命令与架构（不执行），以及用同一份源码在 x86_64 上构建并运行输入逻辑测试（不是发布的二进制）。Apple silicon 托管 runner 一直分配不到；发布的 arm64 单元的行为只在这台 Mac 上验证过（风险 11）。
 
 ### 在这台 Mac 上工作
 
