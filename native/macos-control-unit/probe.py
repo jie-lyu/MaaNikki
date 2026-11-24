@@ -702,15 +702,22 @@ def cmd_scene_button_check(args) -> int:
     steps.append({"step": "cursor baseline", "cursor": cursor, "window_bounds": bounds})
     if bounds is None or not (bounds[0] <= cursor[0] < bounds[0] + bounds[2] and bounds[1] <= cursor[1] < bounds[1] + bounds[3]):
         fail("the pointer is not over the game window; the unit would refuse a scene press. Nothing pressed")
+    # The band's own change between two still frames: the idle animation alone moved it 6% on the
+    # device, a camera turn 55-66%. The middle button is pressed only after a clear turn.
+    time.sleep(1.0)
+    still = frame("still")
+    ambient = _changed(start[band], still[band])
+    turn_limit = max(20.0, ambient * 3 + 5)
     # Turn away first, so that a recentre has something to undo.
     if not controller.post_relative_move(args.pixels, 0).wait().succeeded:
         fail("the unit refused the relative move")
     time.sleep(0.8)
     turned = frame("turned-away")
-    turn_pct = _changed(start[band], turned[band])
-    steps.append({"step": f"relative move +{args.pixels}", "scene_changed_pct": turn_pct, "cursor": _cursor()})
-    if turn_pct < 1:
-        fail("the camera did not turn; nothing to recentre, no button pressed")
+    turn_pct = _changed(still[band], turned[band])
+    steps.append({"step": f"relative move +{args.pixels}", "ambient_changed_pct": ambient, "scene_changed_pct": turn_pct,
+                  "turn_limit_pct": round(turn_limit, 1), "cursor": _cursor()})
+    if turn_pct <= turn_limit:
+        fail("no clear camera turn (no more change than standing still); no button pressed")
     if abs(steps[-1]["cursor"][0] - cursor[0]) > 1 or abs(steps[-1]["cursor"][1] - cursor[1]) > 1:
         fail("the real cursor moved with the relative move; no button pressed")
     button = SCENE_BUTTONS[args.button]
@@ -726,6 +733,16 @@ def cmd_scene_button_check(args) -> int:
             released = controller.post_touch_up(contact=button).wait().succeeded
         except Exception:
             released = False
+        if pressed and not released:
+            # Handle it now, before any wait or capture can fail first and hide it.
+            steps.append({"step": "release not confirmed", "contact": button})
+            try:
+                inactive = controller.post_inactive().wait().succeeded
+            except Exception:
+                inactive = False
+            steps.append({"step": "inactive", "succeeded": inactive})
+            fail("the release of the scene press was not confirmed; inactive() was asked to release it "
+                 "(the unit also retries when the controller is destroyed, which is not guaranteed to succeed)")
     time.sleep(1.0)
     after = frame("after-press")
     after_cursor = _cursor()
@@ -734,8 +751,6 @@ def cmd_scene_button_check(args) -> int:
                   "cursor": after_cursor})
     if not pressed:
         fail("the unit refused the scene press (see maafw.log for the reason)")
-    if not released:
-        fail("the release of the scene press failed; the unit keeps it held and releases it when the controller goes away")
     if abs(after_cursor[0] - cursor[0]) > 1 or abs(after_cursor[1] - cursor[1]) > 1:
         fail("the real cursor moved: a scene press must not move it")
     if steps[-1]["scene_changed_pct"] < 1:
