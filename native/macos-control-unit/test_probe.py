@@ -42,7 +42,7 @@ class Job:
 class FakeController:
     """Records input; refuses the presses whose 1-based index is in refuse_presses."""
 
-    def __init__(self, *, refuse_presses=(), key_up_ok=True, touch_up_ok=True, patch=3, interrupt=()):
+    def __init__(self, *, refuse_presses=(), key_up_ok=True, touch_up_ok=True, patch=3, interrupt=(), refuse_keys=()):
         self.events = []
         self.inputs = 0
         self.presses = 0
@@ -50,6 +50,7 @@ class FakeController:
         self.key_up_ok, self.touch_up_ok = key_up_ok, touch_up_ok
         self.info = {"type": "macos", "maanikki_patch": patch}
         self.interrupt = set(interrupt)  # event kinds whose wait() raises KeyboardInterrupt
+        self.refuse_keys = set(refuse_keys)  # key codes whose key_down is refused
 
     def _record(self, event, ok=True):
         self.events.append(event)
@@ -67,7 +68,7 @@ class FakeController:
         return self._record(("up", contact), self.touch_up_ok)
 
     def post_key_down(self, key):
-        return self._record(("key_down", key))
+        return self._record(("key_down", key), key not in self.refuse_keys)
 
     def post_key_up(self, key):
         return self._record(("key_up", key), self.key_up_ok)
@@ -76,7 +77,7 @@ class FakeController:
         return self._record(("inactive",))
 
 
-def run(argv, controller, abilities=("insect",), cursor=(100.0, 100.0)):
+def run(argv, controller, abilities=("insect",), cursor=(100.0, 100.0), command="scene-button-check"):
     """Run scene-button-check with fakes; returns (exit code or "interrupted", stdout, saved frame names).
 
     The HUD reads ``abilities`` in turn and keeps the last one for any further reading.
@@ -102,10 +103,10 @@ def run(argv, controller, abilities=("insect",), cursor=(100.0, 100.0)):
             mock.patch.object(probe, "_connect", lambda window, raw: (controller, True, 1.0)), \
             mock.patch.object(probe, "_grab", grab), \
             mock.patch.object(probe, "_map_back_score", lambda image: 0.5), \
-            mock.patch.object(probe, "_cursor", lambda: cursor), \
+            mock.patch.object(probe, "_cursor", cursor if callable(cursor) else (lambda: cursor)), \
             mock.patch.object(probe, "_game_window_bounds", lambda window: (0, 0, 1920, 1080)), \
             mock.patch.object(probe.time, "sleep", lambda seconds: None), \
-            mock.patch.object(sys, "argv", ["probe.py", "scene-button-check", "--profile", "maanikki", "--game",
+            mock.patch.object(sys, "argv", ["probe.py", command, "--profile", "maanikki", "--game",
                                             "--out", str(Path(out) / "run"), *argv]), \
             mock.patch.object(probe, "_ensure_runtime", lambda runtime: None), \
             mock.patch.object(probe, "_selected_ability", selected_ability):
@@ -281,6 +282,79 @@ class SceneButtonCheckTests(unittest.TestCase):
                     code, _, _ = run(argv, controller)
                 self.assertEqual(code, 2)
                 self.assertEqual(controller.events, [])
+
+
+class KeySequenceCheckTests(unittest.TestCase):
+    def sequence(self, name, controller):
+        return run(["--sequence", name], controller, command="key-sequence-check")
+
+    def test_face_camera_releases_w_before_ctrl(self):
+        controller = FakeController()
+        code, output, _ = self.sequence("face-camera", controller)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(controller.events, [("key_down", 59), ("key_down", 13), ("key_up", 13), ("key_up", 59)])
+        self.assertIn(probe.SEQUENCE_EXPECTED["face-camera"], output)
+
+    def test_starsea_fall_is_space_then_q(self):
+        controller = FakeController()
+        code, output, _ = self.sequence("starsea-fall", controller)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(controller.events, [("key_down", 49), ("key_up", 49), ("key_down", 12), ("key_up", 12)])
+
+    def test_a_refused_key_stops_and_releases_everything_pressed(self):
+        controller = FakeController(refuse_keys={13})
+        code, output, _ = self.sequence("face-camera", controller)
+        self.assertEqual(code, 1)
+        self.assertIn("refused key down 13", output)
+        self.assertEqual(controller.events, [("key_down", 59), ("key_down", 13), ("key_up", 13), ("key_up", 59)])
+
+    def test_an_interrupted_press_is_still_released(self):
+        controller = FakeController(interrupt={"key_down"})
+        code, _, _ = self.sequence("starsea-fall", controller)
+        self.assertEqual(code, "interrupted")
+        self.assertEqual(controller.events, [("key_down", 49), ("key_up", 49)])
+
+    def test_a_refused_release_mid_sequence_is_retried_then_asks_inactive(self):
+        controller = FakeController(key_up_ok=False)
+        code, output, _ = self.sequence("starsea-fall", controller)
+        self.assertEqual(code, 1)
+        self.assertEqual(controller.events, [("key_down", 49), ("key_up", 49), ("key_up", 49), ("inactive",)])
+
+    def test_an_interrupted_release_is_retried(self):
+        controller = FakeController(interrupt={"key_up"})
+        code, output, _ = self.sequence("starsea-fall", controller)
+        self.assertEqual(code, 1)
+        self.assertEqual(controller.events[:3], [("key_down", 49), ("key_up", 49), ("key_up", 49)])
+        self.assertIn(("inactive",), controller.events)
+
+    def test_an_unconfirmed_cleanup_release_asks_inactive(self):
+        controller = FakeController(refuse_keys={13}, key_up_ok=False)
+        code, output, _ = self.sequence("face-camera", controller)
+        self.assertEqual(code, 1)
+        self.assertEqual(controller.events, [("key_down", 59), ("key_down", 13), ("key_up", 13), ("inactive",)])
+        self.assertIn("release of key 13 was not confirmed", output)
+
+
+class CameraCheckCursorTests(unittest.TestCase):
+    def dragging_cursor(self, controller):
+        # The game moving the real pointer by dx/2 points, as seen on the device.
+        return lambda: (100.0 + sum(e[1] for e in controller.events if e[0] == "move") / 2, 100.0)
+
+    def test_record_cursor_keeps_going_and_records_each_displacement(self):
+        controller = FakeController()
+        code, output, _ = run(["--record-cursor"], controller, cursor=self.dragging_cursor(controller),
+                              command="camera-check")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(controller.events, [("move", 400, 0), ("move", -400, 0)])
+        self.assertIn('"cursor_moved_by": [\n      200.0', output)
+        self.assertIn('"cursor_moved_by": [\n      -200.0', output)
+
+    def test_without_the_flag_a_moved_cursor_still_stops_the_check(self):
+        controller = FakeController()
+        code, output, _ = run([], controller, cursor=self.dragging_cursor(controller), command="camera-check")
+        self.assertEqual(code, 1)
+        self.assertEqual(controller.events, [("move", 400, 0)])
+        self.assertIn("the real cursor moved", output)
 
 
 class AbilityReadingTests(unittest.TestCase):

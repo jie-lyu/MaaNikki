@@ -258,10 +258,10 @@ json.dump(d,open(sys.argv[1],'w'),ensure_ascii=False,indent=1)" /tmp/mac-jump-ch
 ### 下一批（不消耗，待设计后安排）
 
 - C6 重跑：维护者先把镜头转开，`scene-button-check --button middle --no-turn --with-forward`，不发相对位移。
-- 光标随相对位移移动的触发条件（家园钓星之前要查清，那里镜头对齐后必须按右键）：在「刚开大地图又关上」「刚换过能力或装扮」等不同状态下各跑一次 `camera-check`，记录每一步的真实指针。
-- Ctrl+W 朝向对齐（家园钓星点之前用）：只按住 Ctrl 再短按 W 一次，看角色朝向与镜头是否对齐、角色是否只挪一点。
-- `starsea_fall` 宏（空格 0.16 秒后 Q 0.10 秒）：在平地上执行一次，看急坠是否触发。
-- 计时测量（不发输入，只需游戏在最前、屏幕未锁）：在游戏全屏在最前时测 `sleep(0.03)`：普通、`caffeinate -i`、`NSProcessInfo` 活动声明，以及经客户端启动的子进程，确认被拉长的触发条件与有效的修正范围。
+- 光标随相对位移移动的触发条件（家园钓星之前要查清，那里镜头对齐后必须按右键）：在「刚开大地图又关上」「刚换过能力或装扮」等不同状态下各跑一次 `camera-check --record-cursor`（指针移动时只记录、不停止），记录每一步的真实指针位移。
+- Ctrl+W 朝向对齐（家园钓星点之前用）：`key-sequence-check --sequence face-camera`，先把镜头转到角色侧面，看角色是否转向镜头方向、是否只挪一点。
+- `starsea_fall` 宏（空格 0.16 秒后 Q 0.10 秒）：`key-sequence-check --sequence starsea-fall`，在平地上执行一次，看是否跳起后急坠。
+- 计时测量（不发输入，只需游戏在最前、屏幕未锁）：在游戏全屏在最前时用 `probe.py timing`（`--activity none|user-initiated|latency-critical`）和 `caffeinate -i .venv/bin/python -B native/macos-control-unit/probe.py timing` 测 `sleep(0.03)`，以及经客户端启动的子进程，确认被拉长的触发条件与有效的修正范围。
 - 计时修正实现之后，重跑 D1 或一条细调多的路线，对比细调脉冲的实际按住时长。
 
 ### E 组：消耗每日进度的任务（之后逐项排，每项一天一次）

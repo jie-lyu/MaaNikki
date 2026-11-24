@@ -9,6 +9,8 @@ shows whether a self-built unit works with the stock core.
     python probe.py lifecycle --runtime DIR (--window ID | --game) --log-dir DIR --expect-unit SHA256|stock
     python probe.py capture --runtime DIR --game --out DIR
     python probe.py camera-check --profile maanikki --runtime DIR --game --out DIR [--option]
+    python probe.py key-sequence-check --profile maanikki --runtime DIR --game --out DIR --sequence face-camera|starsea-fall
+    python probe.py timing [--activity none|user-initiated|latency-critical]
     python probe.py scene-button-check --profile maanikki --runtime DIR --game --out DIR [--button middle]
         [--no-turn] [--hold SECONDS] [--repeat N] [--with-forward] [--expect-ability NAME [--select-slot N]]
 
@@ -602,6 +604,7 @@ def cmd_camera_check(args) -> int:
     # Every step is judged before the next input is sent: the first anomaly stops the probe.
     baseline = _cursor()  # after Option, which moves the pointer to the window centre
     steps.append({"step": "cursor baseline", "cursor": baseline})
+    previous = baseline
     for sign, name in ((1, f"relative move +{args.pixels}"), (-1, f"relative move -{args.pixels}")):
         before = start if sign > 0 else turned
         sent = controller.post_relative_move(sign * args.pixels, 0).wait().succeeded
@@ -613,7 +616,10 @@ def cmd_camera_check(args) -> int:
         cursor = _cursor()
         steps.append({"step": name, "sent": sent, "scene_changed_pct": changed, "cursor": cursor,
                       **({"vs_start_pct": _changed(start[band], after[band])} if sign < 0 else {})})
-        if abs(cursor[0] - baseline[0]) > 1 or abs(cursor[1] - baseline[1]) > 1:
+        moved = (round(cursor[0] - previous[0], 1), round(cursor[1] - previous[1], 1))
+        steps[-1]["cursor_moved_by"] = moved
+        previous = cursor
+        if (abs(moved[0]) > 1 or abs(moved[1]) > 1) and not args.record_cursor:
             fail(f"the real cursor moved after {name}: relative moves must not move it")
         if changed < 1:
             fail(f"{name} did not change the scene: the camera did not turn")
@@ -627,6 +633,159 @@ def cmd_camera_check(args) -> int:
     print(json.dumps(steps, ensure_ascii=False, indent=2))
     print(f"needs review: look at the frames in {out}. The turn passes when +{args.pixels} turns the camera "
           f"horizontally and -{args.pixels} brings the view back near the start.")
+    return 0
+
+
+# The agent's own key sequences, in macOS key codes (Control 59, W 13, Space 49, Q 12):
+# face-camera is ForegroundInput.face_camera() (Ctrl held, W pulsed 80 ms, W released before Ctrl);
+# starsea-fall is resource/routes/macros/starsea_fall.json without its leading 1 s wait.
+KEY_SEQUENCES = {
+    "face-camera": (("down", 59), ("down", 13), ("wait", 0.08), ("up", 13), ("up", 59)),
+    "starsea-fall": (("down", 49), ("wait", 0.1587), ("up", 49), ("wait", 0.2323), ("down", 12), ("wait", 0.1004),
+                     ("up", 12)),
+}
+SEQUENCE_EXPECTED = {
+    "face-camera": "The character should turn to face the camera's direction, moving at most a step.",
+    "starsea-fall": "The character should jump and then plunge (急坠) straight down.",
+}
+
+
+def cmd_key_sequence_check(args) -> int:
+    """Send one of the agent's key sequences to the game, judged from captures and the operator's eyes.
+
+    Keys only (posted to the game process); every key pressed is released whatever happens, and an
+    unconfirmed release asks inactive(). Spends nothing in the game.
+    """
+    import cv2
+    from maa.tasker import Tasker
+    from maa.toolkit import Toolkit
+
+    if _profile != "maanikki":
+        sys.exit("key-sequence-check exercises the patched unit; pass --profile maanikki")
+    out = Path(args.out).resolve()
+    if out.exists() and any(out.iterdir()):
+        sys.exit(f"{out} is not empty")
+    out.mkdir(parents=True, exist_ok=True)
+    Tasker.set_log_dir(out)
+    window_id = _pick_window(args, Toolkit)
+    game_pid = _bundle_pid(GAME_BUNDLE_ID)
+    for _ in range(args.wait):
+        if _front_pid() == game_pid:
+            break
+        time.sleep(1)
+    else:
+        sys.exit("the game never became the front application; nothing sent")
+    controller, ok, _ = _connect(window_id, raw=False)
+    if not ok:
+        sys.exit("connection failed; nothing sent")
+    steps = []
+
+    def frame(name):
+        image, _ = _grab(controller)
+        if image is None or image.shape[:2] != (720, 1280):
+            fail(f"no 1280x720 frame at {name}")
+        cv2.imwrite(str(out / f"{len(steps):02d}-{name}.png"), image)
+        return image
+
+    def fail(reason):
+        steps.append({"failed": reason})
+        print(json.dumps(steps, ensure_ascii=False, indent=2))
+        sys.exit(1)
+
+    start = frame("start")
+    if _map_back_score(start) >= MAP_CLOSED_SCORE:
+        fail("the big map is open; start in the open world")
+    cursor = _cursor()
+    time.sleep(1.0)
+    still = frame("still")
+    steps.append({"step": "still frames", "frame_changed_pct": _changed(start, still), "cursor": cursor})
+    held = []
+    began = time.perf_counter()
+    try:
+        for kind, value in KEY_SEQUENCES[args.sequence]:
+            at = round(time.perf_counter() - began, 3)
+            if kind == "wait":
+                time.sleep(value)
+                continue
+            if kind == "down":
+                held.append(value)  # counted before submitting: once submitted it may have reached the unit
+                sent = controller.post_key_down(value).wait().succeeded
+            else:
+                # Forgotten only once confirmed: a refused or interrupted release is retried by the cleanup.
+                sent = controller.post_key_up(value).wait().succeeded
+                if sent:
+                    held.remove(value)
+            steps.append({"step": f"key {kind} {value}", "at_s": at, "sent": sent})
+            if not sent:
+                fail(f"the unit refused key {kind} {value}")
+    finally:
+        # Release what is still held, last pressed first, whatever stopped the sequence.
+        for key in reversed(held):
+            try:
+                released = controller.post_key_up(key).wait().succeeded
+            except BaseException:
+                released = False
+            steps.append({"step": f"cleanup key up {key}", "released": released})
+            if not released:
+                try:
+                    inactive = controller.post_inactive().wait().succeeded
+                except BaseException:
+                    inactive = False
+                steps.append({"step": "inactive", "succeeded": inactive})
+                fail(f"the release of key {key} was not confirmed; inactive() was asked to release it")
+    time.sleep(1.0)
+    after = frame("after")
+    steps.append({"step": "after", "frame_changed_pct": _changed(still, after), "cursor": _cursor()})
+    steps.append({"verdict": "needs_review", "frames": str(out)})
+    print(json.dumps(steps, ensure_ascii=False, indent=2))
+    print(f"needs review: frames in {out}. {SEQUENCE_EXPECTED[args.sequence]}")
+    return 0
+
+
+def cmd_timing(args) -> int:
+    """Measure how long short sleeps really take in this process; sends nothing, needs no game or runtime.
+
+    With --activity, declares an NSProcessInfo activity for the measurement (the candidate fix for the
+    stretched short sleeps seen while the game is in front).
+    """
+    import ctypes
+    import subprocess
+
+    token = info = None
+    if args.activity != "none":
+        objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
+        ctypes.CDLL("/System/Library/Frameworks/Foundation.framework/Foundation")
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        objc.objc_getClass.restype, objc.objc_getClass.argtypes = ctypes.c_void_p, [ctypes.c_char_p]
+        objc.sel_registerName.restype, objc.sel_registerName.argtypes = ctypes.c_void_p, [ctypes.c_char_p]
+        cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+        cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+
+        def message(restype, *argtypes):
+            return ctypes.CFUNCTYPE(restype, ctypes.c_void_p, ctypes.c_void_p, *argtypes)(("objc_msgSend", objc))
+        info = message(ctypes.c_void_p)(objc.objc_getClass(b"NSProcessInfo"), objc.sel_registerName(b"processInfo"))
+        options = 0x00FFFFFF & ~(1 << 20)  # NSActivityUserInitiatedAllowingIdleSystemSleep
+        if args.activity == "latency-critical":
+            options |= 0xFF00000000  # NSActivityLatencyCritical
+        reason = cf.CFStringCreateWithCString(None, b"MaaNikki timing probe", 0x08000100)
+        token = message(ctypes.c_void_p, ctypes.c_uint64, ctypes.c_void_p)(
+            info, objc.sel_registerName(b"beginActivityWithOptions:reason:"), options, reason)
+    try:
+        samples = []
+        for _ in range(args.samples):
+            started = time.perf_counter()
+            time.sleep(args.request_ms / 1000)
+            samples.append((time.perf_counter() - started) * 1000)
+    finally:
+        if token:
+            message(None, ctypes.c_void_p)(info, objc.sel_registerName(b"endActivity:"), token)
+    samples.sort()
+    hid = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True).stdout
+    idle = next((int(line.split()[-1]) / 1e9 for line in hid.splitlines() if "HIDIdleTime" in line), None)
+    print(json.dumps({"request_ms": args.request_ms, "activity": args.activity, "samples": args.samples,
+                      "p50_ms": round(samples[len(samples) // 2], 1), "p95_ms": round(samples[int(len(samples) * .95) - 1], 1),
+                      "max_ms": round(samples[-1], 1), "front_bundle": _front_bundle_id(),
+                      "hid_idle_s": None if idle is None else round(idle, 1)}))
     return 0
 
 
@@ -925,8 +1084,12 @@ def cmd_scene_button_check(args) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
+    timing = sub.add_parser("timing")
+    timing.add_argument("--activity", choices=("none", "user-initiated", "latency-critical"), default="none")
+    timing.add_argument("--request-ms", type=float, default=30.0)
+    timing.add_argument("--samples", type=int, default=30)
     for name in ("windows", "lifecycle", "capture", "input-check", "refusal-check", "hit-test", "camera-check",
-                 "scene-button-check"):
+                 "scene-button-check", "key-sequence-check"):
         command = sub.add_parser(name)
         command.add_argument("--runtime", help="directory with libMaaFramework.dylib and the control units")
         command.add_argument("--profile", choices=sorted(PROFILES), default="stock",
@@ -945,7 +1108,9 @@ def main() -> int:
                                  help="SHA-256 the loaded control unit must have (build.json), or 'stock' for the official one")
         else:
             command.add_argument("--out", required=True)
-        if name in ("input-check", "camera-check", "scene-button-check"):
+        if name == "key-sequence-check":
+            command.add_argument("--sequence", choices=sorted(KEY_SEQUENCES), required=True)
+        if name in ("input-check", "camera-check", "scene-button-check", "key-sequence-check"):
             command.add_argument("--wait", type=int, default=60, help="seconds to wait for the game to be in front")
         if name in ("camera-check", "scene-button-check"):
             command.add_argument("--pixels", type=int, default=400, help="relative move (the plan measured 400)")
@@ -965,6 +1130,8 @@ def main() -> int:
             command.add_argument("--with-forward", action="store_true",
                                  help="hold W from before the first press until after the last (the character walks)")
         if name == "camera-check":
+            command.add_argument("--record-cursor", action="store_true",
+                                 help="record real-pointer movement after each move instead of stopping (drift investigation)")
             command.add_argument("--option", action="store_true",
                                  help="experiment: Option, a 1-pixel absorbing move, the turn, Option again (navigation sends no Option on macOS)")
         if name == "input-check":
@@ -976,12 +1143,13 @@ def main() -> int:
             parser.error("--button right needs --expect-ability: the press uses whatever ability is selected")
         if args.button != "right" and (args.expect_ability is not None or args.select_slot is not None):
             parser.error("--expect-ability and --select-slot apply to --button right only")
-    _ensure_runtime(args.runtime)
+    _ensure_runtime(getattr(args, "runtime", None))
     global _profile
-    _profile = args.profile
+    _profile = getattr(args, "profile", "stock")
     commands = {"windows": cmd_windows, "lifecycle": cmd_lifecycle, "capture": cmd_capture,
                 "input-check": cmd_input_check, "refusal-check": cmd_refusal_check, "hit-test": cmd_hit_test,
-                "camera-check": cmd_camera_check, "scene-button-check": cmd_scene_button_check}
+                "camera-check": cmd_camera_check, "scene-button-check": cmd_scene_button_check,
+                "key-sequence-check": cmd_key_sequence_check, "timing": cmd_timing}
     return commands[args.command](args)
 
 
