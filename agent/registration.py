@@ -6,7 +6,7 @@ from threading import Event
 import traceback
 from performance import action_profile
 from game_view import ALLOWED_FRAME_SIZES, is_clipped_game_frame
-from host import capabilities, platform_backend, task_entry_supported
+from host import capabilities, platform_backend, task_entry_supported, task_refusal_reason
 from message_log import message_scope
 from task_control import TaskStopped, task_session
 
@@ -70,7 +70,7 @@ def agent_action(name, *, stop_on_failure=False):
                 try:
                     context.run_task("MaaNikki_Daily_Message", {
                         "MaaNikki_Daily_Message": {"focus": {
-                            "Node.Action.Starting": f"{entry} 暂不支持当前系统（Mac 测试预览只开放已验证的任务），已跳过。"}}})
+                            "Node.Action.Starting": f"{entry} 不在当前系统开放：{task_refusal_reason(entry)}"}}})
                 except Exception:
                     traceback.print_exc()
                 return False

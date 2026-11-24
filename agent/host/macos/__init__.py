@@ -60,10 +60,33 @@ def parse_task_tiers(data) -> tuple[frozenset[str], frozenset[str], dict[str, st
     return verified, experimental, dict(excluded)
 
 
+def load_task_list(text: str):
+    """The list file's JSON, refusing what Python alone would accept: duplicate keys (the last would silently win)
+    and NaN/Infinity constants. The client's reader refuses the same."""
+    def no_duplicates(pairs):
+        keys = [key for key, _ in pairs]
+        if len(set(keys)) != len(keys):
+            raise ValueError("任务清单有重复的键")
+        return dict(pairs)
+
+    def no_constants(name):
+        raise ValueError(f"任务清单含有无效的数值 {name}")
+    return json.loads(text, object_pairs_hook=no_duplicates, parse_constant=no_constants)
+
+
 def task_tiers() -> tuple[frozenset[str], frozenset[str], dict[str, str]]:
     from app_paths import RESOURCE_ROOT
     path = RESOURCE_ROOT.joinpath(*PREVIEW_TASKS_FILE)
-    return parse_task_tiers(json.loads(path.read_text(encoding="utf-8")))
+    return parse_task_tiers(load_task_list(path.read_text(encoding="utf-8")))
+
+
+def refusal_reason(entry) -> str:
+    """What to tell the user when the preview refuses ``entry``."""
+    try:
+        reason = task_tiers()[2].get(entry)
+    except (OSError, ValueError, KeyError, TypeError):
+        return "无法读取 Mac 任务清单，已跳过。"
+    return reason or "Mac 测试预览版暂不开放这个任务，已跳过。"
 
 
 def task_tier(entry) -> str | None:

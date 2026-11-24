@@ -343,6 +343,60 @@ pub fn extra_tasks_allow(list: &str, entry: &str) -> bool {
     !entry.is_empty() && list.split(',').map(str::trim).any(|item| item == entry)
 }
 
+/// 任务清单的 JSON：与 agent 一样拒绝重复的键（serde_json 默认保留最后一个，悄悄覆盖）。
+/// NaN/Infinity 本来就不是合法的 JSON，serde_json 已经拒绝。
+fn load_task_list(text: &str) -> Result<serde_json::Value, String> {
+    struct Strict(serde_json::Value);
+    struct StrictVisitor;
+    impl<'de> serde::de::Visitor<'de> for StrictVisitor {
+        type Value = serde_json::Value;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("JSON")
+        }
+        fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E> {
+            Ok(v.into())
+        }
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(v.into())
+        }
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(v.into())
+        }
+        fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E> {
+            Ok(serde_json::Number::from_f64(v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null))
+        }
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(v.into())
+        }
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(serde_json::Value::Null)
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::new();
+            while let Some(Strict(item)) = seq.next_element()? {
+                out.push(item);
+            }
+            Ok(serde_json::Value::Array(out))
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut out = serde_json::Map::new();
+            while let Some((key, Strict(value))) = map.next_entry::<String, Strict>()? {
+                if out.contains_key(&key) {
+                    return Err(serde::de::Error::custom(format!("重复的键 {}", key)));
+                }
+                out.insert(key, value);
+            }
+            Ok(serde_json::Value::Object(out))
+        }
+    }
+    impl<'de> serde::Deserialize<'de> for Strict {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            d.deserialize_any(StrictVisitor).map(Strict)
+        }
+    }
+    serde_json::from_str::<Strict>(text).map(|Strict(value)| value).map_err(|e| format!("任务清单无法解析: {}", e))
+}
+
 /// macOS 任务清单的三个档位：已验证（entries）、试用（experimental）、不开放（excluded，入口到原因）。
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 pub struct TaskTiers {
@@ -355,7 +409,7 @@ pub struct TaskTiers {
 /// experimental、excluded 可选（旧清单等于没有试用任务）；类型不对、空名字、重复、同一入口出现在多个档位都报错。
 pub fn parse_task_tiers(manifest_json: &str) -> Result<TaskTiers, String> {
     let manifest: serde_json::Value =
-        serde_json::from_str(manifest_json).map_err(|e| format!("任务清单无法解析: {}", e))?;
+        load_task_list(manifest_json)?;
     let object = manifest.as_object().ok_or("任务清单不是对象")?;
     let names = |key: &str, required: bool| -> Result<Vec<String>, String> {
         let value = match object.get(key) {
@@ -399,7 +453,7 @@ pub fn parse_task_tiers(manifest_json: &str) -> Result<TaskTiers, String> {
 /// 只用于界面标记，不影响哪些任务能运行（运行与否只看 parse_task_tiers）。
 pub fn parse_task_notes(manifest_json: &str) -> Result<std::collections::BTreeMap<String, String>, String> {
     let manifest: serde_json::Value =
-        serde_json::from_str(manifest_json).map_err(|e| format!("任务清单无法解析: {}", e))?;
+        load_task_list(manifest_json)?;
     let mut notes = std::collections::BTreeMap::new();
     if let Some(value) = manifest.get("notes") {
         let map = value.as_object().ok_or("任务清单的 notes 无效")?;
@@ -715,6 +769,16 @@ mod preview_task_tests {
         let tiers = super::parse_task_tiers(manifest).unwrap();
         assert_eq!(tiers.verified.len(), 4);
         assert!(tiers.excluded.contains_key("MaaNikki_MonthlyCrystalExchange"));
+    }
+
+    #[test]
+    fn the_list_file_refuses_duplicate_keys_and_nan() {
+        use super::parse_task_tiers;
+        for raw in [r#"{"entries":["A"],"notes":NaN}"#, r#"{"entries":["A"],"excluded":{"A":"why"},"excluded":{}}"#,
+                    r#"{"entries":["A"],"entries":["B"]}"#, r#"{"entries":["A"],"excluded":{"B":"x","B":"y"}}"#] {
+            assert!(parse_task_tiers(raw).is_err(), "{}", raw);
+        }
+        assert_eq!(parse_task_tiers(r#"{"entries":["A"]}"#).unwrap().verified, vec!["A".to_string()]);
     }
 
     #[test]

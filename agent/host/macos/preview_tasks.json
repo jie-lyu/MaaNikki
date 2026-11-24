@@ -48,9 +48,9 @@
     "MaaNikki_SubtaskTest_xinghai_animal_one": "开发者测试功能，只在开发构建里由开发开关放行。"
   },
   "notes": {
-    "MaaNikki_WeeklyFreeGifts": "Device run 2026-11-24: three gifts found by scrolling and claimed; the distance per scroll line is not measured.",
-    "MaaNikki_MonthlyPass": "Device run 2026-11-24: 旅行任务 and 旅行秘宝 claimed; 乐园构想 was locked on the test account and skipped as designed, so that path is unverified on macOS.",
-    "MaaNikki_CollectStarlightCrystals": "Added 2026-11-24 on the maintainer's decision after one supervised run: 跑图收集 matched and walked xinghai_crystal_3 (one of eight routes), collected 星之魄 3/3, 星光结晶 30/30, 星光微尘 90/100, count and full route confirmed by the maintainer. In-place turning with the middle button was not exercised. The entry also opens the 星忆晶树 branch, which has not been run on macOS; the maintainer accepted that.",
+    "MaaNikki_WeeklyFreeGifts": "Mac 实测（2026-11-24）：靠滚动找到并领取了三个免费礼包；每滚动一行的距离未测。",
+    "MaaNikki_MonthlyPass": "Mac 实测（2026-11-24）：领取了旅行任务和旅行秘宝；测试账号的乐园构想未解锁、按设计跳过，乐园构想领取在 Mac 上未验证。",
+    "MaaNikki_CollectStarlightCrystals": "Mac 实测一次（2026-11-24，由维护者决定加入）：跑图收集走完 8 条路线中的 xinghai_crystal_3，收集数经维护者确认；原地转向与中键回正未触发过；「星忆晶树」子项在 Mac 上没跑过，维护者接受。",
     "MaaNikki_MinigameBling": "每次进场或付费重试消耗 100 噗灵，默认 267 轮",
     "MaaNikki_Crown": "可选的商店兑换会按最大数量兑换",
     "MaaNikki_Home": "可能把能力保存进能力方案的槽位（永久改动）",

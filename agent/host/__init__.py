@@ -241,6 +241,14 @@ def task_entry_supported(entry) -> bool:
     return True
 
 
+def task_refusal_reason(entry) -> str:
+    """The user-facing reason this desktop refuses ``entry`` (macOS: the list's excluded reason when there is one)."""
+    if platform_backend() == "macos":
+        from host.macos import refusal_reason
+        return refusal_reason(entry)
+    return "当前系统不支持这个任务，已跳过。"
+
+
 def background_input_class():
     """Window-targeted input class for this desktop; raises NavigationError where there is none."""
     if platform_backend() != "win32":

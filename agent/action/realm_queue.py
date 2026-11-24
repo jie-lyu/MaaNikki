@@ -22,6 +22,18 @@ HANDOFF_NODES = {"glow": "MaaNikki_BlessingPursuit", "fallback": "MaaNikki_Realm
                  "done": "MaaNikki_RealmReview", "weekly": "MaaNikki_RealmWeekly"}
 
 
+def unsupported_input(error) -> UnsupportedInput | None:
+    """The UnsupportedInput behind ``error``, also when cleanup (leaving the realm, reopening the calendar) raised
+    another exception over it; None when there is none."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        if isinstance(error, UnsupportedInput):
+            return error
+        seen.add(id(error))
+        error = error.__cause__ or error.__context__
+    return None
+
+
 def fallback_kind(context) -> str | None:
     energy = context.get_node_data("MaaNikki_RealmEnergy") or {}
     for item in energy.get("next", []):
@@ -90,6 +102,11 @@ class RealmQueueAction(CustomAction):
             rt.log(f"幻境挑战停止：{error}。剩余活跃能量未使用。")
             return False
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, cv2.error) as error:
+            refused = unsupported_input(error)
+            if refused is not None:
+                # A cleanup error raised over the refusal must not turn it into the spending fallback.
+                rt.log(f"幻境挑战停止：{refused}。剩余活跃能量未使用。")
+                return False
             if not rt.stopped:
                 rt.diagnostic("realm_queue", str(error), details={"traceback": traceback.format_exc()[-3000:]})
             rt.log(f"幻境挑战顺序中断：{error}。剩余活跃能量改用默认副本。")
