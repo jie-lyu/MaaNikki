@@ -283,13 +283,16 @@ def macho_output(*command) -> list[str]:
                           stdout=subprocess.PIPE).stdout.splitlines()
 
 
-def install_names(binaries: list[Path]) -> set[str]:
-    """LC_ID_DYLIB of every library in the bundle."""
-    return {line.strip() for binary in binaries
-            for line in macho_output("otool", "-arch", "arm64", "-D", binary)[1:]}
+def install_names(binaries: list[Path]) -> dict[str, list[Path]]:
+    """LC_ID_DYLIB of every library in the bundle, with the files that carry it."""
+    names: dict[str, list[Path]] = {}
+    for binary in binaries:
+        for line in macho_output("otool", "-arch", "arm64", "-D", binary)[1:]:
+            names.setdefault(line.strip(), []).append(binary)
+    return names
 
 
-def check_macho(binary: Path, app: Path, universal: list[str], bundle_ids: set[str],
+def check_macho(binary: Path, app: Path, universal: list[str], bundle_ids: dict[str, list[Path]],
                 by_install_name: list[str]) -> list[str]:
     """The arm64 slice must exist and load nothing outside the bundle and the system.
 
@@ -335,7 +338,9 @@ def check_macho(binary: Path, app: Path, universal: list[str], bundle_ids: set[s
                  for rpath in rpaths if rpath.startswith("@loader_path")]
         if any(path.is_file() and path.resolve().is_relative_to(app.resolve()) for path in found):
             continue
-        if dependency in bundle_ids:
+        maafw = resources / "maafw"
+        if (binary.is_relative_to(maafw / "plugins")
+                and any(path.parent == maafw for path in bundle_ids.get(dependency, []))):
             # MaaFramework's plugins (maafw/plugins/, the official runtime's demo plugin, also in the
             # Windows package) are loaded by libMaaFramework after it and libMaaUtils, and dyld uses
             # the already-loaded image with that install name; every device run so far loaded it so.
