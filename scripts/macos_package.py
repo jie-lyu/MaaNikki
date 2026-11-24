@@ -280,7 +280,14 @@ def macho_output(*command) -> list[str]:
                           stdout=subprocess.PIPE).stdout.splitlines()
 
 
-def check_macho(binary: Path, app: Path, universal: list[str]) -> list[str]:
+def install_names(binaries: list[Path]) -> set[str]:
+    """LC_ID_DYLIB of every library in the bundle."""
+    return {line.strip() for binary in binaries
+            for line in macho_output("otool", "-arch", "arm64", "-D", binary)[1:]}
+
+
+def check_macho(binary: Path, app: Path, universal: list[str], bundle_ids: set[str],
+                by_install_name: list[str]) -> list[str]:
     """The arm64 slice must exist and load nothing outside the bundle and the system.
 
     Universal files (opencv-python ships one) are accepted and listed, not thinned: thinning would
@@ -295,12 +302,33 @@ def check_macho(binary: Path, app: Path, universal: list[str]) -> list[str]:
         universal.append(f"{relative} ({' '.join(archs)})")
     # otool -D prints the file's own install name (a dylib's LC_ID_DYLIB), which -L lists first.
     own_id = {line.strip() for line in macho_output("otool", "-arch", "arm64", "-D", binary)[1:]}
-    for line in macho_output("otool", "-arch", "arm64", "-L", binary)[1:]:
-        dependency = line.split()[0]
-        if dependency in own_id:
-            continue
+    dependencies = [line.split()[0] for line in macho_output("otool", "-arch", "arm64", "-L", binary)[1:]]
+    dependencies = [dependency for dependency in dependencies if dependency not in own_id]
+    for dependency in dependencies:
         if not dependency.startswith(ALLOWED_LINK_PREFIXES):
             problems.append(f"{relative}: links {dependency}, which a tester's Mac will not have")
+    load_commands = macho_output("otool", "-arch", "arm64", "-l", binary)
+    rpaths = [load_commands[i + 2].split()[1] for i, line in enumerate(load_commands)
+              if line.strip() == "cmd LC_RPATH"]
+    for dependency in (d for d in dependencies if d.startswith("@rpath/")):
+        # Some wheels keep their build machines' absolute rpaths. They are harmless only while
+        # nothing is looked up through them: an @rpath lookup could pick a same-named library from,
+        # say, a tester's /usr/local/lib before the bundled one.
+        if any(not rpath.startswith("@") for rpath in rpaths):
+            problems.append(f"{relative}: {dependency} is looked up through absolute rpaths {rpaths}")
+            continue
+        name = dependency.removeprefix("@rpath/")
+        found = [binary.parent / rpath.removeprefix("@loader_path").lstrip("/") / name
+                 for rpath in rpaths if rpath.startswith("@loader_path")]
+        if any(path.is_file() and path.resolve().is_relative_to(app.resolve()) for path in found):
+            continue
+        if dependency in bundle_ids:
+            # MaaFramework's plugins (maafw/plugins/, the official runtime's demo plugin, also in the
+            # Windows package) are loaded by libMaaFramework after it and libMaaUtils, and dyld uses
+            # the already-loaded image with that install name; every device run so far loaded it so.
+            by_install_name.append(f"{relative} -> {dependency}")
+            continue
+        problems.append(f"{relative}: {dependency} does not resolve inside the bundle via {rpaths}")
     return problems
 
 
@@ -403,7 +431,10 @@ def package(runtime: Path, unit_manifest_path: Path, commit: str, output: Path, 
 
     binaries = macho_files(app)
     universal: list[str] = []
-    problems = [problem for binary in binaries for problem in check_macho(binary, app, universal)]
+    by_install_name: list[str] = []
+    bundle_ids = install_names(binaries)
+    problems = [problem for binary in binaries
+                for problem in check_macho(binary, app, universal, bundle_ids, by_install_name)]
     if problems:
         sys.exit("Mach-O checks failed:\n" + "\n".join(problems))
     stray = [path for path in (app / "Contents" / "MacOS").iterdir() if path not in binaries]
@@ -422,6 +453,7 @@ def package(runtime: Path, unit_manifest_path: Path, commit: str, output: Path, 
     shutil.rmtree(stage)
     print(f"test package: {dmg}\nchecksums: {sums}\ncontrol unit sha256 (for the lifecycle probe): {unit_sha}\n"
           f"universal (arm64 slice used): {universal}\n"
+          f"@rpath resolved by an already loaded library: {by_install_name}\n"
           f"Mach-O files: {len(binaries)}, signed here because they had no valid signature: "
           f"{[str(path.relative_to(app)) for path in signed_here]}", flush=True)
 
