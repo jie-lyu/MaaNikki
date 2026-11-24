@@ -1262,6 +1262,16 @@ function App() {
       // 调试版本跳过待安装更新检测；interface 未配置任何更新源时（Mac 测试包）也不恢复安装，
       // 与 checkAutomaticUpdate 的条件一致，保存的记录原样保留。
       const updatesConfigured = !!(result.interface.mirrorchyan_rid || result.interface.github);
+      if (!updatesConfigured && !isDebugVersion(result.interface.version)) {
+        const skipped = await getPendingUpdateInfo(result.interface.version);
+        if (skipped) {
+          log.warn('未配置更新源，不安装待安装更新:', skipped.versionName);
+          toast.warning(t('update.pendingSkippedNoSource', {
+            version: skipped.versionName,
+            defaultValue: '发现待安装的更新 {{version}}，但这个版本不支持应用内更新，已跳过。请下载新的安装包替换。',
+          }));
+        }
+      }
       if (updatesConfigured && !isDebugVersion(result.interface.version)) {
         const pendingUpdate = await getPendingUpdateInfo(result.interface.version);
         if (pendingUpdate) {
