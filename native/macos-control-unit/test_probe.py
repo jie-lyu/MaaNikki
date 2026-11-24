@@ -485,6 +485,12 @@ class CameraCheckCursorTests(unittest.TestCase):
         self.assertIn('"step": "cursor before the absorbing move"', output)
         self.assertIn('"cursor_moved_by": [\n      0.5', output)
 
+    def test_absorb_and_option_are_exclusive_and_send_nothing_together(self):
+        controller = FakeController()
+        code, output, _ = run(["--absorb", "--option"], controller, command="camera-check")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(controller.events, [])
+
     def test_absorb_without_record_cursor_stops_when_the_absorbing_move_drags_the_pointer(self):
         controller = FakeController()
         drag = lambda: (100.0 + sum(3 * e[1] for e in controller.events if e[0] == "move"), 100.0)  # noqa: E731

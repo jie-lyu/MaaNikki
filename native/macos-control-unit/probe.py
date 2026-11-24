@@ -541,6 +541,8 @@ def cmd_camera_check(args) -> int:
 
     if _profile != "maanikki":
         sys.exit("camera-check exercises the patched unit; pass --profile maanikki")
+    if args.absorb and args.option:
+        sys.exit("--absorb is the no-Option experiment; --option already sends its own absorbing move. Nothing sent")
     out = Path(args.out).resolve()
     if out.exists() and any(out.iterdir()):
         sys.exit(f"{out} is not empty")
