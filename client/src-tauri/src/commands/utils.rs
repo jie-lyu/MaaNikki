@@ -656,8 +656,12 @@ pub fn get_exe_directory() -> Result<PathBuf, String> {
             .map(|p| p.to_path_buf())
             .ok_or_else(|| "无法获取 exe 所在目录".to_string())?;
         // macOS 应用包：只读资源在 Contents/Resources，Contents/MacOS 只放可执行文件（签名要求）。
+        // 先解析符号链接（经链接启动时 current_exe 可能是链接本身的路径）。
         #[cfg(target_os = "macos")]
-        if let Some(resources) = macos_bundle_resources_dir(&exe_dir) {
+        if let Some(resources) = std::fs::canonicalize(&exe_path)
+            .ok()
+            .and_then(|real| real.parent().and_then(macos_bundle_resources_dir))
+        {
             return Ok(resources);
         }
         Ok(exe_dir)

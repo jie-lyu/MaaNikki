@@ -279,6 +279,7 @@ pub async fn apply_project_patch(
     target_dir: String,
     new_version: String,
 ) -> Result<(), String> {
+    super::update::refuse_in_app_update()?;
     tauri::async_runtime::spawn_blocking(move || {
         let extract = std::fs::canonicalize(extract_dir).map_err(|e| e.to_string())?;
         let target = std::fs::canonicalize(target_dir).map_err(|e| e.to_string())?;
