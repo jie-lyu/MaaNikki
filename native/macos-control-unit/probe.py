@@ -491,6 +491,10 @@ def cmd_input_check(args) -> int:
                       "scene_changed_pct": _changed(settled, later), "limit_pct": round(limit, 1)})
         if not sent or steps[-1]["scene_changed_pct"] > limit:
             fail("W was refused, or the whole view still moves after the destroy (W may be held)")
+        # Below the limit only means no sustained movement was seen: W held against an obstacle may
+        # barely change the frame. Signing off the release also needs the character to have moved
+        # while W was held (the frames saved above) and to be still afterwards.
+        steps[-1]["verdict"] = "no sustained movement observed (check the frames: moved while held, still after)"
     print(json.dumps(steps, ensure_ascii=False, indent=2))
     print(f"frames and maafw.log in {out}")
     return 0
