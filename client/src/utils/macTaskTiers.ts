@@ -103,14 +103,27 @@ export function normalizeMacTaskTiers(raw: unknown): MacTaskTiers {
  */
 export function macTaskTiersShapeError(raw: unknown): string {
   const value = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
-  const isMap = (item: unknown) => !!item && typeof item === 'object' && !Array.isArray(item);
+  const isName = (item: unknown): item is string => typeof item === 'string' && item !== '';
+  const isList = (item: unknown): item is string[] =>
+    Array.isArray(item) && item.every(isName) && new Set(item).size === item.length;
+  const isMap = (item: unknown): item is Record<string, string> =>
+    !!item &&
+    typeof item === 'object' &&
+    !Array.isArray(item) &&
+    Object.entries(item).every(([key, text]) => key !== '' && isName(text));
   if (
     !value ||
-    !Array.isArray(value.verified) ||
-    !Array.isArray(value.experimental) ||
+    !isList(value.verified) ||
+    !isList(value.experimental) ||
     !isMap(value.excluded) ||
     !isMap(value.notes)
   ) {
+    return MAC_TIERS_MALFORMED;
+  }
+  // Each entry in one tier only, as the backend's parser requires; an overlap would show the wrong tier.
+  const excluded = Object.keys(value.excluded);
+  const tiered = [...value.verified, ...value.experimental];
+  if (new Set(tiered).size !== tiered.length || tiered.some((entry) => excluded.includes(entry))) {
     return MAC_TIERS_MALFORMED;
   }
   return hasMacTaskTiers(normalizeMacTaskTiers(raw)) ? '' : MAC_TIERS_MALFORMED;

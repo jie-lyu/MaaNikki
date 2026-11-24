@@ -30,6 +30,12 @@ export async function loadMacTaskTiers(): Promise<MacTaskTiers> {
   }
 }
 
+/** True only on a macOS backend whose task tiers have not arrived yet. */
+export function macTaskTiersPending(): boolean {
+  const state = useAppStore.getState();
+  return state.backendOS === 'macos' && state.macTaskTiers === null;
+}
+
 /** macTaskTiersSettled over the app store: what the scheduler waits on before deciding a slot. */
 export function waitForMacTaskTiers(timeoutMs = 30000): Promise<void> {
   return macTaskTiersSettled(useAppStore.getState, useAppStore.subscribe, timeoutMs);

@@ -80,7 +80,15 @@ test('macOS starts wait for the tiers and stop on a manifest error; other system
 test('an empty or malformed macOS tier response is a load error that refuses starts', () => {
   for (const raw of [null, [], {}, { verified: [], experimental: [], excluded: {}, notes: {} },
     { verified: 'x', experimental: [], excluded: {}, notes: {} }, { verified: ['A'], experimental: [], excluded: [], notes: {} },
-    { verified: ['A'], experimental: [], excluded: {} }]) {
+    { verified: ['A'], experimental: [], excluded: {} },
+    // valid containers with bad members or overlapping tiers
+    { verified: ['A'], experimental: [], excluded: {}, notes: { A: 7 } },
+    { verified: ['A', 1], experimental: [], excluded: {}, notes: {} },
+    { verified: ['A', 'A'], experimental: [], excluded: {}, notes: {} },
+    { verified: ['A'], experimental: [''], excluded: {}, notes: {} },
+    { verified: ['A'], experimental: [], excluded: { B: '' }, notes: {} },
+    { verified: ['A'], experimental: ['A'], excluded: {}, notes: {} },
+    { verified: ['A'], experimental: ['B'], excluded: { B: 'why' }, notes: {} }]) {
     assert.equal(tiers.macTaskTiersShapeError(raw), tiers.MAC_TIERS_MALFORMED, JSON.stringify(raw));
   }
   assert.equal(tiers.macTaskTiersShapeError({
@@ -111,4 +119,84 @@ test('a scheduled slot waits for a delayed tier response instead of being refuse
   await tiers.macTaskTiersSettled(() => stuck, subscribe, 5);
   assert.equal(listeners.size, 0);
   assert.equal(tiers.macStartBlockedReason(stuck.backendOS, stuck.macTaskTiers), tiers.MAC_TIERS_PENDING);
+});
+
+// The real ScheduleService, with its imports stubbed and the clock fixed to one minute.
+function loadScheduler({ pending }) {
+  const source = readFileSync(resolve(ROOT, 'client/src/services/scheduleService.ts'), 'utf8');
+  const FIXED = new Date(2026, 10, 24, 21, 30, 10).getTime();
+  class FixedDate extends Date {
+    constructor(...args) { if (args.length) super(...args); else super(FIXED); }
+    static now() { return FIXED; }
+  }
+  const storage = new Map();
+  const tiers = { pending, release: null };
+  const store = {
+    instances: [{ id: 'B', name: 'B', isRunning: false,
+      schedulePolicies: [{ enabled: true, name: 'p', weekdays: [new Date(FIXED).getDay()], times: ['21:30'] }] }],
+  };
+  const stubs = {
+    '@/stores/appStore': { useAppStore: { getState: () => store } },
+    '@/services/macTaskTiersService': {
+      macTaskTiersPending: () => tiers.pending,
+      waitForMacTaskTiers: () => new Promise((done) => { tiers.release = () => { tiers.pending = false; done(); }; }),
+    },
+    '@/utils': { loggers: { task: { info() {}, warn() {}, error() {} } } },
+  };
+  const listeners = { addEventListener() {}, removeEventListener() {} };
+  const context = {
+    exports: {}, require: (id) => stubs[id], Date: FixedDate, setTimeout, clearTimeout, setInterval, clearInterval,
+    localStorage: { getItem: (k) => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, String(v)) },
+    document: { ...listeners, visibilityState: 'visible' }, window: listeners, JSON, console,
+  };
+  vm.runInNewContext(ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS },
+  }).outputText, context, { filename: 'scheduleService.ts' });
+  const recorded = () => JSON.parse(storage.get('mxu_schedule_triggeredSlots') || '[]');
+  return { service: context.exports.scheduleService, tiers, recorded };
+}
+
+test('the scheduler never waits off macOS: the slot starts before a teardown, as before', async () => {
+  const { service, recorded } = loadScheduler({ pending: false });
+  const started = [];
+  service.setTriggerCallback(async (inst) => { started.push(inst.id); return true; });
+  const check = service.check();
+  service.stop();  // torn down right after the check began: the start was already handed over
+  service.setTriggerCallback(null);
+  await check;
+  assert.deepEqual(started, ['B']);
+  assert.deepEqual(recorded(), ['B:2026-11-24-21-30']);
+});
+
+test('a scheduler stopped while waiting for the Mac tiers records nothing and a restart still runs the slot', async () => {
+  const { service, tiers, recorded } = loadScheduler({ pending: true });
+  const first = [];
+  service.setTriggerCallback(async (inst) => { first.push(inst.id); return true; });
+  const waiting = service.check();
+  await new Promise((done) => setTimeout(done, 0));
+  service.stop();
+  service.setTriggerCallback(null);
+  tiers.release();
+  await waiting;
+  assert.deepEqual(first, []);
+  assert.deepEqual(recorded(), []);  // the slot is still free
+  const second = [];
+  service.setTriggerCallback(async (inst) => { second.push(inst.id); return true; });
+  await service.check();  // restarted in the same minute, tiers loaded
+  assert.deepEqual(second, ['B']);
+  assert.deepEqual(recorded(), ['B:2026-11-24-21-30']);
+});
+
+test('a scheduler waiting for the Mac tiers starts the slot once they arrive', async () => {
+  const { service, tiers, recorded } = loadScheduler({ pending: true });
+  const started = [];
+  service.setTriggerCallback(async (inst) => { started.push(inst.id); return true; });
+  const waiting = service.check();
+  await new Promise((done) => setTimeout(done, 0));
+  assert.deepEqual(started, []);
+  await service.check();  // an overlapping check while the first one waits does nothing
+  tiers.release();
+  await waiting;
+  assert.deepEqual(started, ['B']);
+  assert.deepEqual(recorded(), ['B:2026-11-24-21-30']);
 });

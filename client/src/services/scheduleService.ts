@@ -1,5 +1,5 @@
 import { useAppStore } from '@/stores/appStore';
-import { waitForMacTaskTiers } from '@/services/macTaskTiersService';
+import { macTaskTiersPending, waitForMacTaskTiers } from '@/services/macTaskTiersService';
 import { loggers } from '@/utils';
 import type { Instance } from '@/types/interface';
 
@@ -63,6 +63,8 @@ class ScheduleService {
   private checking = false;
   private triggerFn: ScheduleTriggerCallback | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Bumped by stop(): a check still waiting for the Mac task tiers then decides and records nothing. */
+  private generation = 0;
 
   private getTriggeredSlots(): Set<string> {
     try {
@@ -151,6 +153,7 @@ class ScheduleService {
   }
 
   stop() {
+    this.generation += 1;
     if (this.intervalId) {
       clearInterval(this.intervalId);
       this.intervalId = null;
@@ -201,9 +204,15 @@ class ScheduleService {
       ).padStart(2, '0')}`;
       const slotStr = formatSlotKey(currentSlot);
 
-      // macOS: the slot is fixed above; wait for the task tiers before deciding, so a start refused only
-      // because they were still loading does not use up the slot. Returns at once on other backends.
-      await waitForMacTaskTiers();
+      // macOS only, and only while the task tiers are still loading: the slot is fixed above; wait for them
+      // before deciding, so a start refused only because they were loading does not use up the slot. Other
+      // backends never wait here (no yield, the same order as before). A stop() during the wait ends this check
+      // without recording the slot or calling whatever handler is registered by then.
+      if (macTaskTiersPending()) {
+        const generation = this.generation;
+        await waitForMacTaskTiers();
+        if (generation !== this.generation || !this.triggerFn) return;
+      }
 
       this.cleanupOldSlots();
       const triggeredSlots = this.getTriggeredSlots();
