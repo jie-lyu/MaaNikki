@@ -34,6 +34,7 @@ jobs:
           python -B scripts/test_host_imports.py
           python -B scripts/test_host.py
           python -B scripts/test_app_paths.py
+          python -B native/macos-control-unit/test_probe.py
 
   control-unit:
     # The patched Mac control unit from the pinned sources, in a fresh work directory. Never touches a

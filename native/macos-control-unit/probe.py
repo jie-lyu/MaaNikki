@@ -10,6 +10,7 @@ shows whether a self-built unit works with the stock core.
     python probe.py capture --runtime DIR --game --out DIR
     python probe.py camera-check --profile maanikki --runtime DIR --game --out DIR [--option]
     python probe.py scene-button-check --profile maanikki --runtime DIR --game --out DIR [--button middle]
+        [--no-turn] [--hold SECONDS] [--repeat N] [--with-forward] [--expect-ability NAME [--select-slot N]]
 
 `lifecycle` connects, captures, destroys the controller, then connects and
 captures again, for each round. It passes only when every round connects and
@@ -631,6 +632,72 @@ def cmd_camera_check(args) -> int:
 
 SCENE_PRESS_PRESSURE = 0x4D4E5343  # HybridInput::kScenePressPressure: press where the cursor is, no hover
 SCENE_BUTTONS = {"left": 0, "right": 1, "middle": 2}
+SCENE_BUTTON_EXPECTED = {
+    "middle": "The camera should swing back behind the character.",
+    "left": "The character should purify (净化) once per press; nothing else should be hit.",
+    "right": "The selected ability (the HUD button, bottom right) should act once per press, or the game "
+             "should say there is nothing to use it on.",
+}
+HOLD_RANGE_S = (0.05, 3.0)  # 0.05: the agent's click_mouse; 3.0: well past any task's scene-button hold
+HELD_FRAME_MIN_S, HELD_FRAME_AT_S = 0.4, 0.25  # holds this long also save a frame while the button is down
+REPEAT_MAX, REPEAT_GAP_S = 8, 0.15  # fishing reels in with presses about this far apart
+FORWARD_LEAD_S, FORWARD_TAIL_S = 0.4, 0.2  # W held this long before the first press and after the last
+
+
+# The HUD ability button (bottom right) and the abilities the agent recognises there: the same pipeline
+# nodes and matching as agent/navigation/ability.py ability_matches(), read from the repository so the
+# probe cannot drift from the agent.
+RESOURCE = Path(__file__).resolve().parents[2] / "resource"
+ABILITY_NODES = {
+    "insect": ("navigation.json", "MaaNikki_Navigation_InsectAbility"),
+    "fishing": ("fishing.json", "MaaNikki_Navigation_FishingAbility"),
+    "rhythms": ("fishing.json", "MaaNikki_Navigation_RhythmsAbility"),
+    "star_collect": ("home.json", "MaaNikki_Navigation_StarCollectAbility"),
+    "gingerbread": ("route_studio.json", "MaaNikki_Navigation_GingerbreadAbility"),
+}
+ABILITY_MATCH = 0.78  # ability_matches()
+HUD_CROP = (slice(600, 720), slice(1000, 1280))  # the ability and jump buttons, saved for review
+# macOS key codes of 1-8 (Carbon kVK_ANSI_1..8): the game's default 切换能力 keys.
+SLOT_KEYS = {1: 0x12, 2: 0x13, 3: 0x14, 4: 0x15, 5: 0x17, 6: 0x16, 7: 0x1A, 8: 0x1C}
+
+
+def _ability_scores(image) -> dict[str, float]:
+    """Match score of each known ability against the HUD ability button, as ability_matches() computes it."""
+    import cv2
+    import numpy as np
+
+    def white(value, low, high):
+        return cv2.inRange(cv2.cvtColor(value, cv2.COLOR_BGR2HSV), np.array(low), np.array(high))
+
+    scores = {}
+    for name, (pipeline, node) in ABILITY_NODES.items():
+        definition = json.loads((RESOURCE / "pipeline" / pipeline).read_text(encoding="utf-8"))[node]
+        template = cv2.imread(str(RESOURCE / "image" / definition["template"]))
+        scale = .73 * 2 / 3  # game/ templates are 1080p assets
+        icon = cv2.resize(white(template, [0, 0, 230], [180, 60, 255]), None, fx=scale, fy=scale,
+                          interpolation=cv2.INTER_LINEAR)
+        x, y, w, h = definition["roi"]
+        patch = white(image[y:y + h, x:x + w], [0, 0, 200], [180, 60, 255])
+        bx, by, bw, bh = cv2.boundingRect(icon)
+        if not bw or not bh or patch.shape[0] < bh or patch.shape[1] < bw:
+            scores[name] = 0.0
+            continue
+        scores[name] = round(float(cv2.matchTemplate(patch, icon[by:by + bh, bx:bx + bw], cv2.TM_CCORR_NORMED).max()), 3)
+    return scores
+
+
+def _selected_ability(image) -> tuple[str | None, dict[str, float]]:
+    """The ability the HUD shows (None when no known one matches), with every score."""
+    scores = _ability_scores(image)
+    best = max(scores, key=scores.get)
+    return (best if scores[best] > ABILITY_MATCH else None), scores
+
+
+def _hold_seconds(text: str) -> float:
+    value = float(text)
+    if not HOLD_RANGE_S[0] <= value <= HOLD_RANGE_S[1]:
+        raise argparse.ArgumentTypeError(f"--hold must be within {HOLD_RANGE_S[0]}-{HOLD_RANGE_S[1]} s")
+    return value
 
 
 def _game_window_bounds(window_id: int):
@@ -642,12 +709,14 @@ def _game_window_bounds(window_id: int):
 
 
 def cmd_scene_button_check(args) -> int:
-    """Turn the camera away, then press a scene mouse button where the cursor already is.
+    """Press a scene mouse button where the cursor already is, judged from captures.
 
     Verifies the patched unit's scene press (touch_down with kScenePressPressure: no hover move,
-    which would turn the camera) on the game without any outfit: the middle button recentres the
-    camera behind the character. Sends one relative move (verified on the device) and one press and
-    release of that button. Spends nothing in the game.
+    which would turn the camera) on the game without any outfit. Middle: turns the camera away with
+    one relative move (verified on the device), then the press recentres it behind the character.
+    Left (净化) and right (the selected ability) are pressed without a turn. --hold, --repeat and
+    --with-forward (W held across the presses) cover how tasks use them. Spends nothing in the game
+    as long as nothing is in reach of the left or right button's action (the operator checks).
     """
     import cv2
     from maa.tasker import Tasker
@@ -697,6 +766,26 @@ def cmd_scene_button_check(args) -> int:
     start = frame("start")
     if _map_back_score(start) >= MAP_CLOSED_SCORE:
         fail("the big map is open; start in the open world")
+    if args.button == "right":
+        # The right button uses whatever ability is selected: confirm it is the expected one first, and
+        # select it with its slot key if asked. Anything else: nothing pressed.
+        ability, scores = _selected_ability(start)
+        cv2.imwrite(str(out / "hud-before.png"), start[HUD_CROP])  # what the reading saw
+        steps.append({"step": "selected ability", "ability": ability, "scores": scores})
+        if ability != args.expect_ability and args.select_slot is not None:
+            sent = controller.post_key_down(SLOT_KEYS[args.select_slot]).wait().succeeded
+            time.sleep(0.08)  # the game missed a 12 ms press on the device
+            sent = controller.post_key_up(SLOT_KEYS[args.select_slot]).wait().succeeded and sent
+            time.sleep(1.0)
+            start = frame("after-select")
+            ability, scores = _selected_ability(start)
+            cv2.imwrite(str(out / "hud-after-select.png"), start[HUD_CROP])
+            steps.append({"step": f"slot key {args.select_slot}", "sent": sent, "ability": ability, "scores": scores})
+            if not sent:
+                fail(f"the unit refused the slot key {args.select_slot}; no button pressed")
+        if ability != args.expect_ability:
+            fail(f"the HUD shows {ability or 'no known ability'}, not {args.expect_ability}; no button pressed"
+                 + ("" if args.select_slot is not None else " (pass --select-slot N to select it)"))
     cursor = _cursor()
     bounds = _game_window_bounds(window_id)
     steps.append({"step": "cursor baseline", "cursor": cursor, "window_bounds": bounds})
@@ -712,15 +801,16 @@ def cmd_scene_button_check(args) -> int:
         # No change can exceed the limit: a press could never be judged, so do not send one.
         steps.append({"step": "still frames", "ambient_changed_pct": ambient, "change_limit_pct": round(turn_limit, 1)})
         fail("the scene changes too much while standing still to judge a turn or a recentre; nothing sent")
-    if args.no_turn:
-        # The camera is already turned away (checked from a capture before the run): no relative move
-        # at all, the press alone is judged against the still frames.
+    # Only the middle button needs the camera turned away first (so that a recentre has something to
+    # undo). Left (净化) and right (the selected ability) act on their own; their result is judged
+    # from the saved frames.
+    middle = args.button == "middle"
+    if args.no_turn or not middle:
         turned = still
         steps.append({"step": "no turn", "ambient_changed_pct": ambient, "change_limit_pct": round(turn_limit, 1)})
-    # Turn away first, so that a recentre has something to undo.
     elif not controller.post_relative_move(args.pixels, 0).wait().succeeded:
         fail("the unit refused the relative move")
-    if not args.no_turn:
+    else:
         time.sleep(0.8)
         turned = frame("turned-away")
         turn_pct = _changed(still[band], turned[band])
@@ -731,46 +821,89 @@ def cmd_scene_button_check(args) -> int:
         if abs(steps[-1]["cursor"][0] - cursor[0]) > 1 or abs(steps[-1]["cursor"][1] - cursor[1]) > 1:
             fail("the real cursor moved with the relative move; no button pressed")
     button = SCENE_BUTTONS[args.button]
-    attempted = pressed = released = False
-    try:
-        # The binding's order is (x, y, contact, pressure): name them. Once submitted, the press may have
-        # reached the unit even if waiting for it is interrupted.
-        attempted = True
-        pressed = controller.post_touch_down(x=0, y=0, contact=button, pressure=SCENE_PRESS_PRESSURE).wait().succeeded
-        time.sleep(0.05)
-    finally:
-        # Whatever happened since the press was submitted (an interrupt, a failure), ask for the release;
-        # if it is not confirmed the unit keeps the button held and releases it when the controller goes.
+
+    def press_once(index):
+        attempted = pressed = released = False
+        held_frame = None
         try:
-            released = controller.post_touch_up(contact=button).wait().succeeded
-        except Exception:
-            released = False
-        if attempted and not released:
-            # Handle it now, before any wait or capture can fail first and hide it.
-            steps.append({"step": "release not confirmed", "contact": button})
+            # The binding's order is (x, y, contact, pressure): name them. Once submitted, the press may have
+            # reached the unit even if waiting for it is interrupted.
+            attempted = True
+            pressed = controller.post_touch_down(x=0, y=0, contact=button, pressure=SCENE_PRESS_PRESSURE).wait().succeeded
+            if pressed and args.hold >= HELD_FRAME_MIN_S:
+                # A capture sends no input; it shows what the game does while the button is down.
+                time.sleep(HELD_FRAME_AT_S)
+                held_frame = frame(f"held-{index}")
+                time.sleep(max(0.0, args.hold - HELD_FRAME_AT_S - 0.06))
+            else:
+                time.sleep(args.hold)
+        finally:
+            # Whatever happened since the press was submitted (an interrupt, a failure), ask for the release;
+            # if it is not confirmed the unit keeps the button held and releases it when the controller goes.
             try:
-                inactive = controller.post_inactive().wait().succeeded
+                released = controller.post_touch_up(contact=button).wait().succeeded
             except Exception:
-                inactive = False
-            steps.append({"step": "inactive", "succeeded": inactive})
-            fail("the release of the scene press was not confirmed; inactive() was asked to release it "
-                 "(the unit also retries when the controller is destroyed, which is not guaranteed to succeed)")
+                released = False
+            if attempted and not released:
+                # Handle it now, before any wait or capture can fail first and hide it.
+                steps.append({"step": "release not confirmed", "contact": button})
+                try:
+                    inactive = controller.post_inactive().wait().succeeded
+                except Exception:
+                    inactive = False
+                steps.append({"step": "inactive", "succeeded": inactive})
+                fail("the release of the scene press was not confirmed; inactive() was asked to release it "
+                     "(the unit also retries when the controller is destroyed, which is not guaranteed to succeed)")
+        steps.append({"step": f"scene press {args.button} #{index}", "pressed": pressed, "released": released,
+                      "hold_s": args.hold, **({"held_changed_pct": _changed(turned, held_frame)} if held_frame is not None else {})})
+        if not pressed:
+            fail("the unit refused the scene press (see maafw.log for the reason)")
+
+    forward_sent = False
+    try:
+        if args.with_forward:
+            # W first, so the press lands while the character is already walking (insect catching holds
+            # the capture button while moving). Released in finally, before anything else can fail.
+            forward_sent = controller.post_key_down(KEY_W).wait().succeeded
+            if not forward_sent:
+                fail("the unit refused W; no button pressed")
+            time.sleep(FORWARD_LEAD_S)
+            steps.append({"step": "W down", "lead_s": FORWARD_LEAD_S})
+        for index in range(1, args.repeat + 1):
+            press_once(index)
+            if index < args.repeat:
+                time.sleep(REPEAT_GAP_S)
+        if args.with_forward:
+            time.sleep(FORWARD_TAIL_S)
+    finally:
+        if args.with_forward:
+            try:
+                forward_up = controller.post_key_up(KEY_W).wait().succeeded
+            except Exception:
+                forward_up = False
+            steps.append({"step": "W up", "released": forward_up})
+            if not forward_up:
+                try:
+                    inactive = controller.post_inactive().wait().succeeded
+                except Exception:
+                    inactive = False
+                steps.append({"step": "inactive", "succeeded": inactive})
+                fail("the release of W was not confirmed; inactive() was asked to release it")
     time.sleep(1.0)
     after = frame("after-press")
     after_cursor = _cursor()
-    steps.append({"step": f"scene press {args.button}", "pressed": pressed, "released": released,
-                  "scene_changed_pct": _changed(turned[band], after[band]), "vs_start_pct": _changed(start[band], after[band]),
-                  "cursor": after_cursor})
-    if not pressed:
-        fail("the unit refused the scene press (see maafw.log for the reason)")
+    steps.append({"step": "after", "scene_changed_pct": _changed(turned[band], after[band]),
+                  "frame_changed_pct": _changed(turned, after), "vs_start_pct": _changed(start[band], after[band]),
+                  "ambient_changed_pct": ambient, "cursor": after_cursor})
     if abs(after_cursor[0] - cursor[0]) > 1 or abs(after_cursor[1] - cursor[1]) > 1:
         fail("the real cursor moved: a scene press must not move it")
-    if steps[-1]["scene_changed_pct"] < 1 or (args.no_turn and steps[-1]["scene_changed_pct"] <= turn_limit):
+    if middle and not args.with_forward and (
+            steps[-1]["scene_changed_pct"] < 1 or (args.no_turn and steps[-1]["scene_changed_pct"] <= turn_limit)):
         fail(f"no recentre observed: the {args.button} press was accepted but the screen changed no more than standing still")
     steps.append({"verdict": "needs_review", "frames": str(out)})
     print(json.dumps(steps, ensure_ascii=False, indent=2))
-    print(f"needs review: frames in {out}. For the middle button the camera should swing back behind the "
-          f"character; maafw.log should show 'scene press accepted' and 'release posted' for contact {button}.")
+    print(f"needs review: frames in {out}. {SCENE_BUTTON_EXPECTED[args.button]} maafw.log should show "
+          f"'scene press accepted' and 'release posted' for contact {button}, {args.repeat} time(s).")
     return 0
 
 
@@ -806,6 +939,16 @@ def main() -> int:
                                  help="scene button to press where the cursor is (middle: the camera recentre)")
             command.add_argument("--no-turn", action="store_true",
                                  help="no relative move: the camera is already turned away; judge the press alone")
+            command.add_argument("--hold", type=_hold_seconds, default=HOLD_RANGE_S[0],
+                                 help=f"seconds each press is held ({HOLD_RANGE_S[0]}-{HOLD_RANGE_S[1]})")
+            command.add_argument("--repeat", type=int, choices=range(1, REPEAT_MAX + 1), default=1, metavar=f"1-{REPEAT_MAX}",
+                                 help=f"presses, {REPEAT_GAP_S} s apart")
+            command.add_argument("--expect-ability", choices=sorted(ABILITY_NODES),
+                                 help="right button only, required: the ability the HUD must show before the press")
+            command.add_argument("--select-slot", type=int, choices=sorted(SLOT_KEYS), metavar="1-8",
+                                 help="right button only: press this slot's key (default 1-8) if the HUD shows another ability")
+            command.add_argument("--with-forward", action="store_true",
+                                 help="hold W from before the first press until after the last (the character walks)")
         if name == "camera-check":
             command.add_argument("--option", action="store_true",
                                  help="experiment: Option, a 1-pixel absorbing move, the turn, Option again (navigation sends no Option on macOS)")
@@ -813,6 +956,11 @@ def main() -> int:
             command.add_argument("--release", action="store_true",
                                  help="also hold W across a controller destroy (the character walks briefly)")
     args = parser.parse_args()
+    if args.command == "scene-button-check":
+        if args.button == "right" and args.expect_ability is None:
+            parser.error("--button right needs --expect-ability: the press uses whatever ability is selected")
+        if args.button != "right" and (args.expect_ability is not None or args.select_slot is not None):
+            parser.error("--expect-ability and --select-slot apply to --button right only")
     _ensure_runtime(args.runtime)
     global _profile
     _profile = args.profile
