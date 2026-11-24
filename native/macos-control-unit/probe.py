@@ -462,6 +462,13 @@ def cmd_input_check(args) -> int:
         fail("the click was refused or the map is still open")
 
     if args.release:
+        # The same band's change between two still frames a second apart, before W: idle animation,
+        # grass and lighting move it too (8% at night on the device), so the release is judged against it.
+        band = (slice(100, 330), slice(700, 1280))
+        still_a = frame("ambient-a")
+        time.sleep(1.0)
+        still_b = frame("ambient-b")
+        ambient = _changed(still_a[band], still_b[band])
         # Hold W, then destroy the controller without a key-up: the unit must release W itself.
         sent = controller.post_key_down(KEY_W).wait().succeeded
         time.sleep(0.6)
@@ -476,11 +483,11 @@ def cmd_input_check(args) -> int:
             fail("no frames after the destroy")
         cv2.imwrite(str(out / "release-settled.png"), settled)
         cv2.imwrite(str(out / "release-later.png"), later)
-        # Background band above the character: still when nobody walks.
-        band = (slice(100, 330), slice(700, 1280))
-        steps.append({"step": "W held across destroy", "sent": sent,
-                      "background_changed_pct": _changed(settled[band], later[band])})
-        if not sent or steps[-1]["background_changed_pct"] > 5:
+        # Walking moves the whole view; standing still changes the band about as much as before W.
+        limit = max(5.0, ambient * 1.5 + 2)
+        steps.append({"step": "W held across destroy", "sent": sent, "ambient_changed_pct": ambient,
+                      "background_changed_pct": _changed(settled[band], later[band]), "limit_pct": round(limit, 1)})
+        if not sent or steps[-1]["background_changed_pct"] > limit:
             fail("W was refused, or the scene still moves after the destroy (W may be held)")
     print(json.dumps(steps, ensure_ascii=False, indent=2))
     print(f"frames and maafw.log in {out}")
@@ -570,10 +577,17 @@ def cmd_camera_check(args) -> int:
 
     if args.option:
         # The navigation engine's order: release the cursor mode with Option, then turn.
-        start = option_press("option-before-turn")
+        option_press("option-before-turn")
+        # The game swallows the first relative move after an Option press (device, 2026-11-24): spend
+        # it on 1 pixel so the turn below is judged on its own.
+        if not controller.post_relative_move(1, 0).wait().succeeded:
+            fail("the unit refused the absorbing move")
+        time.sleep(0.4)
+        start = frame("after-absorb")
 
     # Every step is judged before the next input is sent: the first anomaly stops the probe.
-    baseline = _cursor()  # after Option, which may legitimately change the cursor
+    baseline = _cursor()  # after Option, which moves the pointer to the window centre
+    steps.append({"step": "cursor baseline", "cursor": baseline})
     for sign, name in ((1, f"relative move +{args.pixels}"), (-1, f"relative move -{args.pixels}")):
         before = start if sign > 0 else turned
         sent = controller.post_relative_move(sign * args.pixels, 0).wait().succeeded
