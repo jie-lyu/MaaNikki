@@ -491,6 +491,13 @@ CI（fork `jie-lyu/MaaNikki`）：三个测试工作流都只由 PR 或手动触
   - 写入的数据仍在 `~/Library/Application Support/MaaNikki`。
 - 测试包与 Windows 正式版共用版本号，所以 `build/macos/test-build-overlay.json` 去掉了 telemetry、statistics、mirrorchyan_rid、github 四项（打包时强制检查），窗口标题写明「Mac 测试版」和提交号。agent 用 `-I -B -X utf8` 启动，不受用户的 `PYTHON*` 变量影响，也不往签名后的包里写字节码。macOS 发布构建拒绝一切应用内更新安装，Mac 只用完整 DMG 更新。仍会联网的有游戏数据后台更新、幻境预测，以及用户主动使用的功能。给测试者的说明见 [Mac 测试版使用说明](macos-test-build.md)。
 - 发布 CI 产出的包之前，要在 Apple silicon 上对同一个 DMG（按 SHA-256 核对）运行 `verify`，并用包内的单元（`maafw/control-unit.json` 记录了它的 SHA-256）和官方主库跑生命周期探针（风险 11）。
+- 测试包的发放（2026-11-25 起）：用 fork（jie-lyu/MaaNikki）上的预发布版本。tag 用 `macos-test-<sha7>`（不是 `v<版本>`，也不是合法的 semver），标题「MaaNikki Mac 测试版（<sha7>）」，勾选 Pre-release、不设为 Latest。文件是在 Apple silicon 上验证过的那个 CI 产物（DMG 和 SHA256SUMS，原样上传），正文是 `docs/macos-test-build.md` 前面加两行头部：提交号、文件名、SHA-256，以及源码链接。CI 本身从不发布，release 由维护者手动创建。第一个是 `macos-test-cb7fddc`。为什么不会被误取：
+  - 客户端更新器只读 interface 里 `github` 指向的仓库，测试包没有这个字段；并且更新器会跳过不是合法 semver 的 tag。
+  - 镜像同步只读 `build/update-mirrors.json` 里的 architect9331/MaaNikki；网站同步只读上游的 release，而且只选带 `-win-x86_64.zip` 的。
+- 在 fork 上发布 release 时会触发的工作流（按 fork 默认分支上的工作流文件）：
+  - `sync-website.yml`（release: published）会运行。它不用密钥也能 checkout 公开的上游网站仓库，再根据上游的 commit 和 release 计算 `upstream.json`。如果与网站仓库现有的相同，它会打印「Website content is current.」并成功退出，什么都不推送——2026-11-25 发布 `macos-test-cb7fddc` 时就是这样。只有内容不同时它才会尝试推送，那时会因为 fork 没有凭据而失败；无论哪种情况都不会改动上游。
+  - `mirrorchyan_release_note.yml`（release: edited）只在 owner 为 architect9331 时运行，在 fork 上跳过。
+  - 推送 tag 不会触发任何工作流。
 
 ## 风险
 
@@ -513,6 +520,7 @@ CI（fork `jie-lyu/MaaNikki`）：三个测试工作流都只由 PR 或手动触
 15. 场景键被拒时，Mac 上的导航会中断而不是降级：`ForegroundInput.mouse_down` 在 `press_mouse` 返回失败时抛出「鼠标动作输入失败」，`engine._press_middle_align` 从不返回 False，`_wasd_snap_camera` 和 `recheck_heading` 里的退路不会执行，路线停止。Windows 上同一路径同样会抛出，但 `SendInput` 几乎不会失败。2026-11-24 已处理最常见的一种：Mac 后端能确定单元会拒绝（系统光标在游戏窗口之外）时，`_can_middle_align()` 直接报告中键回正不可用（导航日志记一次 `middle_align_unavailable`），三处调用都改走已有的路径，不发送中键（会发方向键；原地两次短按转得太少时，前台路径还会改用相对镜头转向，看日志时要知道这一点）；Windows 的输入后端没有这个判断，行为不变。仍会中断的情况：检查之后光标才移出、前台或命中测试被拒等，这些按原样报错停止。左键、右键（攻击、能力、捕虫、收杆、摆放与收回）没有键盘退路，光标在窗口外时照样被拒；2026-11-24 起这种情况下不再报笼统的「鼠标动作输入失败」，而是在按下之前就报「鼠标指针不在游戏画面内……请把鼠标指针移回游戏窗口后重新开始」，什么都不按（Windows 的输入后端没有这个判断，行为不变）；按经 Codex 复审的意见，暂不自动移动用户的光标，若以后需要，放进控制单元（它已负责命中测试、取消和光标放回），并先实机验证镜头和放回。钓鱼收线中途被拒同样会从 `reel_in` 抛出（推断）。
 16. 定时运行的轮询是串行的（原有限制，Windows 同样存在，不是 Mac 改动引入的）：`ScheduleService.check` 在等某个实例的开始回调返回期间持有 `checking`，此间的轮询直接跳过。如果第一个时间槽的开始回调一直没返回，到下一分钟的最后一次轮询时还在等，那次轮询就被跳过，可能漏掉另一个实例在那一分钟的时间槽。Codex 在 2026-11-24 把回调卡住 30 秒复现出来。前提：某一次定时开始的回调一直没返回，并且一直占到下一分钟里有到点时间槽的最后一次轮询。单实例也可能漏掉自己的下一个时间槽：只要开始回调到该时间槽的最后一次轮询时仍未返回（例如还在等控制器连接，界面尚未把实例标为运行中），即使稍后启动成功，也不会补跑。Mac 上任务清单读取期间的等待另有处理：被停掉时什么都不记，重启后照常只跑一次。
 17. 游戏数据后台更新（`client/src-tauri/src/commands/data_update.rs`）：客户端启动 3 秒后检查一次，之后每 6 小时一次，从 `architect9331/MaaNikki-data` 下载识别用的 JSON、npz 和 ONNX 模型。文件按清单里的 sha256 校验，只写入数据目录的 `data_overlay`，不包含代码。但清单本身没有签名，经 gh-proxy 镜像取到的清单只要格式有效也会被接受，所以镜像可以换掉识别数据和模型。这是既有行为，Windows 同样存在，没有设置可以关闭，Mac 测试包也保留了它（2026-11-24 编排方决定）。
+18. 将来上游正式 release 里如果放了文件名同时含 `macos`（或 mac、darwin、osx）和 `arm64`（或 aarch64）的 dmg、zip 或 tar.gz，任何带更新源的 Mac 客户端（interface 里有 `github` 或 `mirrorchyan_rid`）都会把它当作更新，自动下载并尝试安装（`updateService.ts` 的 `matchGitHubAsset` 按系统和架构的别名匹配文件名）。目前不会发生：测试包没有更新源，上游的 release 里也还没有 Mac 文件。即使发生，macOS 发布构建也会拒绝一切应用内安装（`refuse_in_app_update`），用户只会看到提示，应用包不会被改写；但下载仍会照常进行。正式开放 Mac 版之前，要先决定 Mac 的更新方式（例如只提示、不下载），并确认镜像对 `darwin/arm64` 的映射（见上面「镜像在确认 `darwin/arm64` 映射后再启用」）。
 
 ## 附录：实机验证记录
 
