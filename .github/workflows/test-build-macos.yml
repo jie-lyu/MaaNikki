@@ -51,12 +51,15 @@ jobs:
         run: |
           rustup show
           rustup target add aarch64-apple-darwin
-      # Only downloads are cached, each verified before use, so a cache hit cannot change what is built.
-      # Compiled artifacts (client/src-tauri/target, the control unit's build trees) are deliberately NOT
-      # cached: this job produces binaries handed to testers, and a cache hit cannot show which sources
-      # produced each cached library (an earlier revision of the same pull request could have supplied
-      # it). Faster pull-request feedback, if wanted, belongs in a separate job that never produces a
-      # release candidate, after a measured cached-versus-clean comparison on one commit.
+      # Only downloads that this job re-verifies by SHA-256 before use are cached, so a cache hit cannot
+      # change what is built. Deliberately NOT cached, because this job produces binaries handed to testers:
+      # - compiled artifacts (client/src-tauri/target, the control unit's build trees): a cache hit cannot
+      #   show which sources produced each cached library (an earlier revision of the same pull request
+      #   could have supplied it);
+      # - the Cargo registry (~/.cargo/registry): Cargo checks a crate archive against Cargo.lock when it
+      #   downloads it, but reuses an archive already in its cache without checking it again.
+      # Faster pull-request feedback, if wanted, belongs in a separate job that never produces a release
+      # candidate, after a measured cached-versus-clean comparison on one commit.
       - name: Cache pinned downloads
         # Files are re-verified against the lock files' SHA-256 values before use.
         uses: actions/cache@v4
@@ -70,16 +73,6 @@ jobs:
         with:
           path: ${{ runner.temp }}/macos-control-unit/downloads
           key: macos-control-unit-downloads-${{ hashFiles('native/macos-control-unit/upstream.lock.json') }}
-      - name: Cache Cargo registry downloads
-        # Crate archives and the index only; Cargo checks every archive against Cargo.lock's checksum.
-        # Not ~/.cargo/registry/src (re-extracted from the archives) and not target/ (see above).
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-          key: macos-cargo-registry-${{ hashFiles('client/src-tauri/Cargo.lock') }}
-          restore-keys: macos-cargo-registry-
       - name: Offline checks of the package inputs
         run: |
           python -B scripts/macos_package_test.py
