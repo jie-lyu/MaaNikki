@@ -39,12 +39,17 @@ def apply_overlay(interface: dict, overlay: dict) -> dict:
 
 
 def apply_test_build_overlay(interface: dict, overlay: dict, commit: str) -> dict:
-    """Remove the listed top-level keys and set the listed ones ({commit} is replaced)."""
+    """Remove the listed top-level keys, update the agent entries with "agent", and set the
+    listed top-level keys ({commit} is replaced)."""
     if not re.fullmatch(r"[0-9a-f]{7,40}", commit):
         raise ValueError(f"commit must be a hexadecimal Git revision, got {commit!r}")
     result = copy.deepcopy(interface)
     for key in overlay.get("remove", []):
         result.pop(key, None)
+    if "agent" in overlay:
+        agents = result["agent"] if isinstance(result["agent"], list) else [result["agent"]]
+        for agent in agents:
+            agent.update(overlay["agent"])
     for key, value in overlay.get("set", {}).items():
         result[key] = value.replace(COMMIT_PLACEHOLDER, commit) if isinstance(value, str) else value
     return result

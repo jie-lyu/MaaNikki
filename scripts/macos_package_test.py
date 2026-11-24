@@ -99,6 +99,9 @@ class InterfaceTests(unittest.TestCase):
         self.assertIn("0123abc", interface["title"])
         self.assertIn("测试版", interface["title"])
         self.assertEqual(interface["version"], self.repository["version"])  # the updater parses it
+        # The bundle's Python: isolated from PYTHON* variables and user site, no bytecode writes.
+        self.assertEqual(interface["agent"]["child_exec"], "./python/bin/python3")
+        self.assertEqual(interface["agent"]["child_args"], ["-I", "-B", "-X", "utf8", "./agent/main.py"])
 
     def test_a_removed_value_moved_elsewhere_is_caught(self):
         packaged = mi.apply_test_build_overlay(mi.macos_interface(), self.overlay, "0123abc")
