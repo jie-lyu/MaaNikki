@@ -1,3 +1,4 @@
+import { pairStartedTasks } from '@/utils/startedTasks';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -14,6 +15,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore } from '@/stores/appStore';
+import { macStartBlockedReason } from '@/utils/macTaskTiers';
 import { useShallow } from 'zustand/react/shallow';
 import { isControllerAllowed, isResourceAllowed, isTaskCompatible } from '@/stores/helpers';
 import { maaService } from '@/services/maaService';
@@ -397,6 +399,9 @@ export function Toolbar({ showAddPanel, onToggleAddPanel, className }: ToolbarPr
       }
       if (wardrobeBusy()) return failStart('衣柜正在读取，请先停止衣柜读取。');
       if (fishingBusy()) return failStart('正在钓鱼，请先停止钓鱼。');
+      // macOS：任务档位与说明读到之前不开始（定时运行同样），读取失败时也不开始；其他系统为空字符串。
+      const macBlocked = macStartBlockedReason(useAppStore.getState().backendOS, useAppStore.getState().macTaskTiers);
+      if (macBlocked) return failStart(macBlocked);
 
       // UID is confirmed inside the game task before consulting period state.
       const candidates = filterTasksForRun(targetTasks, { startFromTaskId, singleTaskId });
@@ -1354,11 +1359,15 @@ export function Toolbar({ showAddPanel, onToggleAddPanel, className }: ToolbarPr
           ),
         );
 
-        startedTaskIds.forEach((maaTaskId, index) => {
-          const runnable = runnableTasks[index];
-          if (!runnable) {
-            return;
-          }
+        // macOS 会跳过测试预览版未开放的任务，返回的 ID 不再与提交顺序一一对应：按后端记录的
+        // 「任务 ID → 选中任务」对应关系取名称。Windows 不会跳过任务，仍按顺序对应。
+        const macosController =
+          projectInterface?.controller.find((c) => c.name === currentControllerName)?.type === 'MacOS';
+        const mappings = macosController
+          ? (await maaService.getAllStates().catch(() => null))?.instances[targetId]?.taskRunState.mappings
+          : undefined;
+        pairStartedTasks(startedTaskIds, runnableTasks, { byBackendMapping: macosController, mappings }).forEach(
+          ([maaTaskId, runnable]) => {
           const { selectedTask, taskDef, specialTask } = runnable;
           const taskDisplayName =
             selectedTask.customName ||
@@ -1367,7 +1376,8 @@ export function Toolbar({ showAddPanel, onToggleAddPanel, className }: ToolbarPr
               : resolveI18nText(taskDef.label, translations)) ||
             selectedTask.taskName;
           registerTaskIdName(maaTaskId, taskDisplayName);
-        });
+          },
+        );
 
         log.info(`实例 ${targetInstance.name}: 任务已提交, task_ids:`, startedTaskIds);
 

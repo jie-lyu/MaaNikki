@@ -9,6 +9,7 @@ import { useWardrobeStore, wardrobeLabels } from '@/services/wardrobeService';
 import { useWardrobePlanStore } from '@/services/scoring/wardrobePlanStore';
 import { useCollectionOverview } from './useCollectionOverview';
 import { isTauri } from '@/utils/paths';
+import { useGameTargetUnsupportedReason } from '@/utils/macFeatures';
 import { useAppStore } from '@/stores/appStore';
 import { ModalPortal, useModalFocusTrap } from './ui/Modal';
 import { FeatureTile } from './FeatureTile';
@@ -153,6 +154,7 @@ export function AccountStatusActions({ compact = false }: { compact?: boolean })
   const wardrobeBusy = ['starting', 'reading', 'stopping'].includes(wardrobeStatus);
   const resonanceError = resonance.connectionError || resonance.status.error;
   const explorationBusy = exploration.status === 'starting' || exploration.status === 'stopping';
+  const macUnsupported = useGameTargetUnsupportedReason();
   const collectionStatus = error ? '账号状态读取失败' : collections.map((item) => `${item.label} ${item.value}`).join('，');
   const collectionHint = <div className="space-y-1"><p className="font-medium">收集进度</p>
     {error ? <p>{error}</p> : collections.map((item) => <p key={item.id} className="flex justify-between gap-4 text-text-secondary"><span>{item.label}</span><span>{item.detail}</span></p>)}
@@ -183,8 +185,8 @@ export function AccountStatusActions({ compact = false }: { compact?: boolean })
       </Tooltip>}
     <FeatureTile icon={Compass} title="辅助功能" compact={compact} busy={explorationBusy}
       status={explorationStatusLabels[exploration.status]} warn={exploration.status === 'error'}
-      tooltip={exploration.error ? <div className="space-y-1"><p className="font-medium">辅助功能</p><p className="text-text-secondary">{exploration.error}</p></div> : undefined}
-      toggle={{ checked: exploration.enabled, disabled: !isTauri(), label: '启用辅助功能', onChange: setExplorationEnabled }}
+      tooltip={exploration.error || macUnsupported ? <div className="space-y-1"><p className="font-medium">辅助功能</p><p className="text-text-secondary">{exploration.error || macUnsupported}</p></div> : undefined}
+      toggle={{ checked: exploration.enabled, disabled: !isTauri() || (!exploration.enabled && !!macUnsupported), label: '启用辅助功能', onChange: setExplorationEnabled }}
       onClick={() => open('exploration')} />
     <FeatureTile icon={BookOpen} title="共鸣记录" compact={compact} busy={resonance.status.busy}
       status={resonanceLabel(resonance.status).replace('自动同步', '')} warn={Boolean(resonanceError)}

@@ -12,6 +12,7 @@ from registration import agent_action
 from task_control import GameWindowClosed, TaskStopped, active_session, task_time as time
 from app_paths import DATA_ROOT
 from daily.runtime import Executors
+from host import launch_window_probes
 from daily.ui import find_expired_notice_confirm_box
 from game_view import ALLOWED_FRAME_SIZES, GameFrameSizeError, is_clipped_game_frame, require_game_frame
 
@@ -166,9 +167,15 @@ class StartGameAction(CustomAction):
             raise
 
     def _run_startup(self, context, argv, wall_started_at):
-        # Win32 window probes; the start task only runs with the Windows controller.
-        from host.win32.launch import _is_window_process_alive, _is_window_unresponsive, _startup_user32
         runtime = Executors(context)
+        probes = launch_window_probes()
+        if probes is None:
+            self.stop_reason = "当前系统不支持启动游戏。"
+            runtime.log(self.stop_reason)
+            context.tasker.post_stop()
+            return False
+        _is_window_process_alive = probes._is_window_process_alive
+        _is_window_unresponsive = probes._is_window_unresponsive
         options = parse_custom_param(argv.custom_action_param)
         raw_timeout = options.get("timeout", 900)
         timeout = (
@@ -185,7 +192,7 @@ class StartGameAction(CustomAction):
             context.tasker.post_stop()
             return False
 
-        u32 = _startup_user32()
+        u32 = probes._startup_user32()
         session = active_session()
         orig_session_wait = session.wait if session is not None else None
         orig_adapter_hung = None
@@ -244,7 +251,7 @@ class StartGameAction(CustomAction):
                         logged_stall = True
                         runtime.log("游戏窗口正在加载资源（暂时未响应），继续等待恢复。", detail=True)
                     if elapsed_hung >= max_wait:
-                        if u32.IsHungAppWindow(hwnd):
+                        if probes._is_window_hung(u32, hwnd):
                             cur.window_hung()
                         break
                     wall_time.sleep(.2)

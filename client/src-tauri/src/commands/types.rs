@@ -228,13 +228,18 @@ pub struct InstanceRuntime {
     pub stop_started_at: Option<Instant>,
     /// 任务运行状态（后端管理，单一真相来源）
     pub task_run_state: TaskRunState,
+    /// Mac：这一轮运行的状态（启动中、运行中、收尾中），同时只有一轮
+    pub(crate) macos_run: Option<super::mac_connection::MacRun>,
+    /// 当前 Tasker 的序号：新建 Tasker 时加一并交给它的回调；Mac 运行结束或新的 Mac 启动取得
+    /// 这一轮时也加一，让之前那次运行的迟到回调失效
+    pub tasker_serial: u64,
 }
 
 impl Drop for InstanceRuntime {
     fn drop(&mut self) {
         // 断开并销毁所有 agent
         for client in &self.agent_clients {
-            let _ = client.disconnect();
+            super::maa_agent::disconnect_agent(client);
         }
         self.agent_clients.clear();
 

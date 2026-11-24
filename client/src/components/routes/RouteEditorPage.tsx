@@ -8,6 +8,7 @@ import { toast } from 'sonner';
 import { invoke } from '@tauri-apps/api/core';
 import { flushSaveConfig, useAppStore } from '@/stores/appStore';
 import { isTauri } from '@/utils/paths';
+import { useGameTargetUnsupportedReason } from '@/utils/macFeatures';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { primaryButton, secondaryButton, Segmented } from '@/components/ui/FeaturePage';
 import {
@@ -81,6 +82,8 @@ export function RouteEditorPage({ onClose }: { onClose: () => void }) {
   const dragStart = useRef<RouteDocument | null>(null);
   const { status, recording, finished, trial } = useRouteStudioStore();
   const busy = status !== 'idle';
+  // macOS：试跑、试走和录制要连接游戏窗口，内置功能还选不到 Mac 的游戏窗口；Windows 上为空字符串
+  const macUnsupported = useGameTargetUnsupportedReason();
   const overlayCase = useAppStore((s): OverlayCase => {
     const opt = s.globalOptionValues?.RouteOverlayMode;
     if (opt?.type === 'select' && (opt.caseName === 'Full' || opt.caseName === 'MinimapOnly' || opt.caseName === 'Off')) return opt.caseName;
@@ -434,6 +437,10 @@ export function RouteEditorPage({ onClose }: { onClose: () => void }) {
   const trialRun = async (mode: 'full' | 'movement', start = 0) => {
     const activeDoc = collection ?? route;
     if (!activeDoc) return;
+    if (macUnsupported) {
+      toast.error(macUnsupported);
+      return;
+    }
     if (collection && !collection.routes.length) {
       toast.error('请先往清单里添加至少一条路线。');
       return;
@@ -592,8 +599,8 @@ export function RouteEditorPage({ onClose }: { onClose: () => void }) {
       return {
         title: `第 ${target.index + 1} 点 · ${pointLabel(pt)}`,
         items: [
-          { label: '从这里试走（只移动）', onClick: () => void trialRun('movement', target.index), disabled: busy },
-          { label: '从这里试跑（含动作）', onClick: () => void trialRun('full', target.index), disabled: busy },
+          { label: '从这里试走（只移动）', onClick: () => void trialRun('movement', target.index), disabled: busy || !!macUnsupported },
+          { label: '从这里试跑（含动作）', onClick: () => void trialRun('full', target.index), disabled: busy || !!macUnsupported },
           'separator',
           { label: pt.action === 'wait' ? '改回途经' : '到这里等待', hint: pt.action === 'wait' ? '0' : '2', onClick: () => set(pt.action === 'wait' ? '' : 'wait'), disabled: readOnly },
           { label: pt.action === 'collect' ? '改回途经' : '到这里采集', hint: pt.action === 'collect' ? '0' : '3', onClick: () => set(pt.action === 'collect' ? '' : 'collect'), disabled: readOnly },
@@ -703,8 +710,8 @@ export function RouteEditorPage({ onClose }: { onClose: () => void }) {
           <button onClick={() => void exportRoute()} title="导出为文件" className="rounded-lg p-2 hover:bg-bg-hover"><FileOutput className="h-4 w-4" /></button>
           {readOnly && <button onClick={saveAsCopy} className={secondaryButton}><Plus className="h-3.5 w-3.5" />另存为我的路线</button>}
           <button onClick={() => void addToTasks()} disabled={Boolean(route && errors.length)} className={secondaryButton}><ListPlus className="h-3.5 w-3.5" />加入任务</button>
-          <button onClick={() => void trialRun('movement')} disabled={busy} title="只走路，不执行动作" className={secondaryButton}><Footprints className="h-3.5 w-3.5" />试走</button>
-          <button onClick={() => void trialRun('full')} disabled={busy} className={primaryButton}><CirclePlay className="h-3.5 w-3.5" />试跑</button>
+          <button onClick={() => void trialRun('movement')} disabled={busy || !!macUnsupported} title={macUnsupported || '只走路，不执行动作'} className={secondaryButton}><Footprints className="h-3.5 w-3.5" />试走</button>
+          <button onClick={() => void trialRun('full')} disabled={busy || !!macUnsupported} title={macUnsupported || undefined} className={primaryButton}><CirclePlay className="h-3.5 w-3.5" />试跑</button>
         </>}
       </span>
     </header>
@@ -817,6 +824,10 @@ export function RouteEditorPage({ onClose }: { onClose: () => void }) {
                 }}
                 onStartTeleport={setStartTeleport}
                 onStartRecording={() => {
+                  if (macUnsupported) {
+                    toast.error(macUnsupported);
+                    return;
+                  }
                   const targetMap = route?.map ?? recordMap;
                   const isSegment = Boolean(editable && route && route.points.length > 0);
                   const startTp = isSegment ? undefined : (route ? route.teleport : recordTeleport);

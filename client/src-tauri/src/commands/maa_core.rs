@@ -326,21 +326,41 @@ fn update_instance_controller(
     controller: maa_framework::controller::Controller,
     new_config: super::types::ControllerConfig,
 ) -> Result<(), String> {
+    let mut retiring = None;
     let cleanup_key = {
         let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
         let instance = instances.get_mut(instance_id).ok_or("Instance not found")?;
 
         let old_config = instance.controller_config.clone();
-        instance.start_generation = instance.start_generation.wrapping_add(1);
-        instance.controller = Some(controller);
+        let involves_macos = matches!(new_config, ControllerConfig::MacOS { .. })
+            || matches!(old_config, Some(ControllerConfig::MacOS { .. }));
+        if involves_macos {
+            // 旧的 Mac 连接交给后台退役（确认松开、丢弃），绝不在持有实例锁时析构原生句柄。
+            retiring = Some(super::mac_connection::attach(
+                super::mac_connection::ConnectionSlots {
+                    controller: &mut instance.controller,
+                    tasker: &mut instance.tasker,
+                    stopped: &mut instance.controller_stopped,
+                    generation: &mut instance.start_generation,
+                },
+                controller,
+                |old, new| old.raw() == new.raw(),
+            ));
+        } else {
+            instance.start_generation = instance.start_generation.wrapping_add(1);
+            instance.controller = Some(controller);
+            instance.controller_stopped = false;
+            instance.tasker = None;
+        }
         instance.controller_config = Some(new_config.clone());
-        instance.controller_stopped = false;
-        instance.tasker = None;
 
         old_config
             .filter(|old| *old != new_config)
             .map(|old| (instance_id.to_string(), old))
     };
+    if let Some((old_controller, old_tasker)) = retiring {
+        retire_macos_handles_in_background(instance_id, old_controller, old_tasker);
+    }
 
     if let Some(old_key) = cleanup_key {
         if let Ok(mut pool) = state.controller_pool.lock() {
@@ -917,8 +937,12 @@ pub async fn connect_controller_impl(
     super::maa_library::ensure_loaded(&state_arc)?;
     tokio::task::spawn_blocking(move || {
         let pool_key = (instance_id.clone(), config.clone());
+        // Mac 控制器从不进入连接池，也不从池中复用：每次连接都是新的，旧连接一律交给后台退役。
+        let use_pool = super::mac_connection::pool_reuse_allowed(&config);
         // ControllerPool: 检查该实例是否有可复用的已连接控制器
-        let pooled = {
+        let pooled = if !use_pool {
+            None
+        } else {
             let pool = state_arc
                 .controller_pool
                 .lock()
@@ -1175,7 +1199,7 @@ pub async fn connect_controller_impl(
         let conn_id = controller.post_connection().map_err(|e| e.to_string())?;
 
         // 存入 ControllerPool
-        {
+        if use_pool {
             let mut pool = state_arc
                 .controller_pool
                 .lock()
@@ -1381,6 +1405,10 @@ pub fn maa_destroy_resource(
 // 任务命令
 // ============================================================================
 
+/// Mac 测试预览拒绝在运行中追加任务时的提示。
+pub(crate) const MACOS_APPEND_REFUSED: &str =
+    "Mac 测试预览暂不支持在运行中追加任务，请在本轮结束后重新开始。";
+
 /// 运行任务（异步，通过回调通知完成状态）
 /// 运行单个任务的内部实现（可从 Tauri 命令和 HTTP 处理器共享调用）
 pub fn run_task_impl(
@@ -1391,8 +1419,16 @@ pub fn run_task_impl(
     pipeline_override: &str,
     selected_task_id: Option<&str>,
 ) -> Result<i64, String> {
+    if let Some(reason) = super::utils::platform_refuses_task(entry) {
+        return Err(reason);
+    }
     let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
     let instance = instances.get_mut(instance_id).ok_or("Instance not found")?;
+    // Mac 测试预览不在运行中追加单个任务：Mac 上每一轮运行由 start_tasks 取得并独占（重连、新建
+    // Tasker、启动 agent），追加的任务不属于任何一轮。拒绝时不改变代数，以免取消正在进行的释放。
+    if matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. })) {
+        return Err(MACOS_APPEND_REFUSED.to_string());
+    }
     instance.start_generation = instance.start_generation.wrapping_add(1);
 
     let resource = instance.resource.as_ref().ok_or("Resource not loaded")?;
@@ -1413,6 +1449,8 @@ pub fn run_task_impl(
         }
 
         let tasker = Tasker::new().map_err(|e| e.to_string())?;
+        instance.tasker_serial = instance.tasker_serial.wrapping_add(1);
+        let tasker_serial = instance.tasker_serial;
 
         let app_for_sink = app.clone();
         let maa_state_for_sink = Arc::clone(state);
@@ -1423,6 +1461,7 @@ pub fn run_task_impl(
                     &maa_state_for_sink,
                     &app_for_sink,
                     &instance_id_for_sink,
+                    tasker_serial,
                     msg,
                     detail,
                 );
@@ -1551,6 +1590,120 @@ pub fn is_desktop_window_controller(config: &ControllerConfig) -> bool {
     )
 }
 
+/// macOS 自编译控制模块：停止或结束后确认已松开全部输入的期限。
+const MACOS_RELEASE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
+const MACOS_RELEASE_UNCONFIRMED_MESSAGE: &str =
+    "停止后未能确认 Mac 控制模块已松开全部按键和鼠标；下次运行会重新连接游戏。若游戏里有按键卡住，请在游戏中按一下对应的键。";
+
+/// 轮询一个控制器操作直到结束或超过期限；超过期限返回 None。
+/// 不调用阻塞的 wait()：对端一直不结束时也必须能返回。
+fn poll_until_done(
+    mut status: impl FnMut() -> MaaStatus,
+    timeout: Duration,
+    step: Duration,
+) -> Option<bool> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let current = status();
+        if current.done() {
+            return Some(current.succeeded());
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(step);
+    }
+}
+
+/// 让 MaaNikki 的 Mac 控制模块松开仍按住的键和鼠标，并在期限内确认结果。
+/// 控制模块的 inactive() 在有松开发不出去时返回失败；主库自己在任务结束时的那次调用不检查结果，
+/// 也可能因为停止而没有执行，所以释放控制器之前在客户端再确认一次。
+fn confirm_macos_release(controller: &Controller) -> bool {
+    let Ok(id) = controller.post_inactive() else {
+        return false;
+    };
+    poll_until_done(
+        || controller.status(id),
+        MACOS_RELEASE_CONFIRM_TIMEOUT,
+        Duration::from_millis(20),
+    ) == Some(true)
+}
+
+/// 在后台退役一个 Mac 连接：确认控制模块松开了全部输入（有期限），然后丢弃句柄。不阻塞调用方。
+fn retire_macos_handles_in_background(instance_id: &str, controller: Option<Controller>, tasker: Option<Tasker>) {
+    if controller.is_none() && tasker.is_none() {
+        return;
+    }
+    let instance_id = instance_id.to_string();
+    let _ = std::thread::Builder::new()
+        .name(format!("retire-macos-{}", instance_id))
+        .spawn(move || {
+            let confirmed = controller.as_ref().map_or(true, confirm_macos_release);
+            if !confirmed {
+                warn!(
+                    "[ControllerRelease] retired macOS controller did not confirm releasing held input for instance {}",
+                    instance_id
+                );
+            }
+            drop(tasker);
+            drop(controller);
+        });
+}
+
+/// Mac 运行结束（完成、失败或停止收尾）：标记连接不可用、取走这次运行的 agent 和释放应针对的代数，
+/// 让这次运行的 Tasker 的迟到回调失效，并标记收尾进行中。必须在判定运行结束的同一个临界区里调用
+/// （持有实例锁）；返回 None 表示不是 Mac 连接，调用方走原来的流程。
+pub(crate) fn finish_macos_run(
+    instance: &mut super::types::InstanceRuntime,
+) -> Option<super::mac_connection::FinishedRun<maa_framework::agent_client::AgentClient, std::process::Child>> {
+    if !matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. })) {
+        return None;
+    }
+    Some(super::mac_connection::finish_run(
+        super::mac_connection::ConnectionSlots {
+            controller: &mut instance.controller,
+            tasker: &mut instance.tasker,
+            stopped: &mut instance.controller_stopped,
+            generation: &mut instance.start_generation,
+        },
+        &mut instance.agent_clients,
+        &mut instance.agent_children,
+        &mut instance.macos_run,
+        &mut instance.tasker_serial,
+    ))
+}
+
+/// Mac 上一轮运行的收尾：同步断开取走的 agent（反注册其动作），清除这次收尾自己的标记，再通知前端运行结束，
+/// 并只释放那一代的连接。调用方已在判定运行结束的同一个临界区里取得 `finished`。
+pub(crate) fn complete_macos_run(
+    app: &tauri::AppHandle,
+    state: &Arc<MaaState>,
+    instance_id: &str,
+    finished: super::mac_connection::FinishedRun<maa_framework::agent_client::AgentClient, std::process::Child>,
+) {
+    super::maa_agent::stop_taken_agents(finished.clients, finished.children);
+    if let Ok(mut instances) = state.instances.lock() {
+        if let Some(instance) = instances.get_mut(instance_id) {
+            super::mac_connection::clear_cleanup(&mut instance.macos_run, finished.generation);
+        }
+    }
+    super::utils::emit_state_changed(app, instance_id, "task-progress");
+    super::utils::emit_state_changed(app, instance_id, "tasks-completed");
+    schedule_release_for_generation(app, state, instance_id, finished.generation);
+}
+
+/// 在单独线程里丢弃句柄，最多等待 `deadline`；超过期限返回 false，丢弃在后台继续完成。
+fn dispose_with_deadline<T: Send + 'static>(handles: T, deadline: Duration) -> bool {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("dispose-controller".to_string())
+        .spawn(move || {
+            drop(handles);
+            let _ = done_tx.send(());
+        });
+    spawned.is_ok() && done_rx.recv_timeout(deadline).is_ok()
+}
+
 fn try_release_controller_handles(
     app: &tauri::AppHandle,
     state: &Arc<MaaState>,
@@ -1558,7 +1711,7 @@ fn try_release_controller_handles(
     only_if_desktop: bool,
     expected_generation: Option<u64>,
 ) -> Result<DesktopReleaseOutcome, String> {
-    let (dropped_tasker, dropped_controller, exact_key) = {
+    let (dropped_tasker, dropped_controller, exact_key, released_generation) = {
         let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
         let Some(instance) = instances.get_mut(instance_id) else {
             return if expected_generation.is_some() {
@@ -1600,17 +1753,39 @@ fn try_release_controller_handles(
             instance.start_generation = instance.start_generation.wrapping_add(1);
         }
 
-        let dropped_tasker = instance.tasker.take();
-        let dropped_controller = instance.controller.take();
-        instance.controller_stopped = true;
+        let (dropped_tasker, dropped_controller) =
+            if matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. })) {
+                // Mac：经归属规则取走，只取安排释放时的那一代（手动断开时为刚递增后的当前代）。
+                let generation = expected_generation.unwrap_or(instance.start_generation);
+                let Some((controller, tasker)) = super::mac_connection::take_for_release(
+                    super::mac_connection::ConnectionSlots {
+                        controller: &mut instance.controller,
+                        tasker: &mut instance.tasker,
+                        stopped: &mut instance.controller_stopped,
+                        generation: &mut instance.start_generation,
+                    },
+                    generation,
+                ) else {
+                    return Ok(DesktopReleaseOutcome::Aborted);
+                };
+                (tasker, controller)
+            } else {
+                let dropped_tasker = instance.tasker.take();
+                let dropped_controller = instance.controller.take();
+                instance.controller_stopped = true;
+                (dropped_tasker, dropped_controller)
+            };
         instance.stop_in_progress = false;
         instance.stop_started_at = None;
         let exact_key = instance
             .controller_config
             .clone()
             .map(|cfg| (instance_id.to_string(), cfg));
-        (dropped_tasker, dropped_controller, exact_key)
+        (dropped_tasker, dropped_controller, exact_key, instance.start_generation)
     };
+    let is_macos = exact_key
+        .as_ref()
+        .is_some_and(|(_, cfg)| matches!(cfg, ControllerConfig::MacOS { .. }));
 
     let mut pooled_controllers = Vec::new();
     if let Ok(mut pool) = state.controller_pool.lock() {
@@ -1631,6 +1806,37 @@ fn try_release_controller_handles(
                 pooled_controllers.push(ctrl);
             }
         }
+    }
+
+    if is_macos {
+        // 池中条目已移除、实例已标记为已停止：确认期间的重新启动只会建立新连接，不会复用这个控制器。
+        let confirmed = dropped_controller
+            .as_ref()
+            .map_or(true, confirm_macos_release);
+        // 原生析构会等待控制器自己的工作线程，没有期限；放到单独线程，调用方只等到期限为止。
+        let disposed = dispose_with_deadline(
+            (dropped_tasker, dropped_controller, pooled_controllers),
+            MACOS_RELEASE_CONFIRM_TIMEOUT,
+        );
+        if !confirmed || !disposed {
+            warn!(
+                "[ControllerRelease] macOS controller release not confirmed for instance {} (confirmed={}, disposed={})",
+                instance_id, confirmed, disposed
+            );
+            super::maa_agent::emit_agent_output(app, instance_id, "stderr", MACOS_RELEASE_UNCONFIRMED_MESSAGE);
+        }
+        // 确认期间若已开始新的运行，不再替它发出断开通知。
+        let current_generation = state
+            .instances
+            .lock()
+            .ok()
+            .and_then(|instances| instances.get(instance_id).map(|i| i.start_generation));
+        if current_generation != Some(released_generation) {
+            return Ok(DesktopReleaseOutcome::Aborted);
+        }
+        info!("[ControllerRelease] Released macOS controller for instance {}", instance_id);
+        super::utils::emit_state_changed(app, instance_id, "disconnected");
+        return Ok(DesktopReleaseOutcome::Released);
     }
 
     // 在锁外释放 Tasker 与 Controller，防止回调线程等待产生死锁
@@ -1658,7 +1864,26 @@ pub fn schedule_release_idle_desktop_controller(
     state: &Arc<MaaState>,
     instance_id: &str,
 ) {
-    let target_gen = {
+    schedule_release(app, state, instance_id, None);
+}
+
+/// 只释放某一代的 Mac 连接（运行结束时取得的代数）；之后开始的新运行不会被它释放。
+pub fn schedule_release_for_generation(
+    app: &tauri::AppHandle,
+    state: &Arc<MaaState>,
+    instance_id: &str,
+    generation: u64,
+) {
+    schedule_release(app, state, instance_id, Some(generation));
+}
+
+fn schedule_release(
+    app: &tauri::AppHandle,
+    state: &Arc<MaaState>,
+    instance_id: &str,
+    fixed_generation: Option<u64>,
+) {
+    let (target_gen, is_macos) = {
         let Ok(instances) = state.instances.lock() else {
             return;
         };
@@ -1675,7 +1900,10 @@ pub fn schedule_release_idle_desktop_controller(
         {
             return;
         }
-        instance.start_generation
+        (
+            fixed_generation.unwrap_or(instance.start_generation),
+            matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. })),
+        )
     };
 
     let app_clone = app.clone();
@@ -1700,6 +1928,15 @@ pub fn schedule_release_idle_desktop_controller(
                                 "[ControllerRelease] Timed out waiting for tasker stop on instance {}",
                                 instance_id_owned
                             );
+                            if is_macos {
+                                // 任务仍未结束，控制模块尚未确认松开；下次运行仍会重新连接。
+                                super::maa_agent::emit_agent_output(
+                                    &app_clone,
+                                    &instance_id_owned,
+                                    "stderr",
+                                    MACOS_RELEASE_UNCONFIRMED_MESSAGE,
+                                );
+                            }
                             break;
                         }
                         std::thread::sleep(Duration::from_millis(wait_ms));
@@ -1735,9 +1972,26 @@ pub fn stop_task_impl(state: &MaaState, instance_id: &str) -> Result<(), String>
     let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
     let instance = instances.get_mut(instance_id).ok_or("Instance not found")?;
     instance.start_generation = instance.start_generation.wrapping_add(1);
+    let is_mac = matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. }));
+    if is_mac {
+        // 仍在启动的那一轮被取消：它在重连返回时和提交任务前都会发现，不会再提交任务。
+        super::mac_connection::cancel_start(&mut instance.macos_run);
+    }
     let Some(tasker) = instance.tasker.as_ref() else {
         instance.stop_in_progress = true;
         instance.stop_started_at = Some(Instant::now());
+        if is_mac {
+            // Mac：Tasker 已交给退役（重连中）时也结束这一轮的状态，下一轮才能取得实例。
+            let state = &mut instance.task_run_state;
+            for status in state.statuses.values_mut() {
+                if status == "pending" || status == "running" {
+                    *status = "failed".to_string();
+                }
+            }
+            if state.overall_status.as_deref() == Some("Running") {
+                state.overall_status = Some("Failed".to_string());
+            }
+        }
         super::telemetry::on_run_cancelled(instance_id);
         return Ok(());
     };
@@ -1958,4 +2212,49 @@ pub async fn maa_screenshot_unsubscribe(
         .screenshot_service
         .unsubscribe(&instance_id, &subscriber_id);
     Ok(())
+}
+
+#[cfg(test)]
+mod release_confirm_tests {
+    use super::*;
+
+    #[test]
+    fn poll_returns_the_result_once_the_operation_finishes() {
+        let mut calls = 0;
+        let result = poll_until_done(
+            || {
+                calls += 1;
+                if calls < 3 { MaaStatus::RUNNING } else { MaaStatus::SUCCEEDED }
+            },
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+        );
+        assert_eq!(result, Some(true));
+        assert_eq!(poll_until_done(|| MaaStatus::FAILED, Duration::from_secs(1), Duration::from_millis(1)), Some(false));
+    }
+
+    #[test]
+    fn disposal_returns_by_the_deadline_even_if_destruction_blocks() {
+        use std::sync::{Arc, Barrier};
+        struct BlocksOnDrop(Arc<Barrier>);
+        impl Drop for BlocksOnDrop {
+            fn drop(&mut self) {
+                self.0.wait();
+            }
+        }
+        let barrier = Arc::new(Barrier::new(2));
+        let started = Instant::now();
+        assert!(!dispose_with_deadline(BlocksOnDrop(Arc::clone(&barrier)), Duration::from_millis(80)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        barrier.wait(); // let the background disposal finish
+        assert!(dispose_with_deadline(42u8, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn poll_gives_up_when_the_peer_never_finishes() {
+        let started = Instant::now();
+        let result = poll_until_done(|| MaaStatus::PENDING, Duration::from_millis(60), Duration::from_millis(5));
+        assert_eq!(result, None);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 }

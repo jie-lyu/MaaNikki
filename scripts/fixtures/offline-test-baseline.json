@@ -1,5 +1,5 @@
 {
- "source": "Windows CI run 45159836136 (phase 1 at 1039b44, PR merge commit b6e98fc): every suite present then produced exactly these outcomes on Windows. Added after 1039b44 and so far recorded on macOS only: test_app_paths.py, test_host.py, test_host_imports.py, test_window_layout.py, test_file_io.py, test_launcher_discovery.py, test_game_target.cjs and the selector test in test_windows_contract.cjs; HostImportTests.test_win32_overlay_backend_imports is skipped off Windows. Refresh from the offline-test-results artifact when Windows outcomes change.",
+ "source": "Windows CI run 45159836136 (phase 1 at 1039b44, PR merge commit b6e98fc): every suite present then produced exactly these outcomes on Windows. Added after 1039b44 and so far recorded on macOS only: test_app_paths.py, test_host.py, test_host_imports.py, test_window_layout.py, test_file_io.py, test_launcher_discovery.py, test_game_target.cjs, test_mac_task_tiers.cjs and the selector test in test_windows_contract.cjs; HostImportTests.test_win32_overlay_backend_imports is skipped off Windows and recorded with its Windows outcome (pass in runs on 06c9c07 and 00d5531), so a Windows-only regression there cannot hide behind a skip. Refresh from the offline-test-results artifact when Windows outcomes change.",
  "suites": {
   "test_agent_pause.py": {
    "tests": [
@@ -379,21 +379,77 @@
   },
   "test_host.py": {
    "tests": [
+    "CaptureBoundsTests.test_frame_fallback_never_loads_the_window_layout",
+    "CaptureBoundsTests.test_tall_frame_keeps_clicks_inside_the_16_9_base_like_win32_without_a_window",
+    "CaptureBoundsTests.test_win32_delegates_to_the_window_layout_unchanged",
+    "CaptureBoundsTests.test_without_work_area_clipping_the_frame_is_the_bound",
     "ForegroundInputDelegationTests.test_background_input_comes_from_the_host_backend",
     "ForegroundInputDelegationTests.test_capturable_requires_foreground_only_for_screen_capture",
     "ForegroundInputDelegationTests.test_session_brings_the_game_back_through_the_target",
     "ForegroundInputDelegationTests.test_window_handle_and_focus_come_from_the_target",
+    "GeometryLatchTests.test_macos_geometry_change_stops_the_queue_like_a_bad_frame",
+    "GeometryLatchTests.test_unreadable_latch_pauses_instead_of_passing",
+    "GeometryLatchTests.test_windows_never_looks_up_the_controller",
     "LaunchTests.test_ensure_unminimized_restores_without_activating_first",
     "LaunchTests.test_launcher_background_click_maps_capture_to_client_and_posts_messages",
     "LaunchTests.test_start_game_window_helpers_live_in_the_backend",
     "LaunchTests.test_startup_probes_without_a_window_binding",
+    "MacOSBackendTests.test_alt_before_camera_turns_only_where_the_backend_requires_it",
+    "MacOSBackendTests.test_controller_info_must_come_from_the_patched_unit",
+    "MacOSBackendTests.test_foreground_input_sends_controller_codes_and_tracks_key_ids",
+    "MacOSBackendTests.test_input_releases_by_posting_to_the_game_process",
+    "MacOSBackendTests.test_key_table_keeps_unmapped_apart_from_key_code_zero",
+    "MacOSBackendTests.test_macos_capabilities_and_saved_controller_rule",
+    "MacOSBackendTests.test_native_key_is_unchanged_on_windows_and_translated_on_macos",
+    "MacOSBackendTests.test_runtime_native_actions_carry_controller_key_codes",
+    "MacOSBackendTests.test_scene_buttons_go_through_the_unit_from_patch_level_3",
+    "MacOSBackendTests.test_target_focus_and_existence",
+    "MacOSBackendTests.test_target_verifies_bundle_id_and_trimmed_title",
+    "MacOSPreviewPathTests.test_macos_releases_through_the_controller_after_focus_loss",
+    "MacOSPreviewPathTests.test_mailbox_claim_on_macos_sends_one_centred_click_without_hover",
+    "MacOSPreviewPathTests.test_mailbox_claim_on_windows_still_hovers_first",
+    "MacOSPreviewPathTests.test_scroll_on_macos_leaves_the_hover_to_the_control_unit",
+    "MacOSPreviewPathTests.test_scroll_on_windows_still_moves_into_the_list_first",
+    "MacOSPreviewPathTests.test_unmapped_key_is_never_recorded_as_held",
+    "MacOSPreviewPathTests.test_windows_still_releases_directly_after_focus_loss",
+    "MacOSPreviewPathTests.test_wrong_frame_size_skips_window_resizing_without_the_capability",
+    "MacTextGateTests.test_a_cleanup_error_over_the_refusal_still_spends_nothing",
+    "MacTextGateTests.test_a_paste_is_only_trusted_when_the_field_reads_the_code",
+    "MacTextGateTests.test_a_resume_inside_the_last_input_check_cancels_a_verified_click",
+    "MacTextGateTests.test_a_typed_realm_amount_is_refused_before_the_field_is_clicked",
+    "MacTextGateTests.test_redeem_rechecks_the_field_on_a_fresh_frame_after_the_cooldown_before_clicking",
+    "MacTextGateTests.test_redeem_stops_the_code_instead_of_typing_it",
+    "MacTextGateTests.test_the_realm_queue_spends_nothing_on_an_unsupported_amount",
+    "MacTextGateTests.test_xinghai_chat_is_unavailable_and_refused_before_sitting_down",
+    "MacTextInputTests.test_a_focus_return_part_way_ends_mac_text",
+    "MacTextInputTests.test_a_resume_before_the_first_character_ends_mac_text",
+    "MacTextInputTests.test_a_stop_ends_mac_text_at_the_next_character",
+    "MacTextInputTests.test_mac_sends_one_character_per_request",
+    "MacTextInputTests.test_windows_still_sends_the_whole_string_at_once",
+    "MiddleAlignFallbackTests.test_a_heading_recheck_probes_with_keys_without_pressing",
+    "MiddleAlignFallbackTests.test_a_required_scene_press_outside_the_window_says_what_to_do_and_presses_nothing",
+    "MiddleAlignFallbackTests.test_a_stationary_turn_falls_back_to_keys_without_pressing",
+    "MiddleAlignFallbackTests.test_foreground_input_asks_the_backend_and_win32_never_blocks",
+    "MiddleAlignFallbackTests.test_the_gate_reports_once_per_blocked_stretch_and_is_unchanged_without_the_check",
+    "MiddleAlignFallbackTests.test_the_mac_backend_blocks_only_a_cursor_known_to_be_outside_the_window",
+    "OverlayThemeTests.test_theme_resolves_without_a_windows_registry",
     "SelectionTests.test_backend_follows_platform_and_controller_type",
+    "SelectionTests.test_macos_clipboard_round_trips_text_on_a_private_pasteboard",
     "SelectionTests.test_non_windows_host_rejects_with_the_previous_message",
     "SelectionTests.test_optional_adapters_follow_capabilities",
     "SelectionTests.test_process_helpers_are_windows_only_and_delegate_unchanged",
     "SelectionTests.test_task_code_reaches_clipboard_and_credentials_through_the_host",
     "SelectionTests.test_unreadable_info_and_invalid_window",
     "SelectionTests.test_win32_capabilities",
+    "TaskAllowlistTests.test_a_malformed_list_refuses_everything_on_macos",
+    "TaskAllowlistTests.test_an_experimental_task_says_so_in_its_own_log_once_before_its_first_action",
+    "TaskAllowlistTests.test_background_mode_falls_back_to_pause_without_window_input",
+    "TaskAllowlistTests.test_dev_switch_adds_exact_entries_on_macos_only",
+    "TaskAllowlistTests.test_runtime_background_mode_follows_the_capability",
+    "TaskAllowlistTests.test_the_list_file_refuses_duplicate_keys_and_nan",
+    "TaskAllowlistTests.test_the_tier_list_is_parsed_strictly",
+    "TaskAllowlistTests.test_unsupported_entry_is_refused_before_any_task_code",
+    "TaskAllowlistTests.test_windows_runs_every_task_and_macos_only_the_preview_allowlist",
     "Win32InputTests.test_force_releases_bypass_the_agent_channel",
     "Win32InputTests.test_mouse_guard_lives_in_the_backend",
     "Win32InputTests.test_physical_keys_read_the_high_bit_of_async_key_state",
@@ -403,22 +459,28 @@
     "Win32TargetTests.test_bring_to_foreground_is_a_noop_when_focused",
     "Win32TargetTests.test_bring_to_foreground_restores_then_releases_alt_through_maa",
     "Win32TargetTests.test_focus_details",
-    "Win32TargetTests.test_focus_queries"
+    "Win32TargetTests.test_focus_queries",
+    "WindowsRuleTests.test_foreground_input_rule_is_the_win32_backends",
+    "WindowsRuleTests.test_hud_needs_the_overlay_capability",
+    "WindowsRuleTests.test_launch_probes_follow_the_launch_capability",
+    "WindowsRuleTests.test_window_only_capture_rule"
    ],
    "known_failures": [],
-   "skips": []
+   "skips": [
+    "SelectionTests.test_macos_clipboard_round_trips_text_on_a_private_pasteboard"
+   ]
   },
   "test_host_imports.py": {
    "tests": [
     "HostImportTests.test_agent_output_is_utf8_with_replacement",
+    "HostImportTests.test_backends_import_maa_only_inside_functions",
     "HostImportTests.test_registered_handlers_match_snapshot",
     "HostImportTests.test_registration_loads_no_platform_backend",
-    "HostImportTests.test_win32_overlay_backend_imports"
+    "HostImportTests.test_win32_overlay_backend_imports",
+    "OpenCvUseTests.test_agent_never_uses_cv2_video_or_window_interfaces"
    ],
    "known_failures": [],
-   "skips": [
-    "HostImportTests.test_win32_overlay_backend_imports"
-   ]
+   "skips": []
   },
   "test_launcher_discovery.py": {
    "tests": [
@@ -427,6 +489,23 @@
     "DiscoveryTests.test_malformed_config_fails_the_start_task_but_not_the_close_task",
     "DiscoveryTests.test_missing_launchers_and_duplicates",
     "DiscoveryTests.test_registry_first_then_config_in_name_order"
+   ],
+   "known_failures": [],
+   "skips": []
+  },
+  "test_mac_task_tiers.cjs": {
+   "tests": [
+    "the Windows contract: empty tiers mark nothing",
+    "a manifest error alone marks nothing and keeps the error",
+    "macOS marks verified, experimental and excluded entries from the shipped manifest",
+    "malformed backend values are dropped, not trusted",
+    "macOS starts wait for the tiers and stop on a manifest error; other systems never wait",
+    "an empty or malformed macOS tier response is a load error that refuses starts",
+    "a scheduled slot waits for a delayed tier response instead of being refused",
+    "the scheduler never waits off macOS: the slot starts before a teardown, as before",
+    "a scheduler stopped while waiting for the Mac tiers records nothing and a later start still runs the slot",
+    "a scheduler restarted while waiting for the Mac tiers runs the due slot once with the new handler",
+    "a scheduler waiting for the Mac tiers starts the slot once they arrive"
    ],
    "known_failures": [],
    "skips": []
@@ -585,6 +664,15 @@
     "RouteTestChecks.test_invalid_files_and_task_actions_are_rejected_before_input",
     "RouteTestChecks.test_snapshot_transmission_and_release_on_success_failure_and_stop"
    ],
+   "skips": []
+  },
+  "test_started_tasks.cjs": {
+   "tests": [
+    "macos names the mailbox correctly when the launch task before it was refused",
+    "macos registers no names rather than guessing by position without the mapping",
+    "windows pairs returned IDs with submitted tasks by position"
+   ],
+   "known_failures": [],
    "skips": []
   },
   "test_subtask_test.py": {

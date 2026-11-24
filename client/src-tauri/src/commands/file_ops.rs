@@ -599,7 +599,7 @@ pub fn get_exe_dir() -> Result<String, String> {
 }
 
 /// 获取应用数据目录路径
-/// - macOS: ~/Library/Application Support/MXU/
+/// - macOS: ~/Library/Application Support/MaaNikki/
 /// - Windows/Linux: exe 所在目录
 #[tauri::command]
 pub fn get_data_dir() -> Result<String, String> {
@@ -874,7 +874,7 @@ fn export_logs_blocking(
 ) -> Result<String, String> {
     use std::fs::File;
 
-    // 日志在数据目录下（macOS: ~/Library/Application Support/MXU/debug）
+    // 日志在数据目录下（macOS: ~/Library/Application Support/MaaNikki/debug）
     let data_dir = get_app_data_dir()?;
     let debug_dir = data_dir.join(DEBUG_DIR);
 

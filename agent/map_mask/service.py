@@ -9,7 +9,6 @@ import time
 
 import cv2
 import numpy as np
-from maa.define import MaaWin32ScreencapMethodEnum
 
 from daily.runtime import RESOURCE
 from app_paths import DATA_ROOT
@@ -159,20 +158,17 @@ class MapMask:
         self.generation = 0
         self.next_submit = self.next_region = 0.0
         self.last_observed_at = 0.0
-        capture_method = rt.controller.info.get("screencap_method", 0)
-        background = int(MaaWin32ScreencapMethodEnum.Background)
-        window_capture = (type(capture_method) is int and capture_method > 0
-                          and not capture_method & ~background)
-        # An independent overlay is outside a FramePool/PrintWindow capture of
-        # the game. Keep it visible to desktop streaming/capture in this case.
+        overlays = overlay_backend()
+        if overlays is None:
+            raise RuntimeError("当前系统不支持地图遮罩窗口。")
+        # Which capture methods leave a desktop overlay out of the game's frames is the backend's rule.
+        # Read before PearPal starts its workers, so a disconnected controller fails first.
+        window_capture = overlays.capture_is_window_only(rt.controller.info)
         self.data = None
         self.window = None
         self.thread = threading.Thread(target=self._run, name="map-mask-matching", daemon=True)
         try:
             self.data = PearPal(DATA_ROOT)
-            overlays = overlay_backend()
-            if overlays is None:
-                raise RuntimeError("当前系统不支持地图遮罩窗口。")
             self.window = overlays.OverlayWindow(hwnd, exclude_from_capture=not window_capture,
                                                  tutorial_provider=self.data.tutorial, hud_sink=hud_sink)
             self.thread.start()

@@ -1,4 +1,5 @@
 import { useAppStore } from '@/stores/appStore';
+import { macTaskTiersPending, waitForMacTaskTiers } from '@/services/macTaskTiersService';
 import { loggers } from '@/utils';
 import type { Instance } from '@/types/interface';
 
@@ -199,6 +200,17 @@ class ScheduleService {
         currentSlot.getMinutes(),
       ).padStart(2, '0')}`;
       const slotStr = formatSlotKey(currentSlot);
+
+      // macOS only, and only while the task tiers are still loading: the slot is fixed above; wait for them
+      // before deciding, so a start refused only because they were loading does not use up the slot. Other
+      // backends never wait here (no yield, the same order as before). After the wait the service must be
+      // running: stopped, this check records nothing and calls nothing; stopped and started again (whose own
+      // immediate check was skipped while this one held `checking`), it decides the fixed slot for the running
+      // service with the handler registered now, so the restart does not lose a due slot.
+      if (macTaskTiersPending()) {
+        await waitForMacTaskTiers();
+        if (!this.intervalId || !this.triggerFn) return;
+      }
 
       this.cleanupOldSlots();
       const triggeredSlots = this.getTriggeredSlots();

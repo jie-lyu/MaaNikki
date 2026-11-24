@@ -39,7 +39,7 @@ export interface LoadResult {
   interface: ProjectInterface;
   translations: Record<string, Record<string, string>>;
   basePath: string;
-  dataPath: string; // 数据目录（macOS: ~/Library/Application Support/MXU/，其他平台同 basePath）
+  dataPath: string; // 数据目录（macOS: ~/Library/Application Support/MaaNikki/，其他平台同 basePath）
   webServerPort?: number; // 后端 Web 服务器实际监听端口（浏览器模式下用于 WS 直连）
   backendOS?: string; // 后端真实 OS（用于控制器过滤、更新匹配等；Tauri/HTTP 路径填充，dev 预览为空）
   backendArch?: string; // 后端真实架构
@@ -54,7 +54,7 @@ async function getExeDir(): Promise<string> {
 
 /**
  * 获取应用数据目录的绝对路径（Tauri 环境）
- * - macOS: ~/Library/Application Support/MXU/
+ * - macOS: ~/Library/Application Support/MaaNikki/
  * - Windows/Linux: exe 所在目录
  */
 async function getDataDir(): Promise<string> {

@@ -5,6 +5,7 @@ import { secondaryButton } from '@/components/ui/FeaturePage';
 import { SwitchTrack } from '@/components/ui/SwitchTrack';
 import { ACTIONS, MACROS, ROUTE_KEYS, actionMeta, withAction, type Checkpoint, type RouteDocument, type RouteIssue, type RoutePoint } from '@/services/routeDocument';
 import { Field, NumberField, field, iconButton } from './routeEditorShared';
+import { useGameTargetUnsupportedReason } from '@/utils/macFeatures';
 import type { TerrainSample } from './routeTerrain';
 
 export function CheckpointEditor({ value, known, map, fallback, onChange }: {
@@ -88,14 +89,15 @@ export function PointInspector({ point, index, total, known, map, readOnly, grou
   const action = point.action ?? '';
   const showAttackHeading = (action === 'macro' && params.id === 'zhaoxi_attack') || (action === 'key' && params.key === 'attack');
   const rise = ground?.valid && previousGround?.valid ? ground.z - previousGround.z : null;
+  const macUnsupported = useGameTargetUnsupportedReason();
 
   return <fieldset disabled={readOnly} className="space-y-3 p-3">
     <div className="flex items-center gap-0.5">
       <button type="button" onClick={() => onStep(-1)} disabled={index <= 0} title="上一个点（←）" className={iconButton}><ChevronLeft className="h-4 w-4" /></button>
       <h3 className="text-sm font-semibold tabular-nums">第 {index+1} 点<span className="ml-1 text-xs font-normal text-text-muted">/ {total}</span></h3>
       <button type="button" onClick={() => onStep(1)} disabled={index >= total-1} title="下一个点（→）" className={clsx(iconButton, 'mr-auto')}><ChevronRight className="h-4 w-4" /></button>
-      <button type="button" onClick={onWalk} title="从这个点开始试走（只移动）" className={iconButton}><Footprints className="h-4 w-4" /></button>
-      <button type="button" onClick={onRun} title="从这个点开始试跑（含动作）" className={iconButton}><CirclePlay className="h-4 w-4" /></button>
+      <button type="button" onClick={onWalk} disabled={macUnsupported ? true : undefined} title={macUnsupported || '从这个点开始试走（只移动）'} className={iconButton}><Footprints className="h-4 w-4" /></button>
+      <button type="button" onClick={onRun} disabled={macUnsupported ? true : undefined} title={macUnsupported || '从这个点开始试跑（含动作）'} className={iconButton}><CirclePlay className="h-4 w-4" /></button>
       <button type="button" onClick={onRemove} title="删除这个点（Delete）" className={clsx(iconButton, 'hover:text-error')}><Trash2 className="h-4 w-4" /></button>
     </div>
     {ground?.valid && <p className="rounded-lg bg-bg-tertiary px-2.5 py-1.5 text-xs tabular-nums text-text-secondary">

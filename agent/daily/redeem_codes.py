@@ -25,6 +25,7 @@ QQBOT_REDEEM_URL = "https://qqbot.maanikki.cn/v1/redeem-codes"
 
 PASTE_BUTTON_TARGET = [831, 340]
 INPUT_BOX_TARGET = [614, 342]
+CODE_FIELD_ROI = [430, 318, 370, 50]  # resource/pipeline/redeem_codes.json MaaNikki_Redeem_ModalPlaceholder
 MODAL_USE_TARGET = [639, 469]
 MODAL_CLOSE_TARGET = [854, 244]
 
@@ -377,12 +378,75 @@ class RedeemCodes:
                 return False
             pasted = not self.rt.hit("MaaNikki_Redeem_ModalPlaceholder")
         if not pasted:
+            from host import capabilities, platform_backend
+            if not capabilities(platform_backend()).text_input:
+                # Stop this code before focusing the box or pressing 兑换: no typing fallback on macOS yet.
+                self.rt.log("兑换码未能通过剪贴板粘贴；Mac 版尚未验证文字输入，不改用手动输入。")
+                return False
             if not (self.rt.action("Click", target=INPUT_BOX_TARGET)
                     and self.rt.pause(0.25)
                     and self.rt.input_text(code)
                     and self.rt.pause(0.3)):
                 return False
+        if not self._code_confirmed(code):
+            return False
         return not self.rt.hit("MaaNikki_Redeem_ModalPlaceholder")
+
+    def _code_confirmed(self, code: str) -> bool:
+        """macOS: positive evidence before 兑换 (the paste button is unverified there): the modal is still open and
+        the field reads exactly this code. A missed placeholder alone must not authorise the click. Win32: as
+        before (the placeholder check)."""
+        from host import capabilities, platform_backend
+        if capabilities(platform_backend()).text_input:
+            return True
+        read = re.sub(r"\s+", "", self.rt.text(CODE_FIELD_ROI) or "")
+        if self._modal_ready() and read == re.sub(r"\s+", "", code):
+            return True
+        self.rt.log("未能确认兑换码已正确填入（Mac 版），停止这个码，不点兑换。")
+        return False
+
+    @staticmethod
+    def _typing_supported() -> bool:
+        from host import capabilities, platform_backend
+        return capabilities(platform_backend()).text_input
+
+    def _click_use_verified(self, code: str):
+        """macOS: click 兑换 only at a button verified on a frame taken in the current focus generation. A focus
+        change between the check and the click cancels that click (ForegroundChanged) and the check is repeated on
+        a fresh frame. True/False: the click's result; None: no verified button, nothing was clicked."""
+        from task_control import ForegroundChanged
+        for _ in range(3):
+            if self.rt.stopped:
+                return False
+            self.rt.check_focus()
+            generation = self.rt._focus_generation
+            target = self._recheck_before_use(code)
+            if target is None:
+                return None
+            try:
+                return bool(self.rt.action("Click", target=target, focus_generation=generation))
+            except ForegroundChanged:
+                self.rt.log("点兑换前游戏离开过前台，重新复核。", detail=True)
+        return None
+
+    def _recheck_before_use(self, code: str):
+        """macOS, immediately before 兑换: the field evidence from filling may be stale after the cooldown wait, so
+        one fresh frame must show the modal still open, exactly this code in the field and the 兑换 button itself
+        (no fixed-coordinate fallback). Returns the button box, or None to end this code without clicking."""
+        frame = self.rt.capture()
+        if frame is not None:
+            with self.rt.observe():
+                modal = bool(
+                    self.rt.hit("MaaNikki_Redeem_ModalReady", image=frame)
+                    and not self.rt.hit("MaaNikki_RewardLayer", image=frame)
+                    and not self.rt.hit("MaaNikki_Monthly_ParadiseReward", image=frame)
+                )
+                read = re.sub(r"\s+", "", self.rt.text(CODE_FIELD_ROI, image=frame) or "") if modal else ""
+                use_btn = self.rt.recognize("MaaNikki_Redeem_ModalUse", image=frame) if modal else None
+            if modal and read == re.sub(r"\s+", "", code) and use_btn and use_btn.hit and use_btn.box:
+                return list(use_btn.box)
+        self.rt.log("点兑换前复核：弹窗、输入框里的兑换码或兑换按钮对不上（Mac 版），停止这个码，不点兑换。")
+        return None
 
     def _dismiss_reward_to_modal(self) -> bool:
         if not self.rt.pause(0.5):
@@ -459,9 +523,15 @@ class RedeemCodes:
                 remaining = USE_COOLDOWN_SECONDS - (time.monotonic() - self.last_use_at)
                 if remaining > 0.0 and not self.rt.pause(remaining):
                     return "error", "任务已停止"
-            use_btn = self.rt.recognize("MaaNikki_Redeem_ModalUse")
-            target = list(use_btn.box) if use_btn and use_btn.hit and use_btn.box else MODAL_USE_TARGET
-            if not self.rt.action("Click", target=target):
+            if self._typing_supported():
+                use_btn = self.rt.recognize("MaaNikki_Redeem_ModalUse")
+                target = list(use_btn.box) if use_btn and use_btn.hit and use_btn.box else MODAL_USE_TARGET
+                clicked = self.rt.action("Click", target=target)
+            else:
+                clicked = self._click_use_verified(code)
+                if clicked is None:
+                    return "error", "兑换前复核未通过"
+            if not clicked:
                 return "error", "未能点击使用按钮"
             self.last_use_at = time.monotonic()
             outcome, detail = self._poll_submit_outcome()

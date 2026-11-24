@@ -34,6 +34,8 @@ import { generateTaskPipelineOverride } from '@/utils';
 import { OptionEditor, SwitchGrid, switchHasNestedOptions } from './OptionEditor';
 import { ContextMenu, useContextMenu } from './ContextMenu';
 import { Tooltip } from './ui/Tooltip';
+import { MacTaskBadge, macTaskNoteLine, useMacTaskMark } from './MacTaskMarks';
+import { macExcludedText } from '@/utils/macTaskTiers';
 import { ConfirmDialog } from './ConfirmDialog';
 import { buildListItemMenuItems, InlineNameEditor } from './listItemShared';
 import { TriStateCheckbox, getTaskCheckboxState } from './ui/TriStateCheckbox';
@@ -466,12 +468,24 @@ export function TaskItem({ instanceId, task }: TaskItemProps) {
     [taskDef?.resource, currentResourceName],
   );
 
-  const isIncompatible = isControllerIncompatible || isResourceIncompatible;
+  // macOS 任务档位（Windows 上为 null）：不开放的任务（包括从预设或 Windows 配置带来的）保留在列表中，
+  // 按不兼容处理并写明原因，运行时由后端跳过；试用任务显示标记和说明。前置任务只在声明了任务入口时
+  // （如启动游戏的 MaaNikki_StartGame）按该入口标记，显示清单里的原因。
+  const macMark = useMacTaskMark(
+    isPretask ? pretaskItem?.entry : isMxuTask ? mxuSpecialTask?.entry : taskDef?.entry,
+  );
+  const macExcluded = macExcludedText(macMark);
+  const macNote = macTaskNoteLine(macMark);
+
+  const isIncompatible = isControllerIncompatible || isResourceIncompatible || !!macExcluded;
 
   // 生成不兼容提示信息
   const incompatibleReason = useMemo(() => {
     if (!isIncompatible) return '';
     const reasons: string[] = [];
+    if (macExcluded) {
+      reasons.push(macExcluded);
+    }
     if (isControllerIncompatible) {
       reasons.push(t('taskItem.incompatibleController'));
     }
@@ -479,7 +493,7 @@ export function TaskItem({ instanceId, task }: TaskItemProps) {
       reasons.push(t('taskItem.incompatibleResource'));
     }
     return reasons.join(', ');
-  }, [isIncompatible, isControllerIncompatible, isResourceIncompatible, t]);
+  }, [isIncompatible, macExcluded, isControllerIncompatible, isResourceIncompatible, t]);
 
   // 生成支持的控制器提示（用于 Tooltip hover 显示）
   const supportedControllerHint = useMemo(() => {
@@ -996,7 +1010,7 @@ export function TaskItem({ instanceId, task }: TaskItemProps) {
       className={clsx(
         'group bg-bg-secondary rounded-xl border border-border transition-shadow relative overflow-hidden',
         isDragging && 'shadow-lg opacity-50',
-        completedPeriod && 'opacity-60',
+        (completedPeriod || macExcluded) && 'opacity-60',
         taskRunStatus === 'running' && 'task-item-running',
         isAnimating && 'animate-task-slide-in',
       )}
@@ -1103,6 +1117,7 @@ export function TaskItem({ instanceId, task }: TaskItemProps) {
                     {t(`taskItem.status.${taskRunStatus}`)}
                   </span>
                 )}
+                <MacTaskBadge mark={macMark} />
                 {periodLabel && (
                   <span className="shrink-0 text-[11px] text-text-muted rounded-lg bg-bg-tertiary px-1.5 py-0.5"
                     title={accountError ? `账号状态读取失败：${accountError}` : completedPeriod ? "保留勾选，当前周期自动跳过；下个周期自动恢复。" : "执行前会再次读取账号状态。"}>
@@ -1221,6 +1236,11 @@ export function TaskItem({ instanceId, task }: TaskItemProps) {
           </button>
         )}
       </div>
+
+      {/* Mac 试用任务的后果说明（仅 macOS），不展开选项也能看到 */}
+      {macNote && (
+        <div className="px-3 pb-2 -mt-1 text-xs leading-5 text-warning">{macNote}</div>
+      )}
 
       {task.taskName === 'xinghai' && !task.expanded && (
         <div className="px-3 pb-2 empty:hidden">

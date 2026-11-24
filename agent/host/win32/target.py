@@ -15,6 +15,9 @@ from navigation.models import GameWindowClosed, NavigationError
 class Win32Target:
     """The HWND from Controller.info, verified to be the Infinity Nikki client."""
 
+    # Seize's key-up can refocus the game; on focus loss held keys are released directly.
+    release_ignores_focus = False
+
     def __init__(self, info: dict):
         hwnd = info.get("hwnd") if isinstance(info, dict) else None
         if (not isinstance(info, dict) or info.get("type") != "win32" or type(hwnd) is not int

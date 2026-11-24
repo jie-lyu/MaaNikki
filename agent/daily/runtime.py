@@ -19,9 +19,20 @@ from game_keys import GameKeys
 from performance import count, measure
 from message_log import write_message
 from game_view import ALLOWED_FRAME_SIZES, is_clipped_game_frame, require_game_frame
+from host import capabilities, native_key, platform_backend
 
 
 RESOURCE = RESOURCE_ROOT / "resource"
+# Pipeline actions whose "key" goes to the controller unchanged; host.native_key translates it.
+NATIVE_KEY_ACTIONS = frozenset({"ClickKey", "KeyDown", "KeyUp", "LongPressKey"})
+
+
+def native_key_fields(action, fields):
+    """Fields of a pipeline action with its key ids turned into the connected controller's codes."""
+    if action not in NATIVE_KEY_ACTIONS or "key" not in fields:
+        return fields
+    key = fields["key"]
+    return {**fields, "key": [native_key(item) for item in key] if isinstance(key, list) else native_key(key)}
 
 
 class Runtime:
@@ -66,7 +77,8 @@ class Runtime:
         if session is not None and session.context is self.context:
             return session._background_mode()
         try:
-            return parameters(self.context, "MaaNikki_FocusLost").get("mode") == "background"
+            from task_control import focus_lost_mode
+            return focus_lost_mode(parameters(self.context, "MaaNikki_FocusLost").get("mode")) == "background"
         except (AttributeError, RuntimeError, TypeError, ValueError):
             return False
 
@@ -286,6 +298,7 @@ class Runtime:
         return hwnd, cap_size
 
     def _validate_pointer_targets(self, action, fields, inputs=None, *, require_work_area=None):
+        from host import capabilities, platform_backend
         from tall_window import (
             BASE_CAPTURE_HEIGHT,
             BASE_CAPTURE_WIDTH,
@@ -313,6 +326,7 @@ class Runtime:
                 not safe
                 and not tried_adjust
                 and cap_size == (BASE_CAPTURE_WIDTH, BASE_CAPTURE_HEIGHT)
+                and capabilities(platform_backend()).tall_window
                 and is_auto_adjust_resolution_enabled(self.context)
             ):
                 tried_adjust = True
@@ -408,7 +422,8 @@ class Runtime:
                 inputs, action, fields, cap_size=cap_size, window_cursor_pos=window_cursor_pos)
             if dispatched is not None:
                 return dispatched
-        if action == "Click" and ui_click:
+        hover = capabilities(platform_backend()).pointer_hover
+        if action == "Click" and ui_click and hover:
             point = self._target_point(fields.get("target"), "界面点击目标")
             # Maa's rectangular Click target is random inside the box. UI
             # icons can have dead edges, and Seize must settle after moving.
@@ -418,6 +433,9 @@ class Runtime:
                     or not self.pause(.3)):
                 return False
             fields = {**fields, "target": point}
+        elif action == "Click" and not hover:
+            # Without hover the control unit places the cursor for the click and restores it.
+            fields = {**fields, "target": self._target_point(fields.get("target"), "界面点击目标")}
         if focus_generation is not None:
             self.check_focus()
             if self._focus_generation != focus_generation:
@@ -426,6 +444,13 @@ class Runtime:
         inputs = self._active_inputs()
         if inputs is not None:
             inputs.check()
+            if focus_generation is not None and platform_backend() == "macos":
+                # inputs.check() may have waited for the game to come back: a click checked on an older frame is
+                # cancelled here, right before dispatch. Win32 keeps its existing order.
+                self.check_focus()
+                if self._focus_generation != focus_generation:
+                    from task_control import ForegroundChanged
+                    raise ForegroundChanged("前台切换后已取消本次输入，等待重新核对")
         window_only = bool(getattr(inputs, "window_only", False))
         use_window = self._use_window_input(inputs)
         if use_window:
@@ -437,6 +462,7 @@ class Runtime:
         if window_only and not inputs.foreground():
             # Never dispatch fallback Seize actions when the game is unfocused.
             inputs.check(require_foreground=True)
+        fields = native_key_fields(action, fields)
         with measure("input.action"):
             result = self.context.run_action("MaaNikki_Daily_Action", pipeline_override={
                 "MaaNikki_Daily_Action": {"action": action, **fields}})
@@ -632,7 +658,8 @@ class Runtime:
                     continue
                 count("capture.failed")
                 return None
-            if (image.shape[1], image.shape[0]) not in ALLOWED_FRAME_SIZES or is_clipped_game_frame(image):
+            if ((image.shape[1], image.shape[0]) not in ALLOWED_FRAME_SIZES or is_clipped_game_frame(image)) \
+                    and capabilities(platform_backend()).tall_window:
                 from tall_window import ensure_16_9_window
                 adjusted = ensure_16_9_window(
                     self.controller, context=self.context, notify=self.log, write_log=False
@@ -669,7 +696,7 @@ class Runtime:
     def release_key(self, key):
         session = active_session()
         if session is None:
-            self.controller.post_key_up(key).wait()
+            self.controller.post_key_up(native_key(key)).wait()
         else:
             for inputs in list(session.inputs):
                 inputs.release_key(key)
@@ -685,6 +712,9 @@ class Runtime:
     def input_text(self, content):
         if self.stopped:
             return False
+        # Taken before the first focus check: a pause and resume consumed by it or by ensure_frame()
+        # still ends the Mac text (the field may no longer have focus).
+        start = getattr(self, "_focus_generation", 0)
         self.check_focus()
         if not self.ensure_frame():
             return False
@@ -693,8 +723,36 @@ class Runtime:
         if self._use_window_input(inputs):
             with measure("input.text"):
                 return bool(inputs.input_window_text(content))
+        if platform_backend() == "macos":
+            return self._input_text_by_character(content, start)
         with measure("input.text"):
             return self.controller.post_input_text(content).wait().succeeded
+
+    def _input_text_by_character(self, content, start):
+        """macOS: one character per controller request, checking Stop and focus before each.
+
+        The patched unit posts each character as its own keyboard event, but one request is one job that
+        a Stop cannot interrupt part-way; submitting characters separately lets a Stop end the text at the
+        next character. The pause keeps each character in its own game frame. ``start`` is the focus generation
+        when input_text was called.
+        """
+
+        def focus_kept():
+            # A focus loss and return part-way (the user may have clicked another field to bring the game
+            # back) ends the text; the caller revalidates the partly filled field.
+            if self.check_focus() or getattr(self, "_focus_generation", 0) != start:
+                self.log("输入文字时游戏离开过前台，已停止输入，剩余文字没有输入。")
+                return False
+            return True
+        with measure("input.text"):
+            for index, character in enumerate(str(content)):
+                if self.stopped or not focus_kept():
+                    return False
+                if index and (not self.pause(.03) or not focus_kept()):
+                    return False
+                if not self.controller.post_input_text(character).wait().succeeded:
+                    return False
+        return not self.stopped
 
     def text(self, roi, expected=".+", image=None):
         result = self.recognize("MaaNikki_Daily_OCR", {"roi": roi, "expected": expected}, image)
@@ -1329,6 +1387,8 @@ class Executors(Runtime):
             return options.get("allow_energy", True)
         if rule.key == "chat" and not options.get("allow_chat", False):
             return False
+        if rule.key == "chat" and not capabilities(platform_backend()).text_input:
+            return False  # macOS: public chat needs text input, not yet verified there
         if rule.key == "bubble" and not options.get("bubble_equipped", False):
             return False
         if rule.executor == "crystal":
@@ -1516,6 +1576,11 @@ class Executors(Runtime):
         return True
 
     def chat(self, mode):
+        if not capabilities(platform_backend()).text_input:
+            # Before sitting down or opening the channel: nothing is committed.
+            self.log("聚会聊天需要文字输入，Mac 版尚未验证，已跳过。")
+            return False
+
         def sit_on_couch():
             for _ in range(2):
                 if not self.main() or not self._wait_world_prompt(PROMPTS["chat"]):
@@ -2134,6 +2199,11 @@ class Executors(Runtime):
             if abs(desired - current) <= (45 if is_kg_unit else 8):
                 adjusted = step_adjust(current, desired)
             else:
+                if not capabilities(platform_backend()).text_input:
+                    from host import UnsupportedInput
+                    # Before clicking the field or Ctrl+A: a plain failure here would let the realm queue spend the
+                    # remaining energy on the default realm.
+                    raise UnsupportedInput(f"Mac 版暂不支持输入数量（需要从 {current} 改为 {desired}）")
                 if not self.action("Click", target=input_box):
                     return False
                 active = self._active_inputs()

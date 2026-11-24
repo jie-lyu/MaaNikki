@@ -347,6 +347,9 @@ class GameUI:
             return False
         if self._preserve_cursor:
             return True
+        from host import capabilities, platform_backend
+        if not capabilities(platform_backend()).pointer_hover:
+            return True  # the control unit restored the cursor after the click
         main = self.rt.hit("MaaNikki_MainDetected")
         self.rt.invalidate_frame()
         if main:
@@ -533,7 +536,11 @@ class GameUI:
         # first scroll after unhover() is not dropped.
         if paged:
             amount = 120 if amount > 0 else -120 if amount < 0 else 0
-        if not (self.rt.action("TouchMove", target=target) and self.rt.pause(.3 if paged else .15)):
+        from host import capabilities, platform_backend
+        # Without pointer hover (macOS) the control unit hovers the scroll target itself, settles and
+        # puts the cursor back; a separate TouchMove would only be refused there.
+        if capabilities(platform_backend()).pointer_hover and not (
+                self.rt.action("TouchMove", target=target) and self.rt.pause(.3 if paged else .15)):
             return False
         return (self.rt.action("Scroll", target=target, dx=0, dy=amount)
                 and self.rt.pause(.6 if paged else .2))

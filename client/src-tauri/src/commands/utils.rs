@@ -94,10 +94,15 @@ pub fn emit_state_changed(app: &AppHandle, instance_id: &str, kind: &str) {
 /// 应在 tasker sink 中调用，在 `emit_callback_event` 之前处理任务状态变更。
 /// 负责跟踪 Tasker.Task.Starting / Succeeded / Failed，并在所有任务完成后
 /// 更新 `overall_status` 并发射 `tasks-completed` 事件。
+///
+/// `tasker_serial` 是发出回调的 Tasker 创建时的序号。Mac 连接上，只有当前 Tasker、且属于当前这一轮
+/// 的回调能改动实例（`mac_connection::callback_is_current`）；已结束或已被换掉的运行的迟到回调一律
+/// 忽略，不会结束下一轮或取走它的 agent。Windows 连接不做这些判断，行为不变。
 pub fn handle_task_callback(
     maa_state: &Arc<MaaState>,
     app: &AppHandle,
     instance_id: &str,
+    tasker_serial: u64,
     message: &str,
     details: &str,
 ) {
@@ -136,8 +141,9 @@ pub fn handle_task_callback(
             };
             if instance.stop_in_progress
                 || instance.task_run_state.overall_status.as_deref() != Some("Running")
+                || is_stale_macos_callback(instance, tasker_serial)
             {
-                false
+                (false, None)
             } else {
                 let state = &mut instance.task_run_state;
                 for status in state.statuses.values_mut() {
@@ -147,11 +153,17 @@ pub fn handle_task_callback(
                 }
                 state.overall_status = Some("Failed".to_string());
                 instance.task_ids.clear();
-                true
+                // Mac：在判定结束的同一个临界区里取走这次运行的 agent 和代数。
+                (true, super::maa_core::finish_macos_run(instance))
             }
         };
+        let (aborted_remaining, finished_macos) = aborted_remaining;
         if aborted_remaining {
             super::telemetry::on_run_finished(instance_id);
+            if let Some(finished) = finished_macos {
+                super::maa_core::complete_macos_run(app, maa_state, instance_id, finished);
+                return;
+            }
             emit_state_changed(app, instance_id, "task-progress");
             emit_state_changed(app, instance_id, "tasks-completed");
             if let Err(e) = super::maa_agent::stop_agent_impl(maa_state, instance_id) {
@@ -165,7 +177,7 @@ pub fn handle_task_callback(
         return;
     }
 
-    let all_done = {
+    let (all_done, finished_macos) = {
         let mut instances = match maa_state.instances.lock() {
             Ok(g) => g,
             Err(_) => return,
@@ -174,6 +186,14 @@ pub fn handle_task_callback(
             Some(i) => i,
             None => return,
         };
+        // Mac：已结束或已被换掉的运行的回调，或不属于当前这一轮的结束回调，不改动任何状态。
+        if is_stale_macos_callback(instance, tasker_serial)
+            || (is_macos_connection(instance)
+                && !is_started
+                && !instance.task_run_state.pending_task_ids.contains(&task_id))
+        {
+            return;
+        }
         let state = &mut instance.task_run_state;
 
         if is_started {
@@ -184,7 +204,7 @@ pub fn handle_task_callback(
             if let Some(selected_id) = state.mappings.get(&task_id).cloned() {
                 state.statuses.insert(selected_id, "running".to_string());
             }
-            false // 未完成
+            (false, None) // 未完成
         } else {
             // 任务成功或失败
             let status_str = if is_succeeded { "succeeded" } else { "failed" };
@@ -202,14 +222,22 @@ pub fn handle_task_callback(
                     .unwrap_or(false)
             });
 
+            // 只有属于当前这一轮的回调才能结束这一轮（Mac 收尾据此取走 agent）。
+            let belongs_to_run = state.pending_task_ids.contains(&task_id);
             if all_completed {
                 let has_failed = state.statuses.values().any(|s| s == "failed");
                 state.overall_status =
                     Some(if has_failed { "Failed" } else { "Succeeded" }.to_string());
                 instance.task_ids.clear();
             }
+            // Mac：在判定结束的同一个临界区里取走这次运行的 agent 和代数。
+            let finished = if all_completed && belongs_to_run {
+                super::maa_core::finish_macos_run(instance)
+            } else {
+                None
+            };
 
-            all_completed
+            (all_completed, finished)
         }
     }; // 锁在此处释放
 
@@ -227,6 +255,11 @@ pub fn handle_task_callback(
     }
 
     // 通知前端刷新状态
+    // Mac：先断开这次运行的 agent（反注册其动作），再通知结束，之后的清理只针对这次运行。
+    if let Some(finished) = finished_macos {
+        super::maa_core::complete_macos_run(app, maa_state, instance_id, finished);
+        return;
+    }
     emit_state_changed(app, instance_id, "task-progress");
     if all_done {
         emit_state_changed(app, instance_id, "tasks-completed");
@@ -240,6 +273,23 @@ pub fn handle_task_callback(
         }
         super::maa_core::schedule_release_idle_desktop_controller(app, maa_state, instance_id);
     }
+}
+
+fn is_macos_connection(instance: &super::types::InstanceRuntime) -> bool {
+    matches!(
+        instance.controller_config,
+        Some(super::types::ControllerConfig::MacOS { .. })
+    )
+}
+
+/// Mac 连接上，回调来自已结束或已被换掉的 Tasker。
+fn is_stale_macos_callback(instance: &super::types::InstanceRuntime, tasker_serial: u64) -> bool {
+    is_macos_connection(instance)
+        && !super::mac_connection::callback_is_current(
+            instance.tasker_serial,
+            instance.tasker.is_some(),
+            tasker_serial,
+        )
 }
 
 /// 发送配置变更事件（双通道：WS 浏览器客户端 + Tauri WebView）
@@ -276,8 +326,256 @@ pub fn apply_agent_root_env(cmd: &mut std::process::Command) {
     }
 }
 
+/// macOS 数据目录名，使用 MaaNikki 自己的目录，不与其他基于 MXU 的应用共用 `MXU`。
+#[cfg(target_os = "macos")]
+const MACOS_DATA_DIR_NAME: &str = "MaaNikki";
+
+/// macOS 测试预览版允许运行的任务入口清单（与 agent 共用一份）。
+#[cfg(target_os = "macos")]
+const MACOS_PREVIEW_TASKS: &str = "agent/host/macos/preview_tasks.json";
+
+/// 开发专用开关：逗号分隔的任务入口，只在开发构建的 macOS 客户端里额外放行（agent 侧同名变量）。
+/// 发布构建既不读取，也会从 agent 的环境里去掉，已验证的白名单仍是 preview_tasks.json。
+pub const MACOS_EXTRA_TASKS_ENV: &str = "MAANIKKI_MACOS_EXTRA_TASKS";
+
+/// 开发开关的取值（逗号分隔，忽略空白和空项）是否包含该入口。
+pub fn extra_tasks_allow(list: &str, entry: &str) -> bool {
+    !entry.is_empty() && list.split(',').map(str::trim).any(|item| item == entry)
+}
+
+/// 任务清单的 JSON：与 agent 一样拒绝重复的键（serde_json 默认保留最后一个，悄悄覆盖）。
+/// NaN/Infinity 本来就不是合法的 JSON，serde_json 已经拒绝。
+fn load_task_list(text: &str) -> Result<serde_json::Value, String> {
+    struct Strict(serde_json::Value);
+    struct StrictVisitor;
+    impl<'de> serde::de::Visitor<'de> for StrictVisitor {
+        type Value = serde_json::Value;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("JSON")
+        }
+        fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E> {
+            Ok(v.into())
+        }
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(v.into())
+        }
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(v.into())
+        }
+        fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E> {
+            Ok(serde_json::Number::from_f64(v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null))
+        }
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(v.into())
+        }
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(serde_json::Value::Null)
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::new();
+            while let Some(Strict(item)) = seq.next_element()? {
+                out.push(item);
+            }
+            Ok(serde_json::Value::Array(out))
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut out = serde_json::Map::new();
+            while let Some((key, Strict(value))) = map.next_entry::<String, Strict>()? {
+                if out.contains_key(&key) {
+                    return Err(serde::de::Error::custom(format!("重复的键 {}", key)));
+                }
+                out.insert(key, value);
+            }
+            Ok(serde_json::Value::Object(out))
+        }
+    }
+    impl<'de> serde::Deserialize<'de> for Strict {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            d.deserialize_any(StrictVisitor).map(Strict)
+        }
+    }
+    serde_json::from_str::<Strict>(text).map(|Strict(value)| value).map_err(|e| format!("任务清单无法解析: {}", e))
+}
+
+/// macOS 任务清单的三个档位：已验证（entries）、试用（experimental）、不开放（excluded，入口到原因）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+pub struct TaskTiers {
+    pub verified: Vec<String>,
+    pub experimental: Vec<String>,
+    pub excluded: std::collections::BTreeMap<String, String>,
+}
+
+/// 严格解析任务清单（与 agent/host/macos/__init__.py 的 parse_task_tiers 规则相同）：entries 必需，
+/// experimental、excluded 可选（旧清单等于没有试用任务）；类型不对、空名字、重复、同一入口出现在多个档位都报错。
+pub fn parse_task_tiers(manifest_json: &str) -> Result<TaskTiers, String> {
+    let manifest: serde_json::Value =
+        load_task_list(manifest_json)?;
+    let object = manifest.as_object().ok_or("任务清单不是对象")?;
+    let names = |key: &str, required: bool| -> Result<Vec<String>, String> {
+        let value = match object.get(key) {
+            Some(value) => value,
+            None if required => return Err(format!("任务清单缺少 {}", key)),
+            None => return Ok(Vec::new()),
+        };
+        let items = value.as_array().ok_or(format!("任务清单的 {} 无效", key))?;
+        let mut out: Vec<String> = Vec::new();
+        for item in items {
+            let name = item.as_str().filter(|s| !s.is_empty()).ok_or(format!("任务清单的 {} 无效", key))?;
+            if out.iter().any(|seen| seen == name) {
+                return Err(format!("任务清单的 {} 有重复", key));
+            }
+            out.push(name.to_string());
+        }
+        Ok(out)
+    };
+    let verified = names("entries", true)?;
+    let experimental = names("experimental", false)?;
+    let mut excluded = std::collections::BTreeMap::new();
+    if let Some(value) = object.get("excluded") {
+        let map = value.as_object().ok_or("任务清单的 excluded 无效")?;
+        for (entry, reason) in map {
+            let reason = reason.as_str().filter(|s| !s.is_empty()).ok_or("任务清单的 excluded 无效")?;
+            if entry.is_empty() {
+                return Err("任务清单的 excluded 无效".to_string());
+            }
+            excluded.insert(entry.clone(), reason.to_string());
+        }
+    }
+    let overlaps = verified.iter().any(|e| experimental.contains(e))
+        || verified.iter().chain(experimental.iter()).any(|e| excluded.contains_key(e));
+    if overlaps {
+        return Err("任务清单里同一入口出现在多个档位".to_string());
+    }
+    Ok(TaskTiers { verified, experimental, excluded })
+}
+
+/// 清单里给用户看的任务说明（notes，入口到说明），可选；类型不对、空名字或空说明时报错。
+/// 只用于界面标记，不影响哪些任务能运行（运行与否只看 parse_task_tiers）。
+pub fn parse_task_notes(manifest_json: &str) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let manifest: serde_json::Value =
+        load_task_list(manifest_json)?;
+    let mut notes = std::collections::BTreeMap::new();
+    if let Some(value) = manifest.get("notes") {
+        let map = value.as_object().ok_or("任务清单的 notes 无效")?;
+        for (entry, note) in map {
+            let note = note.as_str().filter(|s| !s.is_empty()).ok_or("任务清单的 notes 无效")?;
+            if entry.is_empty() {
+                return Err("任务清单的 notes 无效".to_string());
+            }
+            notes.insert(entry.clone(), note.to_string());
+        }
+    }
+    Ok(notes)
+}
+
+/// 界面用来标记任务的 Mac 任务档位（桌面命令 get_macos_task_tiers 与 GET /api/macos/task-tiers 返回）。
+/// 四个字段全空表示没有档位、不做任何标记（Windows/Linux 始终如此）；error 存在时表示 Mac 上清单读不出来，
+/// 界面显示它，此时档位为空，任务仍由 platform_refuses_task 在下发前拒绝。
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+pub struct TaskTiersView {
+    pub verified: Vec<String>,
+    pub experimental: Vec<String>,
+    pub excluded: std::collections::BTreeMap<String, String>,
+    pub notes: std::collections::BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl TaskTiersView {
+    fn unreadable(reason: &str) -> Self {
+        TaskTiersView { error: Some(format!("无法读取 Mac 任务清单（{}）", reason)), ..Default::default() }
+    }
+}
+
+/// 从清单内容得到界面用的档位；清单或其中的 notes 无效时返回只带 error 的结果。
+pub fn task_tiers_view(manifest_json: &str) -> TaskTiersView {
+    match parse_task_tiers(manifest_json).and_then(|tiers| Ok((tiers, parse_task_notes(manifest_json)?))) {
+        Ok((tiers, notes)) => TaskTiersView {
+            verified: tiers.verified,
+            experimental: tiers.experimental,
+            excluded: tiers.excluded,
+            notes,
+            error: None,
+        },
+        Err(e) => TaskTiersView::unreadable(&e),
+    }
+}
+
+/// 当前后端系统的任务档位：macOS 读取 agent/host/macos/preview_tasks.json，其他系统返回全空（不做标记）。
+pub fn macos_task_tiers() -> TaskTiersView {
+    #[cfg(target_os = "macos")]
+    {
+        match get_exe_directory().and_then(|root| {
+            std::fs::read_to_string(root.join(MACOS_PREVIEW_TASKS)).map_err(|e| e.to_string())
+        }) {
+            Ok(json) => task_tiers_view(&json),
+            Err(e) => TaskTiersView::unreadable(&e),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        TaskTiersView::default()
+    }
+}
+
+/// 该入口在 macOS 上是否可以运行（已验证或试用）；清单无效时报错。
+pub fn preview_task_allowed(manifest_json: &str, entry: &str) -> Result<bool, String> {
+    let tiers = parse_task_tiers(manifest_json)?;
+    Ok(tiers.verified.iter().chain(tiers.experimental.iter()).any(|e| e == entry))
+}
+
+/// 把 agent 的运行计划（PI_MAANIKKI_RUN_PLAN 的 JSON）中的任务入口换成实际会执行的那些；
+/// 无法解析时原样返回。
+pub fn run_plan_with_entries(plan: &str, entries: &[&str]) -> String {
+    match serde_json::from_str::<serde_json::Value>(plan) {
+        Ok(mut value) if value.is_object() => {
+            value["entries"] = serde_json::json!(entries);
+            value.to_string()
+        }
+        _ => plan.to_string(),
+    }
+}
+
+/// 当前系统不能运行该任务入口时返回原因（直接显示给用户）；能运行时返回 None。
+///
+/// Windows 上始终放行，行为不变。macOS 只放行 agent/host/macos/preview_tasks.json 中的入口，
+/// 清单缺失或无法解析时一律拒绝。在下发任务之前检查，覆盖已保存的预设、定时运行、功能入口和
+/// MXU 内置任务（例如 MXU_LAUNCH），这些都不一定经过 agent。
+pub fn platform_refuses_task(entry: &str) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        // 开发构建（tauri dev）专用：在有人值守的实机测试中放行尚未验证的任务。发布构建忽略它，
+        // 也不把它传给 agent（见 maa_agent.rs）。
+        #[cfg(debug_assertions)]
+        if let Ok(extra) = std::env::var(MACOS_EXTRA_TASKS_ENV) {
+            if extra_tasks_allow(&extra, entry) {
+                log::warn!("[dev] {} 放行未验证的 Mac 任务：{}", MACOS_EXTRA_TASKS_ENV, entry);
+                return None;
+            }
+        }
+        let tiers = get_exe_directory()
+            .and_then(|root| {
+                std::fs::read_to_string(root.join(MACOS_PREVIEW_TASKS)).map_err(|e| e.to_string())
+            })
+            .and_then(|json| parse_task_tiers(&json));
+        match tiers {
+            Ok(tiers) if tiers.verified.iter().chain(tiers.experimental.iter()).any(|e| e == entry) => None,
+            Ok(tiers) => Some(match tiers.excluded.get(entry) {
+                Some(reason) => format!("{} 不在 Mac 测试预览版开放：{}已跳过。", entry, reason),
+                None => format!("{} 暂不支持 Mac 测试预览版，已跳过。", entry),
+            }),
+            Err(e) => Some(format!("无法读取 Mac 任务清单（{}），已跳过 {}。", e, entry)),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = entry;
+        None
+    }
+}
+
 /// 获取应用数据目录
-/// - macOS: ~/Library/Application Support/MXU/
+/// - macOS: ~/Library/Application Support/MaaNikki/
 /// - Windows/Linux: exe 所在目录（保持便携式部署）
 pub fn get_app_data_dir() -> Result<PathBuf, String> {
     #[cfg(target_os = "macos")]
@@ -286,7 +584,7 @@ pub fn get_app_data_dir() -> Result<PathBuf, String> {
         let path = PathBuf::from(home)
             .join("Library")
             .join("Application Support")
-            .join("MXU");
+            .join(MACOS_DATA_DIR_NAME);
         Ok(path)
     }
 
@@ -451,4 +749,128 @@ pub fn build_launch_command(
     }
 
     cmd
+}
+
+#[cfg(test)]
+mod preview_task_tests {
+    use super::{extra_tasks_allow, preview_task_allowed};
+
+    #[test]
+    fn the_shared_manifest_parses_and_allows_only_listed_entries() {
+        let manifest = include_str!("../../../../agent/host/macos/preview_tasks.json");
+        for entry in ["MaaNikki_Mailbox", "MaaNikki_WeeklyFreeGifts", "MaaNikki_MonthlyPass", "MaaNikki_CollectStarlightCrystals",
+                      "MaaNikki_Home", "MaaNikki_Dig", "MaaNikki_RedeemCodes"] {
+            assert_eq!(preview_task_allowed(manifest, entry), Ok(true), "{}", entry);
+        }
+        for entry in ["MXU_LAUNCH", "MaaNikki_StartGame", "MaaNikki_CloseGame", "MaaNikki_Fishing",
+                      "MaaNikki_MonthlyCrystalExchange", "MaaNikki_RouteTest", ""] {
+            assert_eq!(preview_task_allowed(manifest, entry), Ok(false), "{}", entry);
+        }
+        let tiers = super::parse_task_tiers(manifest).unwrap();
+        assert_eq!(tiers.verified.len(), 4);
+        assert!(tiers.excluded.contains_key("MaaNikki_MonthlyCrystalExchange"));
+    }
+
+    #[test]
+    fn the_list_file_refuses_duplicate_keys_and_nan() {
+        use super::parse_task_tiers;
+        for raw in [r#"{"entries":["A"],"notes":NaN}"#, r#"{"entries":["A"],"excluded":{"A":"why"},"excluded":{}}"#,
+                    r#"{"entries":["A"],"entries":["B"]}"#, r#"{"entries":["A"],"excluded":{"B":"x","B":"y"}}"#] {
+            assert!(parse_task_tiers(raw).is_err(), "{}", raw);
+        }
+        assert_eq!(parse_task_tiers(r#"{"entries":["A"]}"#).unwrap().verified, vec!["A".to_string()]);
+    }
+
+    #[test]
+    fn the_tier_list_is_parsed_strictly() {
+        use super::parse_task_tiers;
+        assert_eq!(parse_task_tiers(r#"{"entries":["A"]}"#).unwrap().experimental.len(), 0);
+        for bad in [r#"null"#, r#"[]"#, r#"{}"#, r#"{"entries":"A"}"#, r#"{"entries":["A",1]}"#, r#"{"entries":["A","A"]}"#,
+                    r#"{"entries":[""]}"#, r#"{"entries":["A"],"experimental":"B"}"#, r#"{"entries":["A"],"experimental":["A"]}"#,
+                    r#"{"entries":["A"],"excluded":{"A":"why"}}"#, r#"{"entries":["A"],"excluded":{"B":""}}"#,
+                    r#"{"entries":["A"],"excluded":["B"]}"#] {
+            assert!(parse_task_tiers(bad).is_err(), "{}", bad);
+        }
+    }
+
+    #[test]
+    fn the_run_plan_lists_only_the_tasks_that_will_run() {
+        use super::run_plan_with_entries;
+        let plan = r#"{"schema_version":1,"id":"x","instance":"i","entries":["MaaNikki_Mailbox","MaaNikki_RealmChallenge"]}"#;
+        let rewritten: serde_json::Value =
+            serde_json::from_str(&run_plan_with_entries(plan, &["MaaNikki_Mailbox"])).unwrap();
+        assert_eq!(rewritten["entries"], serde_json::json!(["MaaNikki_Mailbox"]));
+        assert_eq!(rewritten["id"], "x");
+        assert_eq!(run_plan_with_entries("not json", &["a"]), "not json");
+    }
+
+    #[test]
+    fn the_dev_switch_lists_exact_entries() {
+        assert!(extra_tasks_allow("MaaNikki_Dig, MaaNikki_MonthlyPass", "MaaNikki_MonthlyPass"));
+        assert!(!extra_tasks_allow("MaaNikki_Dig", "MaaNikki_Di"));
+        assert!(!extra_tasks_allow("", ""));
+        assert!(!extra_tasks_allow(" , ", ""));
+    }
+
+    #[test]
+    fn the_shared_manifest_gives_the_ui_its_tiers_and_notes() {
+        let manifest = include_str!("../../../../agent/host/macos/preview_tasks.json");
+        let view = super::task_tiers_view(manifest);
+        assert_eq!(view.error, None);
+        assert_eq!(view.verified, super::parse_task_tiers(manifest).unwrap().verified);
+        assert!(view.experimental.iter().any(|e| e == "MaaNikki_MinigameBling"));
+        assert!(view.excluded.contains_key("MaaNikki_StartGame"));
+        assert!(view.notes.contains_key("MaaNikki_CollectStarlightCrystals"));
+        // Every experimental entry with consequences carries its note, so the UI has one source for them.
+        for entry in ["MaaNikki_MinigameBling", "MaaNikki_Crown", "MaaNikki_Home", "MaaNikki_Zhaoxi",
+                      "MaaNikki_OpenWorldCollect", "MaaNikki_PersistentAbilities", "MaaNikki_RouteRun",
+                      "MaaNikki_Xinghai", "MaaNikki_RedeemCodes", "MaaNikki_RealmChallenge"] {
+            assert!(view.experimental.iter().any(|e| e == entry), "{}", entry);
+            assert!(view.notes.contains_key(entry), "{}", entry);
+        }
+        let json = serde_json::to_value(&view).unwrap();
+        assert!(json.get("error").is_none());
+        assert!(json["notes"].is_object() && json["excluded"].is_object());
+    }
+
+    #[test]
+    fn an_unreadable_manifest_gives_the_ui_an_error_and_no_tiers() {
+        use super::task_tiers_view;
+        for bad in ["not json", "{}", r#"{"entries":["A"],"notes":["x"]}"#, r#"{"entries":["A"],"notes":{"A":""}}"#,
+                    r#"{"entries":["A"],"notes":{"A":1}}"#] {
+            let view = task_tiers_view(bad);
+            assert!(view.error.as_deref().unwrap_or("").starts_with("无法读取 Mac 任务清单"), "{}", bad);
+            assert!(view.verified.is_empty() && view.experimental.is_empty() && view.excluded.is_empty()
+                && view.notes.is_empty(), "{}", bad);
+        }
+        let view = task_tiers_view(r#"{"entries":["A"]}"#);
+        assert_eq!(view.error, None);
+        assert!(view.notes.is_empty());
+    }
+
+    /// The Windows contract: no tiers, no markings.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn other_platforms_get_no_tiers() {
+        let view = super::macos_task_tiers();
+        assert_eq!(view, super::TaskTiersView::default());
+        assert_eq!(serde_json::to_value(&view).unwrap(),
+                   serde_json::json!({ "verified": [], "experimental": [], "excluded": {}, "notes": {} }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_reads_the_shipped_manifest() {
+        if std::env::var_os("MAANIKKI_DEV_HOME").is_some() {
+            return; // A dev home holds its own copy of the manifest.
+        }
+        let manifest = include_str!("../../../../agent/host/macos/preview_tasks.json");
+        assert_eq!(super::macos_task_tiers(), super::task_tiers_view(manifest));
+    }
+
+    #[test]
+    fn a_broken_manifest_is_an_error() {
+        assert!(preview_task_allowed("{}", "MaaNikki_Mailbox").is_err());
+        assert!(preview_task_allowed("not json", "MaaNikki_Mailbox").is_err());
+    }
 }

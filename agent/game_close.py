@@ -4,6 +4,10 @@ The state machine has no MaaFramework or ctypes dependency so it can be
 tested offline; the Win32 binding (host/win32/close.py, from host.game_close_api())
 and the launcher discovery sources (host/win32/launcher.py) are the only parts
 that touch the operating system.
+
+The game identity below (window class, executables, launcher) is the Windows
+client's. It is only reached through the close_game capability, which only the
+Win32 backend has; another platform's close support would bring its own.
 """
 from __future__ import annotations
 

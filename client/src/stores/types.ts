@@ -169,7 +169,7 @@ export interface AppState {
   projectInterface: ProjectInterface | null;
   interfaceTranslations: Record<string, Record<string, string>>;
   basePath: string; // exe 所在目录（资源路径）
-  dataPath: string; // 数据目录（macOS: ~/Library/Application Support/MXU/，其他平台同 basePath）
+  dataPath: string; // 数据目录（macOS: ~/Library/Application Support/MaaNikki/，其他平台同 basePath）
   setProjectInterface: (pi: ProjectInterface) => void;
   setInterfaceTranslations: (lang: string, translations: Record<string, string>) => void;
   setBasePath: (path: string) => void;
@@ -428,6 +428,10 @@ export interface AppState {
   backendOS: string;
   backendArch: string;
   setBackendOS: (os: string, arch: string) => void;
+
+  /** Mac 任务档位（只在 macOS 后端加载，不持久化；null = 未加载，Windows 始终为 null，不做任何标记） */
+  macTaskTiers: import('@/utils/macTaskTiers').MacTaskTiers | null;
+  setMacTaskTiers: (tiers: import('@/utils/macTaskTiers').MacTaskTiers | null) => void;
 
   // 托盘设置
   minimizeToTray: boolean;

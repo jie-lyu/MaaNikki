@@ -10,12 +10,29 @@ import traceback
 from weakref import WeakSet
 
 from client_config import node_action_params
+from host import native_key
 from navigation.models import GameWindowClosed, NavigationError
 from game_view import GameFrameSizeError, require_game_frame
 from message_log import write_message
 from diagnostics import FailureEvidence
 from performance import count
 
+
+
+def focus_lost_mode(mode) -> str:
+    """The FocusLostBehavior option as this desktop can honour it.
+
+    Background running needs window-targeted input (host capability background_input); where there
+    is none (macOS), a saved "background" choice behaves like the default "pause" instead of failing
+    every task that would build a BackgroundInput.
+    """
+    if mode not in {"pause", "return", "background"}:
+        return "pause"
+    if mode == "background":
+        from host import capabilities, platform_backend
+        if not capabilities(platform_backend()).background_input:
+            return "pause"
+    return mode
 
 class TaskStopped(NavigationError):
     pass
@@ -94,6 +111,12 @@ class ForegroundSession:
             raise TaskStopped(self._frame_failure)
         try:
             require_game_frame(frame)
+            from host import connection_geometry_problem
+            problem = connection_geometry_problem(lambda: self.controller)
+            if problem:
+                # A same-size change (moved window, other display or scaling) still yields 1280x720
+                # frames, but the control unit refuses clicks until reconnect: stop like a bad frame.
+                raise GameFrameSizeError(problem)
         except GameFrameSizeError as error:
             self.evidence.save("frame_size", str(error), image=frame, generation=self.generation)
             message = f"任务已停止：{error}"
@@ -130,7 +153,7 @@ class ForegroundSession:
         def load():
             try:
                 mode = node_action_params(self.context, "MaaNikki_FocusLost").get("mode")
-                return mode if mode in {"pause", "return", "background"} else "pause"
+                return focus_lost_mode(mode)
             except Exception:
                 traceback.print_exc()
                 return "pause"
@@ -486,7 +509,7 @@ class ForegroundSession:
             self.started = True
             # Keep automatic startup focus only for foreground runs.
             if not bg_active and not adapter.foreground():
-                if not adapter.controller.post_key_up(18).wait().succeeded:
+                if not adapter.controller.post_key_up(native_key(18)).wait().succeeded:
                     raise NavigationError("未能自动聚焦游戏，请检查窗口连接。")
         if not self._background_observation and adapter.hung():
             hung_begin = wall_time.monotonic()

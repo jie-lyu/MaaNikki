@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from task_control import task_time as time
 
-from host import background_input_class, connect_target
+from host import background_input_class, connect_target, native_key
 from .models import GameWindowClosed, NavigationError
 from game_keys import Binding, GameKeys, MACRO_KEYS
 
@@ -146,16 +146,21 @@ class ForegroundInput:
         return {"hold_seconds": hold, "settle_seconds": settle,
                 "forward_input_seconds": released_at-started}
 
+    def _release_ignores_focus(self) -> bool:
+        """Whether releasing through the controller is safe without focus (host Target attribute)."""
+        return bool(getattr(getattr(self, "target", None), "release_ignores_focus", False))
+
     def release_key(self, key):
         if key not in self.held:
             return
         try:
-            if self.foreground():
+            if self.foreground() or self._release_ignores_focus():
                 try:
-                    released = self.controller.post_key_up(key).wait().succeeded
+                    released = self.controller.post_key_up(native_key(key)).wait().succeeded
                 except (OSError, RuntimeError, ValueError):
                     released = False
                 if not released:
+                    # The macOS unit may still count the key as down; it posts the next press again.
                     self.force_key_up(key)
             else:
                 self.force_key_up(key)
@@ -166,7 +171,7 @@ class ForegroundInput:
         if button not in self.buttons:
             return
         try:
-            if self.foreground():
+            if self.foreground() or self._release_ignores_focus():
                 try:
                     released = self.controller.post_touch_up(button).wait().succeeded
                 except (OSError, RuntimeError, ValueError):
@@ -192,6 +197,12 @@ class ForegroundInput:
             return True
         finally:
             self.release_mouse(button)
+
+    def scene_press_blocked(self):
+        """Whether the backend knows a scene button press would be refused right now (macOS: the cursor
+        is outside the game window). Backends without the notion (Win32) never block."""
+        blocked = getattr(self.native, "scene_press_blocked", None)
+        return callable(blocked) and blocked() is True  # only a backend's real answer; never a stand-in object
 
     def force_key_up(self, key):
         # Cleanup only: do not require a working Agent channel or refocus.
@@ -224,8 +235,9 @@ class ForegroundInput:
                 return
             self.mouse_down(binding.code)
             return
+        code = native_key(binding.code)  # an unmapped key raises before it counts as held
         self.held.add(binding.code)
-        if not self.controller.post_key_down(binding.code).wait().succeeded:
+        if not self.controller.post_key_down(code).wait().succeeded:
             raise NavigationError("宏按键输入失败。")
 
     def key_up(self, key):
@@ -239,7 +251,7 @@ class ForegroundInput:
             return
         if binding.code not in self.held:
             return
-        if not self.controller.post_key_up(binding.code).wait().succeeded:
+        if not self.controller.post_key_up(native_key(binding.code)).wait().succeeded:
             raise NavigationError("宏按键释放失败。")
         self.held.discard(binding.code)
 
@@ -249,7 +261,7 @@ class ForegroundInput:
             if binding.code in self.buttons:
                 self.mouse_up(binding.code)
         elif binding.code in self.held:
-            if not self.controller.post_key_up(binding.code).wait().succeeded:
+            if not self.controller.post_key_up(native_key(binding.code)).wait().succeeded:
                 raise NavigationError("按键释放失败。")
             self.held.discard(binding.code)
 
@@ -257,6 +269,10 @@ class ForegroundInput:
         if button not in (0, 1, 2, 3, 4):
             raise NavigationError("鼠标按键未登记。")
         self.check()
+        if self.scene_press_blocked():
+            # macOS: the control unit presses where the cursor is and refuses outside the game window; say
+            # what to do instead of a generic failure. Nothing was pressed, so nothing is tracked.
+            raise NavigationError("鼠标指针不在游戏画面内，无法按场景鼠标键；请把鼠标指针移回游戏窗口后重新开始。")
         self.buttons.add(button)
         # Press only; the backend never moves the cursor (that could turn the camera).
         if not self.native.press_mouse(button):

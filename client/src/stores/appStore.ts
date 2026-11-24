@@ -1895,6 +1895,10 @@ export const useAppStore = create<AppState>()(
     backendArch: '',
     setBackendOS: (os, arch) => set({ backendOS: os, backendArch: arch }),
 
+    // Mac 任务档位（只在 macOS 后端加载，不持久化）
+    macTaskTiers: null,
+    setMacTaskTiers: (tiers) => set({ macTaskTiers: tiers }),
+
     // 是否为开机自启动模式
     isAutoStartMode: false,
     setIsAutoStartMode: (mode) => set({ isAutoStartMode: mode }),

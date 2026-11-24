@@ -4,6 +4,7 @@ import { primaryButton, secondaryButton } from '@/components/ui/FeaturePage';
 import { discardRecording, stopRouteSession, useRouteStudioStore } from '@/services/routeStudioService';
 import type { Checkpoint, RouteDocument } from '@/services/routeDocument';
 import { useAppStore } from '@/stores/appStore';
+import { useGameTargetUnsupportedReason } from '@/utils/macFeatures';
 import type { MapInfo } from './RouteMapCanvas';
 import { HOTKEY_LEGEND, formatGameKeyLabel, recordingStateText } from './routeEditorShared';
 
@@ -32,6 +33,7 @@ export function RouteSessionBar({
   onStartTeleport: (checkpoint?: Checkpoint) => void;
 }) {
   const { status, recording, finished, trial } = useRouteStudioStore();
+  const macUnsupported = useGameTargetUnsupportedReason();
   const mapKey = useAppStore((state) => {
     const saved = state.globalOptionValues.GameKeysPages;
     const raw = saved?.type === 'input' ? saved.values?.map : undefined;
@@ -105,8 +107,10 @@ export function RouteSessionBar({
         <option value="">起点：非传送点（需开大地图定位）</option>
         {known.map((cp) => <option key={cp.name} value={cp.name}>起点传送：{cp.name}</option>)}
       </select>}
-    <button onClick={onStartRecording} className="inline-flex items-center gap-2 rounded-lg bg-error px-3.5 py-1.5 text-xs font-medium text-white hover:opacity-90">
+    <button onClick={onStartRecording} disabled={macUnsupported ? true : undefined} title={macUnsupported || undefined}
+      className="inline-flex items-center gap-2 rounded-lg bg-error px-3.5 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50">
       <span className="h-2 w-2 rounded-full bg-white" />{segment ? '录制片段' : '开始录制'}
     </button>
+    {macUnsupported && <span className="text-xs text-warning">{macUnsupported}</span>}
   </div>;
 }

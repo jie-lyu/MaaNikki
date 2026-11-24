@@ -522,6 +522,10 @@ pub async fn run_action(
     wait_for_exit: bool,
     use_cmd: Option<bool>,
 ) -> Result<i32, String> {
+    // Mac 测试预览版不运行前置动作：已保存的配置多半来自 Windows（例如启动 .exe），且不经过任务清单。
+    if cfg!(target_os = "macos") {
+        return Err("Mac 测试预览版暂不支持前置动作（启动程序），已跳过。".to_string());
+    }
     let use_cmd = use_cmd.unwrap_or(false);
 
     info!(
@@ -995,6 +999,12 @@ pub fn get_arch() -> String {
 #[tauri::command]
 pub fn get_os() -> String {
     std::env::consts::OS.to_string()
+}
+
+/// 获取 Mac 任务档位（已验证、试用、不开放、说明），供界面标记任务；Windows/Linux 返回全空
+#[tauri::command]
+pub fn get_macos_task_tiers() -> super::utils::TaskTiersView {
+    super::utils::macos_task_tiers()
 }
 
 /// 获取系统信息

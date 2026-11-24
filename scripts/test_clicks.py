@@ -143,7 +143,8 @@ class ClickTests(unittest.TestCase):
         self.assertTrue(rt.ui.unhover())
         rt.controller.post_touch_move.assert_called_once_with(0, 0)
 
-    def test_unhover_moves_cursor_only_in_ui_and_never_after_stop(self):
+    @patch("host.platform_backend", return_value="win32")  # Windows parks the cursor; the Mac unit restores it
+    def test_unhover_moves_cursor_only_in_ui_and_never_after_stop(self, _backend):
         rt = self.runtime()
         rt.controller.post_touch_move = Mock()
         rt.controller.post_touch_move.return_value.wait.return_value.succeeded = True
@@ -249,8 +250,9 @@ class ClickTests(unittest.TestCase):
             state["time"] += .1
             return state["time"]
         rt.controller.post_key_up = Mock(side_effect=activate)
+        # Windows focuses through the Seize Alt key-up; pinned so the key id is the Win32 one on any OS.
         with patch("daily.startup.time.monotonic", side_effect=tick), \
-                patch("daily.startup.time.sleep"):
+                patch("daily.startup.time.sleep"), patch("host.platform_backend", return_value="win32"):
             focus_game(rt, inputs)
         rt.controller.post_key_up.assert_called_once_with(18)
         self.assertEqual(self.actions(rt), [])

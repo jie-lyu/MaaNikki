@@ -59,10 +59,22 @@ def is_local_helper(path: Path) -> bool:
             or (len(parts) >= 2 and parts[0] == ".github" and parts[1] in LOCAL_GITHUB_HELPERS))
 
 
+# Other platforms' host backends; the Windows package never loads them.
+NON_WINDOWS_RUNTIME = {("agent", "host", "macos")}
+
+
 def runtime_ignored(directory: str, names: list[str]) -> list[str]:
     return [name for name in names
             if name == "__pycache__" or name.endswith(".pyc")
-            or is_local_helper(Path(directory) / name)]
+            or is_local_helper(Path(directory) / name)
+            or _relative_parts(Path(directory) / name) in NON_WINDOWS_RUNTIME]
+
+
+def _relative_parts(path: Path) -> tuple[str, ...]:
+    try:
+        return path.relative_to(ROOT).parts
+    except ValueError:
+        return ()
 
 
 def read_json(path: Path):

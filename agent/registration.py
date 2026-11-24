@@ -2,10 +2,12 @@ from functools import wraps
 from copy import copy
 from contextlib import contextmanager
 from contextvars import ContextVar
-from threading import Event
+from collections import deque
+from threading import Event, Lock
 import traceback
 from performance import action_profile
 from game_view import ALLOWED_FRAME_SIZES, is_clipped_game_frame
+from host import capabilities, platform_backend, task_entry_supported, task_refusal_reason, task_start_notice
 from message_log import message_scope
 from task_control import TaskStopped, task_session
 
@@ -13,6 +15,10 @@ from maa.agent.agent_server import AgentServer
 
 
 _LOCAL_REGISTRATION = ContextVar("local_action_registration", default=False)
+# (task_id, entry) of tasks whose start notice was written: once per submitted task, however many of its
+# actions run (nested run_task calls report the outer task's entry). Bounded; old ids are long finished.
+_START_NOTICES = deque(maxlen=256)
+_START_NOTICES_LOCK = Lock()
 _ACTION_TYPES = {}
 _RECOGNITION_TYPES = {}
 
@@ -52,6 +58,25 @@ def local_registration(resource):
         _LOCAL_REGISTRATION.reset(token)
 
 
+def _write_start_notice(context, task_id, entry):
+    """Before the task's first action: macOS experimental tasks say so in their own instance's log, so a
+    scheduled run or a background instance shows it as well. Never raises into the action."""
+    if platform_backend() != "macos":
+        return  # Win32: no tiers, nothing to record or lock
+    key = (task_id, entry)
+    with _START_NOTICES_LOCK:
+        if key in _START_NOTICES:
+            return
+        _START_NOTICES.append(key)
+    try:
+        notice = task_start_notice(entry)
+        if notice:
+            context.run_task("MaaNikki_Daily_Message", {
+                "MaaNikki_Daily_Message": {"focus": {"Node.Action.Starting": notice}}})
+    except Exception:
+        traceback.print_exc()
+
+
 def agent_action(name, *, stop_on_failure=False):
     def register(cls):
         run = cls.run
@@ -59,6 +84,22 @@ def agent_action(name, *, stop_on_failure=False):
         @wraps(run)
         def guarded(self, context, argv):
             task_id = getattr(getattr(argv, "task_detail", None), "task_id", 0)
+            detail = getattr(argv, "task_detail", None)
+            entry = getattr(detail, "entry", None)
+            # MaaFramework always passes the task detail; only hand-built arguments (offline tests)
+            # lack it. With a detail, an unknown or missing entry is refused.
+            if detail is not None and not task_entry_supported(entry):
+                # Before any task code, input or capture: a saved preset, a schedule or a feature
+                # entry may ask for a task this desktop's backend does not support yet.
+                try:
+                    context.run_task("MaaNikki_Daily_Message", {
+                        "MaaNikki_Daily_Message": {"focus": {
+                            "Node.Action.Starting": f"{entry} 不在当前系统开放：{task_refusal_reason(entry)}"}}})
+                except Exception:
+                    traceback.print_exc()
+                return False
+            if detail is not None:
+                _write_start_notice(context, task_id, entry)
             succeeded = False
             with action_profile(argv.node_name) as profile, message_scope(argv.node_name):
                 try:
@@ -142,7 +183,7 @@ def agent_recognition(name):
                             if (
                                 (argv.image.shape[1], argv.image.shape[0]) not in ALLOWED_FRAME_SIZES
                                 or is_clipped_game_frame(argv.image)
-                            ):
+                            ) and capabilities(platform_backend()).tall_window:
                                 from tall_window import ensure_16_9_window
                                 adjusted = ensure_16_9_window(
                                     session.controller,

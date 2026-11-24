@@ -60,12 +60,9 @@ def active_controller(root: Path) -> dict | None:
 
 
 def supports_foreground_inputs(controller):
-    if not isinstance(controller, dict) or controller.get("type") != "Win32":
-        return False
-    win32 = controller.get("win32")
-    allowed = {"Seize", "SeizeWithBlockInput"}
-    return (isinstance(win32, dict) and win32.get("mouse") in allowed
-            and win32.get("keyboard") in allowed)
+    """Whether the saved controller lets the agent drive foreground input; the host backend decides."""
+    from host import controller_supports_foreground_input
+    return controller_supports_foreground_input(controller)
 
 
 def task_options(task: dict, definitions: dict) -> dict:

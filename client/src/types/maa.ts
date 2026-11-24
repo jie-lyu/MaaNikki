@@ -181,28 +181,40 @@ export const Win32InputMethodNames: Record<string, bigint> = {
   Interception: Win32InputMethod.Interception,
 };
 
-/** macOS 截图方法 */
+/**
+ * macOS 截图方法
+ * DisplayWindow 只有 MaaNikki 自编译的控制模块认识（native/macos-control-unit/）：
+ * 按窗口所在显示器过滤出这一个窗口并按真实像素截图。官方控制模块收到它时不截图。
+ */
 export const MacOSScreencapMethod = {
   None: 0n,
   ScreenCaptureKit: 1n,
+  DisplayWindow: 1n << 1n,
 } as const;
 
-/** macOS 输入方法 */
+/**
+ * macOS 输入方法
+ * Hybrid（GlobalEvent | PostToPid）只有 MaaNikki 自编译的控制模块认识：按键发给游戏进程，
+ * 鼠标走全局事件且不激活窗口，必须与 DisplayWindow 截图一起使用。官方控制模块收到它时不发送输入。
+ */
 export const MacOSInputMethod = {
   None: 0n,
   GlobalEvent: 1n,
   PostToPid: 1n << 1n,
+  Hybrid: 1n | (1n << 1n),
 } as const;
 
 /** macOS 截图方法名称映射 */
 export const MacOSScreencapMethodNames: Record<string, bigint> = {
   ScreenCaptureKit: MacOSScreencapMethod.ScreenCaptureKit,
+  DisplayWindow: MacOSScreencapMethod.DisplayWindow,
 };
 
 /** macOS 输入方法名称映射 */
 export const MacOSInputMethodNames: Record<string, bigint> = {
   GlobalEvent: MacOSInputMethod.GlobalEvent,
   PostToPid: MacOSInputMethod.PostToPid,
+  Hybrid: MacOSInputMethod.Hybrid,
 };
 
 /** 解析 Win32 截图方法名称，支持单个字符串或字符串数组（数组时按位或合并） */

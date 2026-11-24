@@ -1,11 +1,9 @@
 """「关闭游戏」任务：只关闭当前控制器连接的游戏实例。"""
 from __future__ import annotations
 
-import os
-
 from client_config import parse_custom_param
 from daily.runtime import Runtime
-from host import game_close_api
+from host import capabilities, game_close_api, platform_backend
 from game_close import (bound_game_hwnd, bring_maannikki_forward,
                         close_connected_game, close_launcher, launcher_eligible,
                         resolve_official_launcher)
@@ -38,7 +36,7 @@ class CloseGameAction(CustomAction):
         except ValueError as error:
             runtime.log(f"关闭游戏参数无效：{error}")
             return False
-        if os.name != "nt":
+        if not capabilities(platform_backend()).close_game:
             runtime.log("关闭游戏任务仅支持 Windows。")
             return False
         force = options.get("force_on_timeout") is True
