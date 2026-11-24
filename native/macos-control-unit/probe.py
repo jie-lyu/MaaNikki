@@ -462,13 +462,16 @@ def cmd_input_check(args) -> int:
         fail("the click was refused or the map is still open")
 
     if args.release:
-        # The same band's change between two still frames a second apart, before W: idle animation,
-        # grass and lighting move it too (8% at night on the device), so the release is judged against it.
-        band = (slice(100, 330), slice(700, 1280))
+        # Walking moves the whole view; standing still changes the full frame by about 5% (idle
+        # animation, grass, lighting; measured on the device), a camera turn by 55%. Judge on the full
+        # frame against its own change between two still frames before W, and say when that change is
+        # too large to tell walking from standing.
         still_a = frame("ambient-a")
         time.sleep(1.0)
         still_b = frame("ambient-b")
-        ambient = _changed(still_a[band], still_b[band])
+        ambient = _changed(still_a, still_b)
+        if ambient > 20:
+            fail(f"cannot judge the W release: the scene changed {ambient}% between two still frames before W")
         # Hold W, then destroy the controller without a key-up: the unit must release W itself.
         sent = controller.post_key_down(KEY_W).wait().succeeded
         time.sleep(0.6)
@@ -483,12 +486,11 @@ def cmd_input_check(args) -> int:
             fail("no frames after the destroy")
         cv2.imwrite(str(out / "release-settled.png"), settled)
         cv2.imwrite(str(out / "release-later.png"), later)
-        # Walking moves the whole view; standing still changes the band about as much as before W.
-        limit = max(5.0, ambient * 1.5 + 2)
+        limit = max(20.0, ambient * 2 + 5)
         steps.append({"step": "W held across destroy", "sent": sent, "ambient_changed_pct": ambient,
-                      "background_changed_pct": _changed(settled[band], later[band]), "limit_pct": round(limit, 1)})
-        if not sent or steps[-1]["background_changed_pct"] > limit:
-            fail("W was refused, or the scene still moves after the destroy (W may be held)")
+                      "scene_changed_pct": _changed(settled, later), "limit_pct": round(limit, 1)})
+        if not sent or steps[-1]["scene_changed_pct"] > limit:
+            fail("W was refused, or the whole view still moves after the destroy (W may be held)")
     print(json.dumps(steps, ensure_ascii=False, indent=2))
     print(f"frames and maafw.log in {out}")
     return 0
@@ -576,13 +578,19 @@ def cmd_camera_check(args) -> int:
         return after
 
     if args.option:
-        # The navigation engine's order: release the cursor mode with Option, then turn.
+        # An experiment on the Option key, not the navigation order (navigation sends no Option on
+        # macOS): Option, then a 1-pixel move to spend the move the game swallows after Option
+        # (device, 2026-11-24), then the turn.
         option_press("option-before-turn")
-        # The game swallows the first relative move after an Option press (device, 2026-11-24): spend
-        # it on 1 pixel so the turn below is judged on its own.
+        after_option = _cursor()  # Option moves the pointer to the window centre
+        steps.append({"step": "cursor after Option", "cursor": after_option})
         if not controller.post_relative_move(1, 0).wait().succeeded:
             fail("the unit refused the absorbing move")
         time.sleep(0.4)
+        absorbed = _cursor()
+        steps.append({"step": "absorbing move +1", "cursor": absorbed})
+        if abs(absorbed[0] - after_option[0]) > 1 or abs(absorbed[1] - after_option[1]) > 1:
+            fail("the real cursor moved after the absorbing move: relative moves must not move it")
         start = frame("after-absorb")
 
     # Every step is judged before the next input is sent: the first anomaly stops the probe.
@@ -643,7 +651,7 @@ def main() -> int:
         if name == "camera-check":
             command.add_argument("--pixels", type=int, default=400, help="relative move each way (the plan measured 400)")
             command.add_argument("--option", action="store_true",
-                                 help="press Option before the turn (as the navigation engine does) and once more after it")
+                                 help="experiment: Option, a 1-pixel absorbing move, the turn, Option again (navigation sends no Option on macOS)")
         if name == "input-check":
             command.add_argument("--release", action="store_true",
                                  help="also hold W across a controller destroy (the character walks briefly)")
