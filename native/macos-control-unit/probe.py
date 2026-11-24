@@ -708,18 +708,24 @@ def cmd_scene_button_check(args) -> int:
     still = frame("still")
     ambient = _changed(start[band], still[band])
     turn_limit = max(20.0, ambient * 3 + 5)
+    if args.no_turn:
+        # The camera is already turned away (checked from a capture before the run): no relative move
+        # at all, the press alone is judged against the still frames.
+        turned = still
+        steps.append({"step": "no turn", "ambient_changed_pct": ambient, "change_limit_pct": round(turn_limit, 1)})
     # Turn away first, so that a recentre has something to undo.
-    if not controller.post_relative_move(args.pixels, 0).wait().succeeded:
+    elif not controller.post_relative_move(args.pixels, 0).wait().succeeded:
         fail("the unit refused the relative move")
-    time.sleep(0.8)
-    turned = frame("turned-away")
-    turn_pct = _changed(still[band], turned[band])
-    steps.append({"step": f"relative move +{args.pixels}", "ambient_changed_pct": ambient, "scene_changed_pct": turn_pct,
-                  "turn_limit_pct": round(turn_limit, 1), "cursor": _cursor()})
-    if turn_pct <= turn_limit:
-        fail("no clear camera turn (no more change than standing still); no button pressed")
-    if abs(steps[-1]["cursor"][0] - cursor[0]) > 1 or abs(steps[-1]["cursor"][1] - cursor[1]) > 1:
-        fail("the real cursor moved with the relative move; no button pressed")
+    if not args.no_turn:
+        time.sleep(0.8)
+        turned = frame("turned-away")
+        turn_pct = _changed(still[band], turned[band])
+        steps.append({"step": f"relative move +{args.pixels}", "ambient_changed_pct": ambient, "scene_changed_pct": turn_pct,
+                      "turn_limit_pct": round(turn_limit, 1), "cursor": _cursor()})
+        if turn_pct <= turn_limit:
+            fail("no clear camera turn (no more change than standing still); no button pressed")
+        if abs(steps[-1]["cursor"][0] - cursor[0]) > 1 or abs(steps[-1]["cursor"][1] - cursor[1]) > 1:
+            fail("the real cursor moved with the relative move; no button pressed")
     button = SCENE_BUTTONS[args.button]
     attempted = pressed = released = False
     try:
@@ -755,8 +761,8 @@ def cmd_scene_button_check(args) -> int:
         fail("the unit refused the scene press (see maafw.log for the reason)")
     if abs(after_cursor[0] - cursor[0]) > 1 or abs(after_cursor[1] - cursor[1]) > 1:
         fail("the real cursor moved: a scene press must not move it")
-    if steps[-1]["scene_changed_pct"] < 1:
-        fail(f"no recentre observed: the {args.button} press was accepted but nothing changed on screen")
+    if steps[-1]["scene_changed_pct"] < 1 or (args.no_turn and steps[-1]["scene_changed_pct"] <= turn_limit):
+        fail(f"no recentre observed: the {args.button} press was accepted but the screen changed no more than standing still")
     steps.append({"verdict": "needs_review", "frames": str(out)})
     print(json.dumps(steps, ensure_ascii=False, indent=2))
     print(f"needs review: frames in {out}. For the middle button the camera should swing back behind the "
@@ -794,6 +800,8 @@ def main() -> int:
         if name == "scene-button-check":
             command.add_argument("--button", choices=sorted(SCENE_BUTTONS), default="middle",
                                  help="scene button to press where the cursor is (middle: the camera recentre)")
+            command.add_argument("--no-turn", action="store_true",
+                                 help="no relative move: the camera is already turned away; judge the press alone")
         if name == "camera-check":
             command.add_argument("--option", action="store_true",
                                  help="experiment: Option, a 1-pixel absorbing move, the turn, Option again (navigation sends no Option on macOS)")
