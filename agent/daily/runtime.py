@@ -725,12 +725,20 @@ class Runtime:
         a Stop cannot interrupt part-way; submitting characters separately lets a Stop end the text at the
         next character. The pause keeps each character in its own game frame.
         """
+        start = getattr(self, "_focus_generation", 0)
+
+        def focus_kept():
+            # A focus loss and return part-way (the user may have clicked another field to bring the game
+            # back) ends the text; the caller revalidates the partly filled field.
+            if self.check_focus() or getattr(self, "_focus_generation", 0) != start:
+                self.log("输入文字时游戏离开过前台，已停止输入，剩余文字没有输入。")
+                return False
+            return True
         with measure("input.text"):
             for index, character in enumerate(str(content)):
-                if self.stopped:
+                if self.stopped or not focus_kept():
                     return False
-                self.check_focus()
-                if index and not self.pause(.03):
+                if index and (not self.pause(.03) or not focus_kept()):
                     return False
                 if not self.controller.post_input_text(character).wait().succeeded:
                     return False

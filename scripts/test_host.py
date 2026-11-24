@@ -565,6 +565,14 @@ class TaskAllowlistTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 parse_task_tiers(bad)
 
+    def test_the_list_file_refuses_duplicate_keys_and_nan(self):
+        from host.macos import load_task_list, parse_task_tiers
+        for raw in ('{"entries":["A"],"notes":NaN}', '{"entries":["A"],"excluded":{"A":"why"},"excluded":{}}',
+                    '{"entries":["A"],"entries":["B"]}', '{"entries":["A"],"excluded":{"B":"x","B":"y"}}'):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                parse_task_tiers(load_task_list(raw))
+        self.assertEqual(parse_task_tiers(load_task_list('{"entries":["A"]}'))[0], frozenset({"A"}))
+
     def test_a_malformed_list_refuses_everything_on_macos(self):
         with patch.dict(os.environ), backend("macos"), \
                 patch("host.macos.task_tiers", side_effect=ValueError("bad")):
@@ -623,7 +631,7 @@ class TaskAllowlistTests(unittest.TestCase):
         self.assertEqual(ran, [])
         message = context.run_task.call_args.args[1]["MaaNikki_Daily_Message"]["focus"]["Node.Action.Starting"]
         self.assertIn("MaaNikki_Fishing", message)
-        self.assertIn("暂不支持当前系统", message)
+        self.assertIn("不在当前系统开放", message)
         argv = SimpleNamespace(task_detail=SimpleNamespace(task_id=7, entry=None), node_name="X")
         with backend("macos"):
             self.assertFalse(Probe().run(context, argv))
@@ -1015,7 +1023,8 @@ class MacTextInputTests(unittest.TestCase):
                 rt.context.tasker.stopping = True
             return SimpleNamespace(wait=lambda: SimpleNamespace(succeeded=True))
         rt.controller = SimpleNamespace(post_input_text=post_input_text)
-        rt.check_focus = Mock()
+        rt.check_focus = Mock(return_value=False)
+        rt.log = Mock()
         rt.ensure_frame = Mock(return_value=True)
         rt.invalidate_frame = Mock()
         rt._active_inputs = Mock(return_value=None)
@@ -1035,6 +1044,15 @@ class MacTextInputTests(unittest.TestCase):
         with patch("daily.runtime.platform_backend", return_value="macos"), \
                 patch("daily.runtime.active_session", return_value=None):
             self.assertFalse(rt.input_text("abcdef"))
+        self.assertEqual(state["sent"], ["a"])
+
+    def test_a_focus_return_part_way_ends_mac_text(self):
+        rt, state = self.runtime()
+        rt.log = Mock()
+        rt.check_focus = Mock(side_effect=lambda: len(state["sent"]) == 1)  # lost and back after the first character
+        with patch("daily.runtime.platform_backend", return_value="macos"), \
+                patch("daily.runtime.active_session", return_value=None):
+            self.assertFalse(rt.input_text("abc"))
         self.assertEqual(state["sent"], ["a"])
 
     def test_windows_still_sends_the_whole_string_at_once(self):
@@ -1079,6 +1097,24 @@ class MacTextGateTests(unittest.TestCase):
             codes._fill_code("ABCD1234")
         codes.rt.action.assert_any_call("Click", target=redeem_codes.INPUT_BOX_TARGET)
 
+    def test_a_paste_is_only_trusted_when_the_field_reads_the_code(self):
+        from daily import redeem_codes
+        codes = redeem_codes.RedeemCodes.__new__(redeem_codes.RedeemCodes)
+        codes._modal_ready = Mock(return_value=True)
+        for read, expected in (("", False), ("ABCD123", False), ("ABCD 1234", True)):
+            with self.subTest(read=read):
+                codes.rt = SimpleNamespace(action=Mock(return_value=True), pause=Mock(return_value=True),
+                                           hit=Mock(return_value=False),  # placeholder missed: looks pasted
+                                           text=Mock(return_value=read), input_text=Mock(), log=Mock())
+                with backend("macos"), patch.object(redeem_codes, "set_clipboard_text", return_value=True):
+                    self.assertIs(codes._fill_code("ABCD1234"), expected)
+                codes.rt.input_text.assert_not_called()
+        codes.rt = SimpleNamespace(action=Mock(return_value=True), pause=Mock(return_value=True),
+                                   hit=Mock(return_value=False), text=Mock(return_value=""), log=Mock())
+        with backend("win32"), patch.object(redeem_codes, "set_clipboard_text", return_value=True):
+            self.assertTrue(codes._fill_code("ABCD1234"))  # Win32: the placeholder check, as before
+        codes.rt.text.assert_not_called()
+
     def runtime_for_amount(self):
         from daily.runtime import Executors
         rt = Executors.__new__(Executors)
@@ -1114,6 +1150,29 @@ class MacTextGateTests(unittest.TestCase):
         self.assertFalse(result)
         context.override_pipeline.assert_not_called()  # no hand-off to the default realm
         self.assertIn("剩余活跃能量未使用", rt.log.call_args.args[0])
+
+    def test_a_cleanup_error_over_the_refusal_still_spends_nothing(self):
+        from action import realm_queue
+        from host import UnsupportedInput
+        from navigation.models import NavigationError
+
+        def refused_then_cleanup_fails(*args, **kwargs):
+            try:
+                try:
+                    raise UnsupportedInput("Mac 版暂不支持输入数量")
+                finally:
+                    raise NavigationError("leaving the realm failed")  # inner cleanup (jihua_leave)
+            finally:
+                raise RuntimeError("reopening the calendar failed")  # outer cleanup (ui.calendar)
+        rt = SimpleNamespace(log=Mock(), stopped=False, diagnostic=Mock())
+        context = Mock()
+        with patch.object(realm_queue, "Executors", return_value=rt), \
+                patch.object(realm_queue, "parameters", return_value={"order": "jihua"}), \
+                patch.object(realm_queue, "run_double_priority", side_effect=refused_then_cleanup_fails):
+            result = realm_queue.RealmQueueAction().run(context, SimpleNamespace(node_name="MaaNikki_RealmQueue"))
+        self.assertFalse(result)
+        context.override_pipeline.assert_not_called()
+        rt.diagnostic.assert_not_called()
 
 
 class MiddleAlignFallbackTests(unittest.TestCase):

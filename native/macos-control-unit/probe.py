@@ -1070,6 +1070,14 @@ def cmd_text_input_check(args) -> int:
     reads the field back by OCR. Stops at the first refusal or unexpected page.
     """
     ui = _UiSession(args)
+    info = ui.controller.info
+    try:
+        patch = (json.loads(info) if isinstance(info, str) else info).get("maanikki_patch")
+    except (ValueError, AttributeError, TypeError):
+        patch = None
+    ui.steps.append({"step": "unit", "maanikki_patch": patch})
+    if type(patch) is not int or patch < 4:
+        ui.fail("the connected unit does not report maanikki_patch >= 4 (per-character text input); nothing sent")
     start = ui.frame("start")
     if not ui.hit("MaaNikki_CompendiumSearchReady", start):
         ui.fail("the 博物图鉴 检索 page is not recognised (MaaNikki_CompendiumSearchReady); nothing sent")
