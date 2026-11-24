@@ -1217,10 +1217,10 @@ index 0000000..2f3f97e
 +MAA_CTRL_UNIT_NS_END
 diff --git a/source/MaaMacOSControlUnit/Input/InputPlatform.mm b/source/MaaMacOSControlUnit/Input/InputPlatform.mm
 new file mode 100644
-index 0000000..e811825
+index 0000000..768d6ad
 --- /dev/null
 +++ b/source/MaaMacOSControlUnit/Input/InputPlatform.mm
-@@ -0,0 +1,207 @@
+@@ -0,0 +1,218 @@
 +#include "InputPlatform.h"
 +
 +#include "MaaUtils/Logger.h"
@@ -1368,18 +1368,29 @@ index 0000000..e811825
 +
 +    bool post_text(pid_t pid, const std::vector<UniChar>& chars) override
 +    {
-+        for (bool down : { true, false }) {
-+            // Not 0, which is kVK_ANSI_A (a movement key in the game); F20 has no character and no binding.
-+            CGEventRef event = CGEventCreateKeyboardEvent(nullptr, kTextCarrierKey, down);
-+            if (!event) {
-+                LogError << "failed to create keyboard event";
-+                return false;
++        // Both events exist before either is posted: a down must never go out without its up (nothing
++        // records a text "key" as held, so inactive() could not release it).
++        // Not 0, which is kVK_ANSI_A (a movement key in the game); F20 has no character.
++        CGEventRef down = CGEventCreateKeyboardEvent(nullptr, kTextCarrierKey, true);
++        CGEventRef up = CGEventCreateKeyboardEvent(nullptr, kTextCarrierKey, false);
++        if (!down || !up) {
++            LogError << "failed to create keyboard events";
++            if (down) {
++                CFRelease(down);
 +            }
-+            CGEventKeyboardSetUnicodeString(event, chars.size(), chars.data());
-+            CGEventPostToPid(pid, event);
-+            CFRelease(event);
-+            usleep(10000);
++            if (up) {
++                CFRelease(up);
++            }
++            return false;
 +        }
++        CGEventKeyboardSetUnicodeString(down, chars.size(), chars.data());
++        CGEventKeyboardSetUnicodeString(up, chars.size(), chars.data());
++        CGEventPostToPid(pid, down);
++        usleep(10000);
++        CGEventPostToPid(pid, up);
++        usleep(10000);
++        CFRelease(down);
++        CFRelease(up);
 +        return true;
 +    }
 +

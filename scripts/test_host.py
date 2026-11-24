@@ -970,6 +970,52 @@ class ForegroundInputDelegationTests(unittest.TestCase):
         adapter.target.bring_to_foreground.assert_called_once_with(adapter.controller)
 
 
+class MacTextInputTests(unittest.TestCase):
+    """macOS: text goes to the unit one character per request so that a Stop ends it at the next character."""
+
+    def runtime(self, stop_after=None):
+        from daily.runtime import Runtime
+        rt = Runtime.__new__(Runtime)
+        rt.navigation_halted = False
+        state = {"stopping": False, "sent": []}
+        rt.context = SimpleNamespace(tasker=SimpleNamespace(stopping=False))
+
+        def post_input_text(text):
+            state["sent"].append(text)
+            if stop_after is not None and len(state["sent"]) >= stop_after:
+                rt.context.tasker.stopping = True
+            return SimpleNamespace(wait=lambda: SimpleNamespace(succeeded=True))
+        rt.controller = SimpleNamespace(post_input_text=post_input_text)
+        rt.check_focus = Mock()
+        rt.ensure_frame = Mock(return_value=True)
+        rt.invalidate_frame = Mock()
+        rt._active_inputs = Mock(return_value=None)
+        rt._use_window_input = Mock(return_value=False)
+        rt.pause = lambda seconds: not rt.context.tasker.stopping
+        return rt, state
+
+    def test_mac_sends_one_character_per_request(self):
+        rt, state = self.runtime()
+        with patch("daily.runtime.platform_backend", return_value="macos"), \
+                patch("daily.runtime.active_session", return_value=None):
+            self.assertTrue(rt.input_text("b1星"))
+        self.assertEqual(state["sent"], ["b", "1", "星"])
+
+    def test_a_stop_ends_mac_text_at_the_next_character(self):
+        rt, state = self.runtime(stop_after=1)
+        with patch("daily.runtime.platform_backend", return_value="macos"), \
+                patch("daily.runtime.active_session", return_value=None):
+            self.assertFalse(rt.input_text("abcdef"))
+        self.assertEqual(state["sent"], ["a"])
+
+    def test_windows_still_sends_the_whole_string_at_once(self):
+        rt, state = self.runtime()
+        with patch("daily.runtime.platform_backend", return_value="win32"), \
+                patch("daily.runtime.active_session", return_value=None):
+            self.assertTrue(rt.input_text("abc"))
+        self.assertEqual(state["sent"], ["abc"])
+
+
 class MiddleAlignFallbackTests(unittest.TestCase):
     """macOS: a scene press the unit would refuse (cursor outside the game window) must not stop navigation;
     the optional middle-button alignment is reported unavailable and the keyboard fallbacks run."""

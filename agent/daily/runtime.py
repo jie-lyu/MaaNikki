@@ -713,8 +713,28 @@ class Runtime:
         if self._use_window_input(inputs):
             with measure("input.text"):
                 return bool(inputs.input_window_text(content))
+        if platform_backend() == "macos":
+            return self._input_text_by_character(content)
         with measure("input.text"):
             return self.controller.post_input_text(content).wait().succeeded
+
+    def _input_text_by_character(self, content):
+        """macOS: one character per controller request, checking Stop and focus before each.
+
+        The patched unit posts each character as its own keyboard event, but one request is one job that
+        a Stop cannot interrupt part-way; submitting characters separately lets a Stop end the text at the
+        next character. The pause keeps each character in its own game frame.
+        """
+        with measure("input.text"):
+            for index, character in enumerate(str(content)):
+                if self.stopped:
+                    return False
+                self.check_focus()
+                if index and not self.pause(.03):
+                    return False
+                if not self.controller.post_input_text(character).wait().succeeded:
+                    return False
+        return not self.stopped
 
     def text(self, roi, expected=".+", image=None):
         result = self.recognize("MaaNikki_Daily_OCR", {"roi": roi, "expected": expected}, image)
