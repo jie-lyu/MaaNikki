@@ -530,7 +530,10 @@ class TaskAllowlistTests(unittest.TestCase):
             self.assertTrue(all(host.task_entry_supported(entry) for entry in entries + ["MaaNikki_GameKeysRead", None]))
         with patch.dict(os.environ), backend("macos"):
             os.environ.pop("MAANIKKI_MACOS_EXTRA_TASKS", None)
-            self.assertEqual([entry for entry in entries if host.task_entry_supported(entry)], ["MaaNikki_Mailbox"])
+            self.assertEqual({entry for entry in entries if host.task_entry_supported(entry)},
+                             {"MaaNikki_Mailbox", "MaaNikki_WeeklyFreeGifts", "MaaNikki_MonthlyPass"})
+            for unverified in ("MaaNikki_MonthlyCrystalExchange", "MaaNikki_Dig", "MaaNikki_PersistentAbilities", "MaaNikki_RouteTest"):
+                self.assertFalse(host.task_entry_supported(unverified), unverified)
             self.assertFalse(host.task_entry_supported("MaaNikki_GameKeysRead"))
             self.assertFalse(host.task_entry_supported(None))
 

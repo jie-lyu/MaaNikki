@@ -9,6 +9,7 @@ shows whether a self-built unit works with the stock core.
     python probe.py lifecycle --runtime DIR (--window ID | --game) --log-dir DIR --expect-unit SHA256|stock
     python probe.py capture --runtime DIR --game --out DIR
     python probe.py camera-check --profile maanikki --runtime DIR --game --out DIR [--option]
+    python probe.py scene-button-check --profile maanikki --runtime DIR --game --out DIR [--button middle]
 
 `lifecycle` connects, captures, destroys the controller, then connects and
 captures again, for each round. It passes only when every round connects and
@@ -628,10 +629,129 @@ def cmd_camera_check(args) -> int:
     return 0
 
 
+SCENE_PRESS_PRESSURE = 0x4D4E5343  # HybridInput::kScenePressPressure: press where the cursor is, no hover
+SCENE_BUTTONS = {"left": 0, "right": 1, "middle": 2}
+
+
+def _game_window_bounds(window_id: int):
+    """(x, y, width, height) of the connected window in global points, from the agent's Quartz helper."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "agent"))
+    from host.macos import quartz
+    window = quartz.window(window_id)
+    return window.bounds if window else None
+
+
+def cmd_scene_button_check(args) -> int:
+    """Turn the camera away, then press a scene mouse button where the cursor already is.
+
+    Verifies the patched unit's scene press (touch_down with kScenePressPressure: no hover move,
+    which would turn the camera) on the game without any outfit: the middle button recentres the
+    camera behind the character. Sends one relative move (verified on the device) and one press and
+    release of that button. Spends nothing in the game.
+    """
+    import cv2
+    from maa.tasker import Tasker
+    from maa.toolkit import Toolkit
+
+    if _profile != "maanikki":
+        sys.exit("scene-button-check exercises the patched unit; pass --profile maanikki")
+    out = Path(args.out).resolve()
+    if out.exists() and any(out.iterdir()):
+        sys.exit(f"{out} is not empty")
+    out.mkdir(parents=True, exist_ok=True)
+    Tasker.set_log_dir(out)
+    window_id = _pick_window(args, Toolkit)
+    game_pid = _bundle_pid(GAME_BUNDLE_ID)
+    for _ in range(args.wait):
+        if _front_pid() == game_pid:
+            break
+        time.sleep(1)
+    else:
+        sys.exit("the game never became the front application; nothing sent")
+    controller, ok, _ = _connect(window_id, raw=False)
+    if not ok:
+        sys.exit("connection failed; nothing sent")
+    steps = []
+
+    def frame(name):
+        image, _ = _grab(controller)
+        if image is None or image.shape[:2] != (720, 1280):
+            fail(f"no 1280x720 frame at {name}")
+        cv2.imwrite(str(out / f"{len(steps):02d}-{name}.png"), image)
+        return image
+
+    def fail(reason):
+        steps.append({"failed": reason})
+        print(json.dumps(steps, ensure_ascii=False, indent=2))
+        sys.exit(1)
+
+    # Only a unit from patch level 3 knows the scene press; an older one would hover-move and press.
+    try:
+        patch = json.loads(controller.info).get("maanikki_patch") if isinstance(controller.info, str) else controller.info.get("maanikki_patch")
+    except (ValueError, AttributeError, TypeError):
+        patch = None
+    steps.append({"step": "unit", "maanikki_patch": patch})
+    if type(patch) is not int or patch < 3:
+        fail("the connected unit does not report maanikki_patch >= 3; nothing sent")
+    band = (slice(120, 520), slice(200, 1080))
+    start = frame("start")
+    if _map_back_score(start) >= MAP_CLOSED_SCORE:
+        fail("the big map is open; start in the open world")
+    cursor = _cursor()
+    bounds = _game_window_bounds(window_id)
+    steps.append({"step": "cursor baseline", "cursor": cursor, "window_bounds": bounds})
+    if bounds is None or not (bounds[0] <= cursor[0] < bounds[0] + bounds[2] and bounds[1] <= cursor[1] < bounds[1] + bounds[3]):
+        fail("the pointer is not over the game window; the unit would refuse a scene press. Nothing pressed")
+    # Turn away first, so that a recentre has something to undo.
+    if not controller.post_relative_move(args.pixels, 0).wait().succeeded:
+        fail("the unit refused the relative move")
+    time.sleep(0.8)
+    turned = frame("turned-away")
+    turn_pct = _changed(start[band], turned[band])
+    steps.append({"step": f"relative move +{args.pixels}", "scene_changed_pct": turn_pct, "cursor": _cursor()})
+    if turn_pct < 1:
+        fail("the camera did not turn; nothing to recentre, no button pressed")
+    if abs(steps[-1]["cursor"][0] - cursor[0]) > 1 or abs(steps[-1]["cursor"][1] - cursor[1]) > 1:
+        fail("the real cursor moved with the relative move; no button pressed")
+    button = SCENE_BUTTONS[args.button]
+    pressed = released = False
+    try:
+        # The binding's order is (x, y, contact, pressure): name them.
+        pressed = controller.post_touch_down(x=0, y=0, contact=button, pressure=SCENE_PRESS_PRESSURE).wait().succeeded
+        time.sleep(0.05)
+    finally:
+        # Whatever happened since the press was submitted (an interrupt, a failure), ask for the release;
+        # if it is not confirmed the unit keeps the button held and releases it when the controller goes.
+        try:
+            released = controller.post_touch_up(contact=button).wait().succeeded
+        except Exception:
+            released = False
+    time.sleep(1.0)
+    after = frame("after-press")
+    after_cursor = _cursor()
+    steps.append({"step": f"scene press {args.button}", "pressed": pressed, "released": released,
+                  "scene_changed_pct": _changed(turned[band], after[band]), "vs_start_pct": _changed(start[band], after[band]),
+                  "cursor": after_cursor})
+    if not pressed:
+        fail("the unit refused the scene press (see maafw.log for the reason)")
+    if not released:
+        fail("the release of the scene press failed; the unit keeps it held and releases it when the controller goes away")
+    if abs(after_cursor[0] - cursor[0]) > 1 or abs(after_cursor[1] - cursor[1]) > 1:
+        fail("the real cursor moved: a scene press must not move it")
+    if steps[-1]["scene_changed_pct"] < 1:
+        fail(f"no recentre observed: the {args.button} press was accepted but nothing changed on screen")
+    steps.append({"verdict": "needs_review", "frames": str(out)})
+    print(json.dumps(steps, ensure_ascii=False, indent=2))
+    print(f"needs review: frames in {out}. For the middle button the camera should swing back behind the "
+          f"character; maafw.log should show 'scene press accepted' and 'release posted' for contact {button}.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("windows", "lifecycle", "capture", "input-check", "refusal-check", "hit-test", "camera-check"):
+    for name in ("windows", "lifecycle", "capture", "input-check", "refusal-check", "hit-test", "camera-check",
+                 "scene-button-check"):
         command = sub.add_parser(name)
         command.add_argument("--runtime", help="directory with libMaaFramework.dylib and the control units")
         command.add_argument("--profile", choices=sorted(PROFILES), default="stock",
@@ -650,10 +770,14 @@ def main() -> int:
                                  help="SHA-256 the loaded control unit must have (build.json), or 'stock' for the official one")
         else:
             command.add_argument("--out", required=True)
-        if name in ("input-check", "camera-check"):
+        if name in ("input-check", "camera-check", "scene-button-check"):
             command.add_argument("--wait", type=int, default=60, help="seconds to wait for the game to be in front")
+        if name in ("camera-check", "scene-button-check"):
+            command.add_argument("--pixels", type=int, default=400, help="relative move (the plan measured 400)")
+        if name == "scene-button-check":
+            command.add_argument("--button", choices=sorted(SCENE_BUTTONS), default="middle",
+                                 help="scene button to press where the cursor is (middle: the camera recentre)")
         if name == "camera-check":
-            command.add_argument("--pixels", type=int, default=400, help="relative move each way (the plan measured 400)")
             command.add_argument("--option", action="store_true",
                                  help="experiment: Option, a 1-pixel absorbing move, the turn, Option again (navigation sends no Option on macOS)")
         if name == "input-check":
@@ -665,7 +789,7 @@ def main() -> int:
     _profile = args.profile
     commands = {"windows": cmd_windows, "lifecycle": cmd_lifecycle, "capture": cmd_capture,
                 "input-check": cmd_input_check, "refusal-check": cmd_refusal_check, "hit-test": cmd_hit_test,
-                "camera-check": cmd_camera_check}
+                "camera-check": cmd_camera_check, "scene-button-check": cmd_scene_button_check}
     return commands[args.command](args)
 
 

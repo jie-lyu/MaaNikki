@@ -588,8 +588,10 @@ mod preview_task_tests {
     #[test]
     fn the_shared_manifest_parses_and_allows_only_listed_entries() {
         let manifest = include_str!("../../../../agent/host/macos/preview_tasks.json");
-        assert_eq!(preview_task_allowed(manifest, "MaaNikki_Mailbox"), Ok(true));
-        for entry in ["MXU_LAUNCH", "MaaNikki_StartGame", "MaaNikki_Fishing", ""] {
+        for entry in ["MaaNikki_Mailbox", "MaaNikki_WeeklyFreeGifts", "MaaNikki_MonthlyPass"] {
+            assert_eq!(preview_task_allowed(manifest, entry), Ok(true), "{}", entry);
+        }
+        for entry in ["MXU_LAUNCH", "MaaNikki_StartGame", "MaaNikki_Fishing", "MaaNikki_MonthlyCrystalExchange", "MaaNikki_Dig", ""] {
             assert_eq!(preview_task_allowed(manifest, entry), Ok(false), "{}", entry);
         }
     }
