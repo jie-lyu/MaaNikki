@@ -1213,8 +1213,28 @@ class MacTextGateTests(unittest.TestCase):
         from daily import redeem_codes
         button = (600, 450, 80, 40)
 
-        def attempt(platform, *, read="ABCD1234", modal=True, reward=False, use_hit=True):
+        from task_control import ForegroundChanged
+
+        def attempt(platform, *, read="ABCD1234", modal=True, reward=False, use_hit=True, resume_at_click=0,
+                    read_after_resume=None):
             events = []
+            state = {"generation": 7, "resumes": resume_at_click}
+
+            def action(*args, **fields):
+                expected = fields.get("focus_generation")
+                if state["resumes"]:
+                    # The game left the front and came back between the check and the dispatch.
+                    state["resumes"] -= 1
+                    state["generation"] += 1
+                    codes.rt._focus_generation = state["generation"]
+                    if read_after_resume is not None:
+                        state["read"] = read_after_resume
+                if expected is not None and expected != state["generation"]:
+                    events.append("cancelled")
+                    raise ForegroundChanged("前台切换后已取消本次输入")
+                events.append(("click", tuple(fields["target"])))
+                return True
+            state["read"] = read
             codes = redeem_codes.RedeemCodes.__new__(redeem_codes.RedeemCodes)
             codes.last_use_at = time.monotonic()  # the previous code was just used: the cooldown applies
             codes._reset_modal_if_dirty = Mock(return_value=True)
@@ -1222,13 +1242,14 @@ class MacTextGateTests(unittest.TestCase):
             codes._poll_submit_outcome = Mock(return_value=("redeemed", ""))
             hits = {"MaaNikki_Redeem_ModalReady": modal, "MaaNikki_RewardLayer": reward}
             codes.rt = SimpleNamespace(
-                stopped=False, log=Mock(), observe=lambda: nullcontext(),
+                stopped=False, log=Mock(), observe=lambda: nullcontext(), check_focus=Mock(return_value=False),
+                _focus_generation=7,
                 pause=Mock(side_effect=lambda seconds: events.append("cooldown") or True),
                 capture=Mock(side_effect=lambda: events.append("capture") or "fresh frame"),
                 hit=lambda node, image=None: hits.get(node, False) and image == "fresh frame",
-                text=Mock(side_effect=lambda roi, image=None: read if image == "fresh frame" else ""),
+                text=Mock(side_effect=lambda roi, image=None: state["read"] if image == "fresh frame" else ""),
                 recognize=Mock(return_value=SimpleNamespace(hit=use_hit, box=button if use_hit else None)),
-                action=Mock(side_effect=lambda *a, **k: events.append(("click", tuple(k["target"]))) or True))
+                action=Mock(side_effect=action))
             with backend(platform):
                 return codes._redeem_one("ABCD1234"), events, codes
 
@@ -1241,6 +1262,13 @@ class MacTextGateTests(unittest.TestCase):
                 self.assertEqual(result, ("error", "兑换前复核未通过"))
                 self.assertNotIn("click", [e[0] for e in events if isinstance(e, tuple)])  # not even [639, 469]
                 codes._poll_submit_outcome.assert_not_called()
+        # A focus change between the check and the click cancels that click and the check runs again on a fresh frame.
+        result, events, _ = attempt("macos", resume_at_click=1)
+        self.assertEqual(result, ("redeemed", ""))
+        self.assertEqual(events, ["filled", "cooldown", "capture", "cancelled", "capture", ("click", button)])
+        result, events, _ = attempt("macos", resume_at_click=1, read_after_resume="")  # field cleared meanwhile
+        self.assertEqual(result, ("error", "兑换前复核未通过"))
+        self.assertEqual(events, ["filled", "cooldown", "capture", "cancelled", "capture"])
         # Win32 as before: no re-check, and the fixed target when the button template misses.
         result, events, _ = attempt("win32", read="", use_hit=False)
         self.assertEqual(result, ("redeemed", ""))

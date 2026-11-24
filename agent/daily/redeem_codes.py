@@ -410,6 +410,25 @@ class RedeemCodes:
         from host import capabilities, platform_backend
         return capabilities(platform_backend()).text_input
 
+    def _click_use_verified(self, code: str):
+        """macOS: click 兑换 only at a button verified on a frame taken in the current focus generation. A focus
+        change between the check and the click cancels that click (ForegroundChanged) and the check is repeated on
+        a fresh frame. True/False: the click's result; None: no verified button, nothing was clicked."""
+        from task_control import ForegroundChanged
+        for _ in range(3):
+            if self.rt.stopped:
+                return False
+            self.rt.check_focus()
+            generation = self.rt._focus_generation
+            target = self._recheck_before_use(code)
+            if target is None:
+                return None
+            try:
+                return bool(self.rt.action("Click", target=target, focus_generation=generation))
+            except ForegroundChanged:
+                self.rt.log("点兑换前游戏离开过前台，重新复核。", detail=True)
+        return None
+
     def _recheck_before_use(self, code: str):
         """macOS, immediately before 兑换: the field evidence from filling may be stale after the cooldown wait, so
         one fresh frame must show the modal still open, exactly this code in the field and the 兑换 button itself
@@ -507,11 +526,12 @@ class RedeemCodes:
             if self._typing_supported():
                 use_btn = self.rt.recognize("MaaNikki_Redeem_ModalUse")
                 target = list(use_btn.box) if use_btn and use_btn.hit and use_btn.box else MODAL_USE_TARGET
+                clicked = self.rt.action("Click", target=target)
             else:
-                target = self._recheck_before_use(code)
-                if target is None:
+                clicked = self._click_use_verified(code)
+                if clicked is None:
                     return "error", "兑换前复核未通过"
-            if not self.rt.action("Click", target=target):
+            if not clicked:
                 return "error", "未能点击使用按钮"
             self.last_use_at = time.monotonic()
             outcome, detail = self._poll_submit_outcome()
