@@ -29,28 +29,32 @@ PRESSURE = probe.SCENE_PRESS_PRESSURE
 
 
 class Job:
-    def __init__(self, succeeded):
+    def __init__(self, succeeded, interrupt=False):
         self.succeeded = succeeded
+        self.interrupt = interrupt
 
     def wait(self):
+        if self.interrupt:
+            raise KeyboardInterrupt  # Ctrl+C while waiting: the request was already submitted
         return self
 
 
 class FakeController:
     """Records input; refuses the presses whose 1-based index is in refuse_presses."""
 
-    def __init__(self, *, refuse_presses=(), key_up_ok=True, touch_up_ok=True, patch=3):
+    def __init__(self, *, refuse_presses=(), key_up_ok=True, touch_up_ok=True, patch=3, interrupt=()):
         self.events = []
         self.inputs = 0
         self.presses = 0
         self.refuse_presses = set(refuse_presses)
         self.key_up_ok, self.touch_up_ok = key_up_ok, touch_up_ok
         self.info = {"type": "macos", "maanikki_patch": patch}
+        self.interrupt = set(interrupt)  # event kinds whose wait() raises KeyboardInterrupt
 
     def _record(self, event, ok=True):
         self.events.append(event)
         self.inputs += 1
-        return Job(ok)
+        return Job(ok, interrupt=event[0] in self.interrupt)
 
     def post_relative_move(self, dx, dy):
         return self._record(("move", dx, dy))
@@ -72,8 +76,16 @@ class FakeController:
         return self._record(("inactive",))
 
 
-def run(argv, controller, abilities=("insect",)):
-    """Run scene-button-check with fakes; returns (exit code, captured stdout, controller)."""
+def run(argv, controller, abilities=("insect",), cursor=(100.0, 100.0)):
+    """Run scene-button-check with fakes; returns (exit code or "interrupted", stdout, saved frame names).
+
+    The HUD reads ``abilities`` in turn and keeps the last one for any further reading.
+    """
+    readings = list(abilities)
+
+    def selected_ability(image):
+        return (readings.pop(0) if len(readings) > 1 else readings[0]), {}
+
     def grab(ctrl):
         # Every input changes the whole frame; two captures with no input between them are identical.
         return np.full((720, 1280, 3), (ctrl.inputs * 37) % 256, dtype=np.uint8), 1.0
@@ -90,19 +102,21 @@ def run(argv, controller, abilities=("insect",)):
             mock.patch.object(probe, "_connect", lambda window, raw: (controller, True, 1.0)), \
             mock.patch.object(probe, "_grab", grab), \
             mock.patch.object(probe, "_map_back_score", lambda image: 0.5), \
-            mock.patch.object(probe, "_cursor", lambda: (100.0, 100.0)), \
+            mock.patch.object(probe, "_cursor", lambda: cursor), \
             mock.patch.object(probe, "_game_window_bounds", lambda window: (0, 0, 1920, 1080)), \
             mock.patch.object(probe.time, "sleep", lambda seconds: None), \
             mock.patch.object(sys, "argv", ["probe.py", "scene-button-check", "--profile", "maanikki", "--game",
                                             "--out", str(Path(out) / "run"), *argv]), \
             mock.patch.object(probe, "_ensure_runtime", lambda runtime: None), \
-            mock.patch.object(probe, "_selected_ability", lambda image, seen=iter(abilities): (next(seen), {})):
+            mock.patch.object(probe, "_selected_ability", selected_ability):
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
             try:
                 code = probe.main()
             except SystemExit as error:
                 code = error.code
+            except KeyboardInterrupt:
+                code = "interrupted"
         frames = sorted(p.name for p in (Path(out) / "run").glob("*.png"))
     return code, stdout.getvalue(), frames
 
@@ -206,6 +220,53 @@ class SceneButtonCheckTests(unittest.TestCase):
                 self.assertEqual(code, 2)
                 self.assertEqual(controller.events, [])
 
+    def test_an_interrupted_slot_key_is_still_released(self):
+        controller = FakeController(interrupt={"key_down"})
+        code, _, _ = run(["--button", "right", "--expect-ability", "insect", "--select-slot", "2"], controller,
+                         abilities=("fishing",))
+        self.assertEqual(code, "interrupted")
+        self.assertEqual(controller.events, [("key_down", 0x13), ("key_up", 0x13)])
+
+    def test_an_unconfirmed_slot_key_release_asks_inactive_before_anything_else(self):
+        controller = FakeController(key_up_ok=False)
+        code, output, frames = run(["--button", "right", "--expect-ability", "insect", "--select-slot", "2"],
+                                   controller, abilities=("fishing", "insect"))
+        self.assertEqual(code, 1)
+        self.assertEqual(controller.events, [("key_down", 0x13), ("key_up", 0x13), ("inactive",)])
+        self.assertFalse(any("after-select" in name for name in frames), frames)
+        self.assertIn("release of slot key 2 was not confirmed", output)
+
+    def test_an_interrupt_while_releasing_asks_inactive(self):
+        for kind, argv in (("up", ["--button", "left"]), ("key_up", ["--button", "left", "--with-forward"])):
+            with self.subTest(release=kind):
+                controller = FakeController(interrupt={kind})
+                code, output, _ = run(argv, controller)
+                self.assertEqual(code, 1)
+                self.assertIn(("inactive",), controller.events)
+                self.assertIn("was not confirmed", output)
+
+    def test_the_cursor_is_checked_before_any_slot_key(self):
+        controller = FakeController()
+        code, output, _ = run(["--button", "right", "--expect-ability", "insect", "--select-slot", "2"], controller,
+                              abilities=("fishing", "insect"), cursor=(5000.0, 100.0))
+        self.assertEqual(code, 1)
+        self.assertIn("not over the game window", output)
+        self.assertEqual(controller.events, [])
+
+    def test_the_ability_is_confirmed_on_the_last_frame_before_the_press(self):
+        controller = FakeController()
+        code, output, _ = run(["--button", "right", "--expect-ability", "insect"], controller,
+                              abilities=("insect", "fishing"))
+        self.assertEqual(code, 1)
+        self.assertIn("the HUD now shows fishing", output)
+        self.assertEqual(controller.events, [])
+
+    def test_a_long_hold_is_measured(self):
+        controller = FakeController()
+        code, output, _ = run(["--button", "left", "--hold", "1.5"], controller)
+        self.assertEqual(code, 0, output)
+        self.assertIn('"measured_hold_s"', output)
+
     def test_an_old_unit_gets_nothing(self):
         controller = FakeController(patch=2)
         code, output, _ = run(["--button", "left"], controller)
@@ -242,6 +303,12 @@ class AbilityReadingTests(unittest.TestCase):
             with self.subTest(ability=name):
                 ability, scores = probe._selected_ability(self.hud(name))
                 self.assertEqual(ability, name, scores)
+
+    def test_scores_are_compared_unrounded(self):
+        with mock.patch.object(probe, "_ability_scores", return_value={"insect": 0.7804, "fishing": 0.1}):
+            self.assertEqual(probe._selected_ability(None), ("insect", {"insect": 0.78, "fishing": 0.1}))
+        with mock.patch.object(probe, "_ability_scores", return_value={"insect": 0.78, "fishing": 0.1}):
+            self.assertIsNone(probe._selected_ability(None)[0])
 
     def test_an_empty_button_is_no_known_ability(self):
         ability, _ = probe._selected_ability(np.full((720, 1280, 3), 40, dtype=np.uint8))

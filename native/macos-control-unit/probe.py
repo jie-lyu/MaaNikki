@@ -682,15 +682,18 @@ def _ability_scores(image) -> dict[str, float]:
         if not bw or not bh or patch.shape[0] < bh or patch.shape[1] < bw:
             scores[name] = 0.0
             continue
-        scores[name] = round(float(cv2.matchTemplate(patch, icon[by:by + bh, bx:bx + bw], cv2.TM_CCORR_NORMED).max()), 3)
+        scores[name] = float(cv2.matchTemplate(patch, icon[by:by + bh, bx:bx + bw], cv2.TM_CCORR_NORMED).max())
     return scores
 
 
 def _selected_ability(image) -> tuple[str | None, dict[str, float]]:
-    """The ability the HUD shows (None when no known one matches), with every score."""
+    """The ability the HUD shows (None when no known one matches), with every score rounded for the report.
+
+    Compared unrounded, as ability_matches() does: a raw 0.7804 matches there and must match here.
+    """
     scores = _ability_scores(image)
     best = max(scores, key=scores.get)
-    return (best if scores[best] > ABILITY_MATCH else None), scores
+    return (best if scores[best] > ABILITY_MATCH else None), {name: round(value, 3) for name, value in scores.items()}
 
 
 def _hold_seconds(text: str) -> float:
@@ -766,6 +769,41 @@ def cmd_scene_button_check(args) -> int:
     start = frame("start")
     if _map_back_score(start) >= MAP_CLOSED_SCORE:
         fail("the big map is open; start in the open world")
+    cursor = _cursor()
+    bounds = _game_window_bounds(window_id)
+    steps.append({"step": "cursor baseline", "cursor": cursor, "window_bounds": bounds})
+    if bounds is None or not (bounds[0] <= cursor[0] < bounds[0] + bounds[2] and bounds[1] <= cursor[1] < bounds[1] + bounds[3]):
+        fail("the pointer is not over the game window; the unit would refuse a scene press. Nothing sent")
+
+    def release(post, what):
+        """Ask for a release. Anything but a confirmed one (refused, an error, an interrupt while waiting)
+        asks inactive() to release everything and stops the probe."""
+        try:
+            released = post().wait().succeeded
+        except BaseException:
+            released = False
+        if released:
+            return
+        steps.append({"step": f"release of {what} not confirmed"})
+        try:
+            inactive = controller.post_inactive().wait().succeeded
+        except BaseException:
+            inactive = False
+        steps.append({"step": "inactive", "succeeded": inactive})
+        fail(f"the release of {what} was not confirmed; inactive() was asked to release it "
+             "(the unit also retries when the controller is destroyed, which is not guaranteed to succeed)")
+
+    def tap_key(code, what):
+        """Press and release a key like the agent's 80 ms taps; the release is asked for whatever happens."""
+        sent = False
+        try:
+            # Once submitted, the press may have reached the unit even if waiting for it is interrupted.
+            sent = controller.post_key_down(code).wait().succeeded
+            time.sleep(0.08)  # the game missed a 12 ms press on the device
+        finally:
+            release(lambda: controller.post_key_up(code), what)
+        return sent
+
     if args.button == "right":
         # The right button uses whatever ability is selected: confirm it is the expected one first, and
         # select it with its slot key if asked. Anything else: nothing pressed.
@@ -773,9 +811,7 @@ def cmd_scene_button_check(args) -> int:
         cv2.imwrite(str(out / "hud-before.png"), start[HUD_CROP])  # what the reading saw
         steps.append({"step": "selected ability", "ability": ability, "scores": scores})
         if ability != args.expect_ability and args.select_slot is not None:
-            sent = controller.post_key_down(SLOT_KEYS[args.select_slot]).wait().succeeded
-            time.sleep(0.08)  # the game missed a 12 ms press on the device
-            sent = controller.post_key_up(SLOT_KEYS[args.select_slot]).wait().succeeded and sent
+            sent = tap_key(SLOT_KEYS[args.select_slot], f"slot key {args.select_slot}")
             time.sleep(1.0)
             start = frame("after-select")
             ability, scores = _selected_ability(start)
@@ -786,15 +822,16 @@ def cmd_scene_button_check(args) -> int:
         if ability != args.expect_ability:
             fail(f"the HUD shows {ability or 'no known ability'}, not {args.expect_ability}; no button pressed"
                  + ("" if args.select_slot is not None else " (pass --select-slot N to select it)"))
-    cursor = _cursor()
-    bounds = _game_window_bounds(window_id)
-    steps.append({"step": "cursor baseline", "cursor": cursor, "window_bounds": bounds})
-    if bounds is None or not (bounds[0] <= cursor[0] < bounds[0] + bounds[2] and bounds[1] <= cursor[1] < bounds[1] + bounds[3]):
-        fail("the pointer is not over the game window; the unit would refuse a scene press. Nothing pressed")
     # The band's own change between two still frames: the idle animation alone moved it 6% on the
     # device, a camera turn 55-66%. The middle button is pressed only after a clear turn.
     time.sleep(1.0)
     still = frame("still")
+    if args.button == "right":
+        # The last frame before the press: the ability must still be the expected one.
+        ability, scores = _selected_ability(still)
+        steps.append({"step": "selected ability before the press", "ability": ability, "scores": scores})
+        if ability != args.expect_ability:
+            fail(f"the HUD now shows {ability or 'no known ability'}, not {args.expect_ability}; no button pressed")
     ambient = _changed(start[band], still[band])
     turn_limit = max(20.0, ambient * 3 + 5)
     if turn_limit >= 100:
@@ -823,39 +860,27 @@ def cmd_scene_button_check(args) -> int:
     button = SCENE_BUTTONS[args.button]
 
     def press_once(index):
-        attempted = pressed = released = False
+        pressed = False
         held_frame = None
+        held_s = None
         try:
             # The binding's order is (x, y, contact, pressure): name them. Once submitted, the press may have
             # reached the unit even if waiting for it is interrupted.
-            attempted = True
             pressed = controller.post_touch_down(x=0, y=0, contact=button, pressure=SCENE_PRESS_PRESSURE).wait().succeeded
+            down_at = time.perf_counter()
             if pressed and args.hold >= HELD_FRAME_MIN_S:
-                # A capture sends no input; it shows what the game does while the button is down.
+                # A capture sends no input; it shows what the game does while the button is down. Capturing
+                # and saving take time, so the hold is measured, not assumed.
                 time.sleep(HELD_FRAME_AT_S)
                 held_frame = frame(f"held-{index}")
-                time.sleep(max(0.0, args.hold - HELD_FRAME_AT_S - 0.06))
-            else:
-                time.sleep(args.hold)
+            time.sleep(max(0.0, args.hold - (time.perf_counter() - down_at)))
+            held_s = round(time.perf_counter() - down_at, 3)
         finally:
-            # Whatever happened since the press was submitted (an interrupt, a failure), ask for the release;
-            # if it is not confirmed the unit keeps the button held and releases it when the controller goes.
-            try:
-                released = controller.post_touch_up(contact=button).wait().succeeded
-            except Exception:
-                released = False
-            if attempted and not released:
-                # Handle it now, before any wait or capture can fail first and hide it.
-                steps.append({"step": "release not confirmed", "contact": button})
-                try:
-                    inactive = controller.post_inactive().wait().succeeded
-                except Exception:
-                    inactive = False
-                steps.append({"step": "inactive", "succeeded": inactive})
-                fail("the release of the scene press was not confirmed; inactive() was asked to release it "
-                     "(the unit also retries when the controller is destroyed, which is not guaranteed to succeed)")
-        steps.append({"step": f"scene press {args.button} #{index}", "pressed": pressed, "released": released,
-                      "hold_s": args.hold, **({"held_changed_pct": _changed(turned, held_frame)} if held_frame is not None else {})})
+            # Whatever happened since the press was submitted (an interrupt, a failure), ask for the release.
+            release(lambda: controller.post_touch_up(contact=button), f"the {args.button} button")
+        steps.append({"step": f"scene press {args.button} #{index}", "pressed": pressed, "released": True,
+                      "hold_s": args.hold, "measured_hold_s": held_s,
+                      **({"held_changed_pct": _changed(turned, held_frame)} if held_frame is not None else {})})
         if not pressed:
             fail("the unit refused the scene press (see maafw.log for the reason)")
 
@@ -877,18 +902,8 @@ def cmd_scene_button_check(args) -> int:
             time.sleep(FORWARD_TAIL_S)
     finally:
         if args.with_forward:
-            try:
-                forward_up = controller.post_key_up(KEY_W).wait().succeeded
-            except Exception:
-                forward_up = False
-            steps.append({"step": "W up", "released": forward_up})
-            if not forward_up:
-                try:
-                    inactive = controller.post_inactive().wait().succeeded
-                except Exception:
-                    inactive = False
-                steps.append({"step": "inactive", "succeeded": inactive})
-                fail("the release of W was not confirmed; inactive() was asked to release it")
+            release(lambda: controller.post_key_up(KEY_W), "W")
+            steps.append({"step": "W up", "released": True})
     time.sleep(1.0)
     after = frame("after-press")
     after_cursor = _cursor()
