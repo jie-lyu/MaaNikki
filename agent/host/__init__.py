@@ -249,6 +249,14 @@ def task_refusal_reason(entry) -> str:
     return "当前系统不支持这个任务，已跳过。"
 
 
+def task_start_notice(entry) -> str | None:
+    """A warning for the task's own log when ``entry`` starts: macOS experimental tasks only, None elsewhere."""
+    if platform_backend() == "macos":
+        from host.macos import start_notice
+        return start_notice(entry)
+    return None
+
+
 def background_input_class():
     """Window-targeted input class for this desktop; raises NavigationError where there is none."""
     if platform_backend() != "win32":

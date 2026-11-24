@@ -2,11 +2,12 @@ from functools import wraps
 from copy import copy
 from contextlib import contextmanager
 from contextvars import ContextVar
-from threading import Event
+from collections import deque
+from threading import Event, Lock
 import traceback
 from performance import action_profile
 from game_view import ALLOWED_FRAME_SIZES, is_clipped_game_frame
-from host import capabilities, platform_backend, task_entry_supported, task_refusal_reason
+from host import capabilities, platform_backend, task_entry_supported, task_refusal_reason, task_start_notice
 from message_log import message_scope
 from task_control import TaskStopped, task_session
 
@@ -14,6 +15,10 @@ from maa.agent.agent_server import AgentServer
 
 
 _LOCAL_REGISTRATION = ContextVar("local_action_registration", default=False)
+# (task_id, entry) of tasks whose start notice was written: once per submitted task, however many of its
+# actions run (nested run_task calls report the outer task's entry). Bounded; old ids are long finished.
+_START_NOTICES = deque(maxlen=256)
+_START_NOTICES_LOCK = Lock()
 _ACTION_TYPES = {}
 _RECOGNITION_TYPES = {}
 
@@ -53,6 +58,23 @@ def local_registration(resource):
         _LOCAL_REGISTRATION.reset(token)
 
 
+def _write_start_notice(context, task_id, entry):
+    """Before the task's first action: macOS experimental tasks say so in their own instance's log, so a
+    scheduled run or a background instance shows it as well. Never raises into the action."""
+    key = (task_id, entry)
+    with _START_NOTICES_LOCK:
+        if key in _START_NOTICES:
+            return
+        _START_NOTICES.append(key)
+    try:
+        notice = task_start_notice(entry)
+        if notice:
+            context.run_task("MaaNikki_Daily_Message", {
+                "MaaNikki_Daily_Message": {"focus": {"Node.Action.Starting": notice}}})
+    except Exception:
+        traceback.print_exc()
+
+
 def agent_action(name, *, stop_on_failure=False):
     def register(cls):
         run = cls.run
@@ -74,6 +96,8 @@ def agent_action(name, *, stop_on_failure=False):
                 except Exception:
                     traceback.print_exc()
                 return False
+            if detail is not None:
+                _write_start_notice(context, task_id, entry)
             succeeded = False
             with action_profile(argv.node_name) as profile, message_scope(argv.node_name):
                 try:

@@ -439,6 +439,7 @@
     "SelectionTests.test_unreadable_info_and_invalid_window",
     "SelectionTests.test_win32_capabilities",
     "TaskAllowlistTests.test_a_malformed_list_refuses_everything_on_macos",
+    "TaskAllowlistTests.test_an_experimental_task_says_so_in_its_own_log_once_before_its_first_action",
     "TaskAllowlistTests.test_background_mode_falls_back_to_pause_without_window_input",
     "TaskAllowlistTests.test_dev_switch_adds_exact_entries_on_macos_only",
     "TaskAllowlistTests.test_runtime_background_mode_follows_the_capability",
@@ -494,7 +495,8 @@
     "the Windows contract: empty tiers mark nothing",
     "a manifest error alone marks nothing and keeps the error",
     "macOS marks verified, experimental and excluded entries from the shipped manifest",
-    "malformed backend values are dropped, not trusted"
+    "malformed backend values are dropped, not trusted",
+    "macOS starts wait for the tiers and stop on a manifest error; other systems never wait"
    ],
    "known_failures": [],
    "skips": []

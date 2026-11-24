@@ -16,9 +16,23 @@ export interface MacTaskTiers {
 
 export const MAC_EXPERIMENTAL_BADGE = 'Mac 未验证（试用）';
 export const MAC_EXPERIMENTAL_HINT = '这个任务可以在 Mac 上运行，但还没有在 Mac 上实机验证过，运行时请留意游戏画面。';
-export const MAC_EXPERIMENTAL_STARTED = '本任务尚未在 Mac 上验证（试用）';
+export const MAC_TIERS_PENDING = 'Mac 任务清单还没读取完，请稍后再开始。';
 export const MAC_UNSUPPORTED_REASON = '暂不支持 Mac 测试预览版。';
 export const MAC_TIERS_UNREADABLE = '无法读取 Mac 任务清单';
+
+// The start notice for experimental tasks is written by the agent into the running task's own log
+// (agent/registration.py), so it reaches scheduled runs and background instances too.
+
+/**
+ * Why a run may not start yet on this backend: on macOS until the tiers have loaded (the markings and the
+ * per-task consequence notes must be visible before anything starts) or when they could not be read.
+ * Empty on Windows, Linux and the dev preview without a backend, which have no tiers.
+ */
+export function macStartBlockedReason(backendOS: string, tiers: MacTaskTiers | null | undefined): string {
+  if (backendOS !== 'macos') return '';
+  if (!tiers) return MAC_TIERS_PENDING;
+  return tiers.error ?? '';
+}
 
 export type MacTaskMark =
   | { tier: 'verified'; note?: string }

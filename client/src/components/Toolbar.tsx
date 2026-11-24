@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore } from '@/stores/appStore';
+import { macStartBlockedReason } from '@/utils/macTaskTiers';
 import { useShallow } from 'zustand/react/shallow';
 import { isControllerAllowed, isResourceAllowed, isTaskCompatible } from '@/stores/helpers';
 import { maaService } from '@/services/maaService';
@@ -398,6 +399,9 @@ export function Toolbar({ showAddPanel, onToggleAddPanel, className }: ToolbarPr
       }
       if (wardrobeBusy()) return failStart('衣柜正在读取，请先停止衣柜读取。');
       if (fishingBusy()) return failStart('正在钓鱼，请先停止钓鱼。');
+      // macOS：任务档位与说明读到之前不开始（定时运行同样），读取失败时也不开始；其他系统为空字符串。
+      const macBlocked = macStartBlockedReason(useAppStore.getState().backendOS, useAppStore.getState().macTaskTiers);
+      if (macBlocked) return failStart(macBlocked);
 
       // UID is confirmed inside the game task before consulting period state.
       const candidates = filterTasksForRun(targetTasks, { startFromTaskId, singleTaskId });

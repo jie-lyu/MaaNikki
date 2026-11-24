@@ -74,10 +74,32 @@ def load_task_list(text: str):
     return json.loads(text, object_pairs_hook=no_duplicates, parse_constant=no_constants)
 
 
-def task_tiers() -> tuple[frozenset[str], frozenset[str], dict[str, str]]:
+def _task_list():
     from app_paths import RESOURCE_ROOT
     path = RESOURCE_ROOT.joinpath(*PREVIEW_TASKS_FILE)
-    return parse_task_tiers(load_task_list(path.read_text(encoding="utf-8")))
+    return load_task_list(path.read_text(encoding="utf-8"))
+
+
+def task_tiers() -> tuple[frozenset[str], frozenset[str], dict[str, str]]:
+    return parse_task_tiers(_task_list())
+
+
+EXPERIMENTAL_STARTED = "本任务尚未在 Mac 上验证（试用）"
+
+
+def start_notice(entry) -> str | None:
+    """The line an experimental task writes to its own log when it starts, with the list's note for it
+    (what it may spend or change); None for verified, refused or unknown entries and an unreadable list."""
+    try:
+        data = _task_list()
+        experimental = parse_task_tiers(data)[1]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if entry not in experimental:
+        return None
+    notes = data.get("notes")
+    note = notes.get(entry) if isinstance(notes, dict) else None
+    return f"{EXPERIMENTAL_STARTED}：{note}。" if isinstance(note, str) and note else f"{EXPERIMENTAL_STARTED}。"
 
 
 def refusal_reason(entry) -> str:

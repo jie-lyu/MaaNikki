@@ -637,6 +637,65 @@ class TaskAllowlistTests(unittest.TestCase):
             self.assertFalse(Probe().run(context, argv))
         self.assertEqual(ran, [])
 
+    def test_an_experimental_task_says_so_in_its_own_log_once_before_its_first_action(self):
+        import registration
+        from contextlib import nullcontext
+        events = []
+        token = registration._LOCAL_REGISTRATION.set(True)
+        try:
+            @registration.agent_action("test.start_notice")
+            class Probe:
+                def run(self, context, argv):
+                    events.append(("run", argv.task_detail.task_id))
+                    return True
+        finally:
+            registration._LOCAL_REGISTRATION.reset(token)
+
+        def context():
+            # Each task's messages go through the context MaaFramework hands that task's actions,
+            # so a scheduled or background instance logs its own notice.
+            ctx = Mock()
+            ctx.run_task.side_effect = lambda entry, override: events.append(
+                ("notice", override["MaaNikki_Daily_Message"]["focus"]["Node.Action.Starting"]))
+            return ctx
+
+        def run(ctx, task_id, entry):
+            argv = SimpleNamespace(task_detail=SimpleNamespace(task_id=task_id, entry=entry), node_name=entry)
+            return Probe().run(ctx, argv)
+
+        notes = json.loads((ROOT / "agent/host/macos/preview_tasks.json").read_text(encoding="utf-8"))["notes"]
+        with patch.dict(os.environ), patch("registration.task_session", return_value=nullcontext(None)), \
+                patch.object(registration, "_START_NOTICES", registration.deque(maxlen=256)):
+            os.environ.pop("MAANIKKI_MACOS_EXTRA_TASKS", None)
+            with backend("macos"):
+                dig = context()
+                self.assertTrue(run(dig, 9001, "MaaNikki_Dig"))
+                self.assertTrue(run(dig, 9001, "MaaNikki_Dig"))  # a later action of the same task
+                self.assertEqual(events, [
+                    ("notice", f"本任务尚未在 Mac 上验证（试用）：{notes['MaaNikki_Dig']}。"),
+                    ("run", 9001), ("run", 9001)])
+                events.clear()
+                self.assertTrue(run(context(), 9002, "MaaNikki_Dig"))  # the next submission warns again
+                self.assertEqual([kind for kind, _ in events], ["notice", "run"])
+                events.clear()
+                self.assertTrue(run(context(), 9003, "MaaNikki_Mailbox"))  # verified: no notice
+                self.assertEqual(events, [("run", 9003)])
+                events.clear()
+                failing = Mock()
+                failing.run_task.side_effect = RuntimeError("tasker gone")
+                with patch("registration.traceback.print_exc"):
+                    self.assertTrue(run(failing, 9004, "MaaNikki_Home"))  # a failed notice never blocks the task
+                self.assertEqual(events, [("run", 9004)])
+                events.clear()
+                with patch("host.macos._task_list", side_effect=ValueError("bad")):
+                    self.assertIsNone(host.task_start_notice("MaaNikki_Home"))
+            with backend("win32"):
+                win = context()
+                self.assertTrue(run(win, 9005, "MaaNikki_Dig"))
+                self.assertEqual(events, [("run", 9005)])  # Windows: unchanged, nothing extra in the log
+                win.run_task.assert_not_called()
+                self.assertIsNone(host.task_start_notice("MaaNikki_Dig"))
+
 
 class GeometryLatchTests(unittest.TestCase):
     def session(self, info):

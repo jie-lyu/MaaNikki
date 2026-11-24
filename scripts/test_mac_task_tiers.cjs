@@ -48,7 +48,8 @@ test('macOS marks verified, experimental and excluded entries from the shipped m
   const bling = tiers.macTaskMark(mac, 'MaaNikki_MinigameBling');
   assert.equal(bling.tier, 'experimental');
   assert.equal(bling.note, '每次进场或付费重试消耗 100 噗灵，默认 267 轮');
-  assert.equal(tiers.macTaskMark(mac, 'MaaNikki_Dig').note, undefined);
+  assert.equal(tiers.macTaskMark(mac, 'MaaNikki_Dig').note, manifest.notes.MaaNikki_Dig);
+  assert.equal(tiers.macTaskMark(mac, 'MaaNikki_Mailbox').note, undefined);
   const start = tiers.macTaskMark(mac, 'MaaNikki_StartGame');
   assert.equal(start.tier, 'excluded');
   assert.equal(tiers.macExcludedText(start), `Mac 不可用：${manifest.excluded.MaaNikki_StartGame}`);
@@ -61,4 +62,17 @@ test('macOS marks verified, experimental and excluded entries from the shipped m
 test('malformed backend values are dropped, not trusted', () => {
   const odd = tiers.normalizeMacTaskTiers({ verified: ['A', 1, ''], experimental: 'B', excluded: { C: 'why', D: 2 }, notes: [] });
   assert.deepEqual(JSON.parse(JSON.stringify(odd)), { verified: ['A'], experimental: [], excluded: { C: 'why' }, notes: {} });
+});
+
+test('macOS starts wait for the tiers and stop on a manifest error; other systems never wait', () => {
+  // Before the tier response arrives the store holds null: a run (manual or scheduled) must not start.
+  assert.equal(tiers.macStartBlockedReason('macos', null), tiers.MAC_TIERS_PENDING);
+  assert.equal(tiers.macStartBlockedReason('macos', undefined), tiers.MAC_TIERS_PENDING);
+  const broken = tiers.normalizeMacTaskTiers({ error: '无法读取 Mac 任务清单（x）' });
+  assert.equal(tiers.macStartBlockedReason('macos', broken), '无法读取 Mac 任务清单（x）');
+  // Once the response is in, the run may start.
+  assert.equal(tiers.macStartBlockedReason('macos', mac), '');
+  for (const os of ['windows', 'linux', '']) {
+    for (const source of [null, undefined, mac, broken]) assert.equal(tiers.macStartBlockedReason(os, source), '');
+  }
 });
