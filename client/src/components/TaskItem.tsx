@@ -469,9 +469,10 @@ export function TaskItem({ instanceId, task }: TaskItemProps) {
   );
 
   // macOS 任务档位（Windows 上为 null）：不开放的任务（包括从预设或 Windows 配置带来的）保留在列表中，
-  // 按不兼容处理并写明原因，运行时由后端跳过；试用任务显示标记和说明。前置任务不经过任务入口，不标记。
+  // 按不兼容处理并写明原因，运行时由后端跳过；试用任务显示标记和说明。前置任务只在声明了任务入口时
+  // （如启动游戏的 MaaNikki_StartGame）按该入口标记，显示清单里的原因。
   const macMark = useMacTaskMark(
-    isPretask ? undefined : isMxuTask ? mxuSpecialTask?.entry : taskDef?.entry,
+    isPretask ? pretaskItem?.entry : isMxuTask ? mxuSpecialTask?.entry : taskDef?.entry,
   );
   const macExcluded = macExcludedText(macMark);
   const macNote = macTaskNoteLine(macMark);

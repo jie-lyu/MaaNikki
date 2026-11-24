@@ -601,6 +601,9 @@ export function AddTaskPanel() {
     const count = taskCounts[taskName] || 0;
     const label = resolveI18nText(item.label, langKey) || item.name || item.exec;
     const { isIncompatible, reason, supportedControllerHint } = getTaskCompatibility(taskDef);
+    // macOS：声明了任务入口的前置任务（如启动游戏）按入口标记，显示清单里的原因；没有入口的不标记
+    const macMark = item.entry ? macTaskMark(macTaskTiers, item.entry) : null;
+    const macExcluded = macExcludedText(macMark);
 
     return (
       <TaskButton
@@ -612,9 +615,10 @@ export function AddTaskPanel() {
         badge={showBadge ? t('addTaskPanel.pretaskBadge') : undefined}
         langKey={langKey}
         basePath={basePath}
-        disabled={isIncompatible}
-        incompatibleReason={reason}
+        disabled={isIncompatible || !!macExcluded}
+        incompatibleReason={[macExcluded, reason].filter(Boolean).join('；')}
         supportedControllerHint={supportedControllerHint}
+        macMark={macMark}
         onClick={() => handleAddPretask(item)}
       />
     );
