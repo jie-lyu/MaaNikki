@@ -63,8 +63,6 @@ class ScheduleService {
   private checking = false;
   private triggerFn: ScheduleTriggerCallback | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Bumped by stop(): a check still waiting for the Mac task tiers then decides and records nothing. */
-  private generation = 0;
 
   private getTriggeredSlots(): Set<string> {
     try {
@@ -153,7 +151,6 @@ class ScheduleService {
   }
 
   stop() {
-    this.generation += 1;
     if (this.intervalId) {
       clearInterval(this.intervalId);
       this.intervalId = null;
@@ -206,12 +203,13 @@ class ScheduleService {
 
       // macOS only, and only while the task tiers are still loading: the slot is fixed above; wait for them
       // before deciding, so a start refused only because they were loading does not use up the slot. Other
-      // backends never wait here (no yield, the same order as before). A stop() during the wait ends this check
-      // without recording the slot or calling whatever handler is registered by then.
+      // backends never wait here (no yield, the same order as before). After the wait the service must be
+      // running: stopped, this check records nothing and calls nothing; stopped and started again (whose own
+      // immediate check was skipped while this one held `checking`), it decides the fixed slot for the running
+      // service with the handler registered now, so the restart does not lose a due slot.
       if (macTaskTiersPending()) {
-        const generation = this.generation;
         await waitForMacTaskTiers();
-        if (generation !== this.generation || !this.triggerFn) return;
+        if (!this.intervalId || !this.triggerFn) return;
       }
 
       this.cleanupOldSlots();

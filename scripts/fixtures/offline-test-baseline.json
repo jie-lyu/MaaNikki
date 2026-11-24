@@ -503,7 +503,8 @@
     "an empty or malformed macOS tier response is a load error that refuses starts",
     "a scheduled slot waits for a delayed tier response instead of being refused",
     "the scheduler never waits off macOS: the slot starts before a teardown, as before",
-    "a scheduler stopped while waiting for the Mac tiers records nothing and a restart still runs the slot",
+    "a scheduler stopped while waiting for the Mac tiers records nothing and a later start still runs the slot",
+    "a scheduler restarted while waiting for the Mac tiers runs the due slot once with the new handler",
     "a scheduler waiting for the Mac tiers starts the slot once they arrive"
    ],
    "known_failures": [],

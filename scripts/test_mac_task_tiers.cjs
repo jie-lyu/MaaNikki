@@ -156,33 +156,57 @@ function loadScheduler({ pending }) {
   return { service: context.exports.scheduleService, tiers, recorded };
 }
 
+const ticks = () => new Promise((done) => setTimeout(done, 5));
+
 test('the scheduler never waits off macOS: the slot starts before a teardown, as before', async () => {
   const { service, recorded } = loadScheduler({ pending: false });
   const started = [];
   service.setTriggerCallback(async (inst) => { started.push(inst.id); return true; });
-  const check = service.check();
-  service.stop();  // torn down right after the check began: the start was already handed over
+  service.start();  // its immediate check hands the slot over synchronously
+  service.stop();
   service.setTriggerCallback(null);
-  await check;
+  await ticks();
   assert.deepEqual(started, ['B']);
   assert.deepEqual(recorded(), ['B:2026-11-24-21-30']);
 });
 
-test('a scheduler stopped while waiting for the Mac tiers records nothing and a restart still runs the slot', async () => {
+test('a scheduler stopped while waiting for the Mac tiers records nothing and a later start still runs the slot', async () => {
   const { service, tiers, recorded } = loadScheduler({ pending: true });
   const first = [];
   service.setTriggerCallback(async (inst) => { first.push(inst.id); return true; });
-  const waiting = service.check();
-  await new Promise((done) => setTimeout(done, 0));
+  service.start();
+  await ticks();
   service.stop();
   service.setTriggerCallback(null);
   tiers.release();
-  await waiting;
+  await ticks();
   assert.deepEqual(first, []);
   assert.deepEqual(recorded(), []);  // the slot is still free
   const second = [];
   service.setTriggerCallback(async (inst) => { second.push(inst.id); return true; });
-  await service.check();  // restarted in the same minute, tiers loaded
+  service.start();  // started again in the same minute, tiers loaded
+  await ticks();
+  service.stop();
+  assert.deepEqual(second, ['B']);
+  assert.deepEqual(recorded(), ['B:2026-11-24-21-30']);
+});
+
+test('a scheduler restarted while waiting for the Mac tiers runs the due slot once with the new handler', async () => {
+  const { service, tiers, recorded } = loadScheduler({ pending: true });
+  const first = [];
+  const second = [];
+  service.setTriggerCallback(async (inst) => { first.push(inst.id); return true; });
+  service.start();
+  await ticks();
+  service.stop();
+  service.setTriggerCallback(async (inst) => { second.push(inst.id); return true; });
+  service.start();  // its immediate check is skipped: the first one still holds the slot decision
+  await ticks();
+  tiers.release();
+  await ticks();
+  await service.check();  // a later poll in the same minute does not run it again
+  service.stop();
+  assert.deepEqual(first, []);
   assert.deepEqual(second, ['B']);
   assert.deepEqual(recorded(), ['B:2026-11-24-21-30']);
 });
@@ -191,12 +215,13 @@ test('a scheduler waiting for the Mac tiers starts the slot once they arrive', a
   const { service, tiers, recorded } = loadScheduler({ pending: true });
   const started = [];
   service.setTriggerCallback(async (inst) => { started.push(inst.id); return true; });
-  const waiting = service.check();
-  await new Promise((done) => setTimeout(done, 0));
+  service.start();
+  await ticks();
   assert.deepEqual(started, []);
   await service.check();  // an overlapping check while the first one waits does nothing
   tiers.release();
-  await waiting;
+  await ticks();
+  service.stop();
   assert.deepEqual(started, ['B']);
   assert.deepEqual(recorded(), ['B:2026-11-24-21-30']);
 });
