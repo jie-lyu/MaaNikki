@@ -948,10 +948,11 @@ class _UiSession:
         self.image = image
         self.hits.pop(node, None)
         self.jobs.pop(node, None)
-        self.tasker.post_task("ProbeRecognise", {"ProbeRecognise": {
+        job = self.tasker.post_task("ProbeRecognise", {"ProbeRecognise": {
             "action": "Custom", "custom_action": "ProbeRecognise",
             "custom_action_param": {"node": node, "override": override or {}}}}).wait()
-        if not self.jobs.get(node):
+        # A genuine miss is a detail with hit=False; None (or a failed job) means it never ran.
+        if not job.succeeded or not self.jobs.get(node) or self.hits.get(node) is None:
             self.fail(f"the recognition of {node} could not run")
         return self.hits.get(node)
 
@@ -1074,10 +1075,12 @@ def cmd_text_input_check(args) -> int:
         ui.fail("the 博物图鉴 检索 page is not recognised (MaaNikki_CompendiumSearchReady); nothing sent")
     box = COMPENDIUM_SEARCH_BOX
     centre = (box[0] + box[2] // 2, box[1] + box[3] // 2)
-    placeholder = ui.text(box, start)
-    ui.steps.append({"step": "field before", "text": placeholder})
-    if placeholder and "输入名称" not in placeholder:
-        ui.fail(f"the search field is not empty ({placeholder!r}); clear it first. Nothing sent")
+    before = ui.text(box, start)
+    placeholder = args.placeholder or ""
+    ui.steps.append({"step": "field before", "text": before, "placeholder": placeholder})
+    if before not in ("", placeholder):
+        ui.fail(f"the search field does not read as empty ({before!r}); clear it first, or pass the exact empty-field "
+                "reading from a capture as --placeholder. Nothing sent")
 
     def on_search_page(name):
         image = ui.frame(name)
@@ -1130,11 +1133,19 @@ def cmd_hover_check(args) -> int:
         for name, point in (("parked", HOVER_PARK), ("hovered", tuple(args.point)), ("parked-again", HOVER_PARK)):
             moved = ui.controller.post_touch_move(contact=0, x=point[0], y=point[1], pressure=0).wait().succeeded
             time.sleep(0.6)
-            ui.frame(name)
-            ui.steps.append({"step": f"hover {name}", "point": list(point), "sent": moved, "cursor": _cursor()})
+            image, _ = _grab(ui.controller)  # not ui.frame(): a capture failure must not skip the report below
+            if image is not None and image.shape[:2] == (720, 1280):
+                ui.cv2.imwrite(str(ui.out / f"{len(ui.steps):02d}-{name}.png"), image)
+            ui.steps.append({"step": f"hover {name}", "point": list(point), "sent": moved, "cursor": _cursor(),
+                             "frame_saved": image is not None})
             if not moved:
                 failure = f"the unit refused the hover to {name} (see maafw.log)"
                 break
+            if image is None:
+                failure = f"no frame after the hover to {name}"
+                break
+    except BaseException as error:  # an interrupt: still restore and report before exiting
+        failure = f"interrupted during the hovers ({type(error).__name__})"
     finally:
         # The end-of-task cleanup the core sends: the unit puts the user's cursor back.
         try:
@@ -1474,6 +1485,9 @@ def main() -> int:
             command.add_argument("--out", required=True)
         if name == "key-sequence-check":
             command.add_argument("--sequence", choices=sorted(KEY_SEQUENCES), required=True)
+        if name == "text-input-check":
+            command.add_argument("--placeholder", default="",
+                                 help="the exact OCR reading of the empty field, from a capture beforehand")
         if name == "hover-check":
             command.add_argument("--point", type=int, nargs=2, required=True, metavar=("X", "Y"),
                                  help="a point on the selected card, in 1280x720 frame coordinates")

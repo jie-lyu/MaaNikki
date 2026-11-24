@@ -515,13 +515,39 @@ class UiProbeTests(unittest.TestCase):
 
     def test_text_input_types_reads_back_and_clears_each_trial(self):
         controller = FakeController()
-        code, output, _ = self.run_ui("text-input-check", [], controller, {"MaaNikki_CompendiumSearchReady": True},
-                                      texts=("输入名称", "Ab12", "", "星光", ""))
+        code, output, _ = self.run_ui("text-input-check", ["--placeholder", "输入名称"], controller,
+                                      {"MaaNikki_CompendiumSearchReady": True},
+                                      texts=("输入名称", "Ab12", "输入名称", "星光", ""))
         self.assertEqual(code, 0, output)
         centre = (1040, 44)
         self.assertEqual(controller.events, [("click", *centre), ("text", "Ab12"), ("click", 1202, 44),
                                              ("click", *centre), ("text", "星光"), ("click", 1202, 44)])
         self.assertIn('"exact_match": true', output)
+
+    def test_only_an_exact_placeholder_counts_as_empty(self):
+        controller = FakeController()
+        code, output, _ = self.run_ui("text-input-check", ["--placeholder", "输入名称"], controller,
+                                      {"MaaNikki_CompendiumSearchReady": True}, texts=("我的输入名称",))
+        self.assertEqual(code, 1)
+        self.assertEqual(controller.events, [])
+
+    def test_a_recognition_that_never_ran_is_a_failure_not_a_miss(self):
+        session = probe._UiSession.__new__(probe._UiSession)
+        session.steps, session.hits, session.jobs, session.image = [], {}, {}, None
+        failures = []
+        session.fail = lambda reason: failures.append(reason) or (_ for _ in ()).throw(SystemExit(1))
+        session.tasker = types.SimpleNamespace(post_task=lambda *a: Job(False))
+        with self.assertRaises(SystemExit):
+            session.detail("ProbeReadText", None)
+        self.assertIn("could not run", failures[0])
+
+        def ran_without_result(*a):  # the callback ran, but run_recognition gave None
+            session.jobs["ProbeReadText"] = True
+            session.hits["ProbeReadText"] = None
+            return Job(True)
+        session.tasker = types.SimpleNamespace(post_task=ran_without_result)
+        with self.assertRaises(SystemExit):
+            session.detail("ProbeReadText", None)
 
     def test_no_text_is_posted_once_the_search_page_is_gone(self):
         controller = FakeController()
@@ -574,6 +600,15 @@ class UiProbeTests(unittest.TestCase):
                                       {"MaaNikki_Blessing_InventoryReady": True})
         self.assertEqual(code, 1)
         self.assertIn("inactive() was not confirmed", output)
+
+    def test_an_interrupted_hover_still_restores_and_reports_both(self):
+        controller = FakeController(interrupt={"hover"})
+        controller.inactive_ok = False
+        code, output, _ = self.run_ui("hover-check", ["--point", "300", "400"], controller,
+                                      {"MaaNikki_Blessing_InventoryReady": True})
+        self.assertEqual(code, 1)
+        self.assertEqual(controller.events, [("hover", 900, 32), ("inactive",)])
+        self.assertIn("interrupted during the hovers (KeyboardInterrupt); inactive() was not confirmed", output)
 
     def test_a_refused_hover_still_ends_with_the_cursor_cleanup(self):
         controller = FakeController()
