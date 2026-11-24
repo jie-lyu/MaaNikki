@@ -1,4 +1,5 @@
 import { useAppStore } from '@/stores/appStore';
+import { waitForMacTaskTiers } from '@/services/macTaskTiersService';
 import { loggers } from '@/utils';
 import type { Instance } from '@/types/interface';
 
@@ -199,6 +200,10 @@ class ScheduleService {
         currentSlot.getMinutes(),
       ).padStart(2, '0')}`;
       const slotStr = formatSlotKey(currentSlot);
+
+      // macOS: the slot is fixed above; wait for the task tiers before deciding, so a start refused only
+      // because they were still loading does not use up the slot. Returns at once on other backends.
+      await waitForMacTaskTiers();
 
       this.cleanupOldSlots();
       const triggeredSlots = this.getTriggeredSlots();

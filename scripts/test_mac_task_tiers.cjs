@@ -12,7 +12,7 @@ const ROOT = resolve(__dirname, '..');
 
 function load(path) {
   const source = readFileSync(resolve(ROOT, 'client/src', path), 'utf8');
-  const context = { exports: {} };
+  const context = { exports: {}, setTimeout, clearTimeout };
   vm.runInNewContext(ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS },
   }).outputText, context, { filename: path });
@@ -75,4 +75,40 @@ test('macOS starts wait for the tiers and stop on a manifest error; other system
   for (const os of ['windows', 'linux', '']) {
     for (const source of [null, undefined, mac, broken]) assert.equal(tiers.macStartBlockedReason(os, source), '');
   }
+});
+
+test('an empty or malformed macOS tier response is a load error that refuses starts', () => {
+  for (const raw of [null, [], {}, { verified: [], experimental: [], excluded: {}, notes: {} },
+    { verified: 'x', experimental: [], excluded: {}, notes: {} }, { verified: ['A'], experimental: [], excluded: [], notes: {} },
+    { verified: ['A'], experimental: [], excluded: {} }]) {
+    assert.equal(tiers.macTaskTiersShapeError(raw), tiers.MAC_TIERS_MALFORMED, JSON.stringify(raw));
+  }
+  assert.equal(tiers.macTaskTiersShapeError({
+    verified: manifest.entries, experimental: manifest.experimental, excluded: manifest.excluded, notes: manifest.notes,
+  }), '');
+  // Even without the service's check, empty tiers on macOS never let a run start unmarked.
+  assert.equal(tiers.macStartBlockedReason('macos', tiers.normalizeMacTaskTiers({})), tiers.MAC_TIERS_MALFORMED);
+  assert.equal(tiers.macStartBlockedReason('windows', tiers.normalizeMacTaskTiers({})), '');
+});
+
+test('a scheduled slot waits for a delayed tier response instead of being refused', async () => {
+  const store = { backendOS: 'macos', macTaskTiers: null };
+  const listeners = new Set();
+  const subscribe = (listener) => { listeners.add(listener); return () => listeners.delete(listener); };
+  let settled = false;
+  const waiting = tiers.macTaskTiersSettled(() => store, subscribe, 10000).then(() => { settled = true; });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(settled, false);
+  assert.equal(tiers.macStartBlockedReason(store.backendOS, store.macTaskTiers), tiers.MAC_TIERS_PENDING);
+  store.macTaskTiers = mac;  // the response arrives
+  for (const listener of [...listeners]) listener();
+  await waiting;
+  assert.equal(listeners.size, 0);
+  assert.equal(tiers.macStartBlockedReason(store.backendOS, store.macTaskTiers), '');  // the slot now starts
+  // Other backends never wait; a response that never comes gives up and the gate says why.
+  await tiers.macTaskTiersSettled(() => ({ backendOS: 'windows', macTaskTiers: null }), subscribe, 10000);
+  const stuck = { backendOS: 'macos', macTaskTiers: null };
+  await tiers.macTaskTiersSettled(() => stuck, subscribe, 5);
+  assert.equal(listeners.size, 0);
+  assert.equal(tiers.macStartBlockedReason(stuck.backendOS, stuck.macTaskTiers), tiers.MAC_TIERS_PENDING);
 });

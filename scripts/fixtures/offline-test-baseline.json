@@ -498,7 +498,9 @@
     "a manifest error alone marks nothing and keeps the error",
     "macOS marks verified, experimental and excluded entries from the shipped manifest",
     "malformed backend values are dropped, not trusted",
-    "macOS starts wait for the tiers and stop on a manifest error; other systems never wait"
+    "macOS starts wait for the tiers and stop on a manifest error; other systems never wait",
+    "an empty or malformed macOS tier response is a load error that refuses starts",
+    "a scheduled slot waits for a delayed tier response instead of being refused"
    ],
    "known_failures": [],
    "skips": []
