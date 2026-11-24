@@ -415,6 +415,7 @@
     "MacOSPreviewPathTests.test_wrong_frame_size_skips_window_resizing_without_the_capability",
     "MacTextGateTests.test_a_cleanup_error_over_the_refusal_still_spends_nothing",
     "MacTextGateTests.test_a_paste_is_only_trusted_when_the_field_reads_the_code",
+    "MacTextGateTests.test_a_resume_inside_the_last_input_check_cancels_a_verified_click",
     "MacTextGateTests.test_a_typed_realm_amount_is_refused_before_the_field_is_clicked",
     "MacTextGateTests.test_redeem_rechecks_the_field_on_a_fresh_frame_after_the_cooldown_before_clicking",
     "MacTextGateTests.test_redeem_stops_the_code_instead_of_typing_it",

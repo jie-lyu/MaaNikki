@@ -444,6 +444,13 @@ class Runtime:
         inputs = self._active_inputs()
         if inputs is not None:
             inputs.check()
+            if focus_generation is not None and platform_backend() == "macos":
+                # inputs.check() may have waited for the game to come back: a click checked on an older frame is
+                # cancelled here, right before dispatch. Win32 keeps its existing order.
+                self.check_focus()
+                if self._focus_generation != focus_generation:
+                    from task_control import ForegroundChanged
+                    raise ForegroundChanged("前台切换后已取消本次输入，等待重新核对")
         window_only = bool(getattr(inputs, "window_only", False))
         use_window = self._use_window_input(inputs)
         if use_window:

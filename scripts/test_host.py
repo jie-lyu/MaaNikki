@@ -1274,6 +1274,49 @@ class MacTextGateTests(unittest.TestCase):
         self.assertEqual(result, ("redeemed", ""))
         self.assertEqual(events, ["filled", "cooldown", ("click", tuple(redeem_codes.MODAL_USE_TARGET))])
 
+    def test_a_resume_inside_the_last_input_check_cancels_a_verified_click(self):
+        from daily.runtime import Runtime
+        from task_control import ForegroundChanged
+
+        def runtime():
+            rt = Runtime.__new__(Runtime)
+            rt.navigation_halted = False
+            rt.context = SimpleNamespace(tasker=SimpleNamespace(stopping=False),
+                                         run_action=Mock(return_value=SimpleNamespace(success=True)))
+            session = SimpleNamespace(generation=7, pause_generation=0, wait=lambda *a, **k: None, evidence=Mock(),
+                                      stopped=lambda: False)
+            rt._focus_generation, rt._pause_generation = 7, 0
+            rt.navigation_inputs = None
+            rt.ensure_frame, rt.invalidate_frame = Mock(return_value=True), Mock()
+            checks = []
+
+            def check(**kwargs):
+                checks.append(kwargs)
+                if len(checks) == 2:  # the last check before dispatch waits for the game and it comes back
+                    session.generation = 8
+            rt._active_inputs = Mock(return_value=SimpleNamespace(check=check, window_only=False))
+            rt._use_window_input = Mock(return_value=False)
+            rt._validate_pointer_targets = Mock(return_value=(1280, 720))
+            rt._target_point = lambda target, name: (target[0] + target[2] // 2, target[1] + target[3] // 2)
+            return rt, session
+
+        for platform in ("macos", "win32"):
+            rt, session = runtime()
+            with self.subTest(platform=platform), \
+                    patch("daily.runtime.active_session", return_value=session), \
+                    patch("daily.runtime.platform_backend", return_value=platform), \
+                    patch("daily.runtime.capabilities", return_value=SimpleNamespace(pointer_hover=False)), \
+                    patch("daily.runtime.native_key_fields", side_effect=lambda action, fields: fields), \
+                    patch.object(Runtime, "pause", return_value=True), \
+                    patch.object(Runtime, "ui", SimpleNamespace(unhover=lambda: True), create=True):
+                if platform == "macos":
+                    with self.assertRaises(ForegroundChanged):
+                        rt.action("Click", target=[600, 450, 80, 40], focus_generation=7)
+                    rt.context.run_action.assert_not_called()  # the verified frame is from before the resume
+                else:
+                    self.assertTrue(rt.action("Click", target=[600, 450, 80, 40], focus_generation=7))
+                    rt.context.run_action.assert_called_once()  # Win32: its existing order, unchanged
+
     def runtime_for_amount(self):
         from daily.runtime import Executors
         rt = Executors.__new__(Executors)
