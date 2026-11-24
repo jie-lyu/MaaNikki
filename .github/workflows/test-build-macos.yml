@@ -6,7 +6,7 @@ name: Test build macOS arm64
 #
 # No Apple silicon runner has been assigned to this repository (November 2026), so everything is
 # cross-compiled on Intel and nothing arm64 is executed here: the job proves that the package
-# assembles, that every Mach-O file is arm64 only and loads nothing outside the bundle and the
+# assembles, that every Mach-O file contains an arm64 slice and loads nothing outside the bundle and the
 # system, and that the ad-hoc signature verifies. Running it (`macos_package.py verify`, the control
 # unit's lifecycle probe) happens on Apple silicon with this exact DMG, checked by SHA-256.
 #

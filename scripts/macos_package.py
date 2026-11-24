@@ -13,8 +13,9 @@ package   copies that .app and fills Contents/Resources with what the Windows pa
           native/macos-control-unit/build.py --runtime-out: official MaaFramework with the patched
           control unit) and python/ (python-build-standalone with the locked arm64 wheels, from
           build/macos/runtime.lock.json). Bytecode is compiled ahead of time (unchecked-hash) so the
-          embedded Python never writes into the signed bundle. Every Mach-O file must be arm64 only and
-          load nothing outside the bundle and the system; each is signed ad hoc, then the bundle. The
+          embedded Python never writes into the signed bundle. Every Mach-O file must contain arm64 and
+          load nothing outside the bundle and the system; files without a valid signature are signed ad
+          hoc (the others stay byte for byte), then the bundle. The
           DMG (with an Applications link and the tester notes) and a SHA256SUMS file go to --output.
           Runs on any Mac: nothing here executes arm64 code unless the host is Apple silicon.
 verify    Apple silicon only: copies the app out of the DMG like a tester would, runs the embedded
