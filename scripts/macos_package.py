@@ -168,8 +168,10 @@ def check_runtime(runtime: Path, unit_manifest: dict) -> None:
     for name, expected in stock.items():
         if name.endswith(".dylib") and name != UNIT and sha256(runtime / name) != expected:
             sys.exit(f"{runtime / name} does not match the official runtime in upstream.lock.json")
-    if not unit_manifest.get("patches"):
-        sys.exit("the unit manifest lists no patches; the stock control unit cannot drive the game")
+    expected_patches = sorted(path.name for path in (ROOT / "native" / "macos-control-unit" / "patches").glob("*.patch"))
+    if unit_manifest.get("patches") != expected_patches:
+        sys.exit(f"the unit was built from patches {unit_manifest.get('patches')}, the tree has {expected_patches}; "
+                 "rebuild it with native/macos-control-unit/build.py")
     if sha256(runtime / UNIT) != unit_manifest["sha256"]:
         sys.exit(f"{runtime / UNIT} is not the unit described by the manifest")
     if unit_manifest.get("architecture") != "arm64":
