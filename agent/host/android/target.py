@@ -107,8 +107,11 @@ class AndroidTarget:
         self._shell_failures = 0
 
     def _shell(self, command: str) -> str | None:
-        unreachable = False
-        with _SHELL_LOCK:
+        # The device-input lock first, as everywhere (a tap's last checks hold it): a read that finds the device
+        # unreachable makes earlier frames stale before anyone else can check a frame against the epoch.
+        from host import DeviceUnreachable, device_input
+        state = device_input()
+        with state.lock, _SHELL_LOCK:
             try:
                 job = self.controller.post_shell(command, 5000).wait()
                 output = job.get() if getattr(job, "succeeded", False) else None
@@ -118,17 +121,12 @@ class AndroidTarget:
                 self._shell_failures = 0
                 return output
             self._shell_failures += 1
-            if self._shell_failures >= self.SHELL_FAILURE_LIMIT:
-                self._shell_failures = 0
-                unreachable = True
-        if unreachable:
-            # Outside the shell lock (the device-input lock is taken first everywhere): every frame captured before
-            # now is stale, so a caller that catches this and carries on cannot tap on one of them.
-            from host import DeviceUnreachable, device_input
-            device_input().observed_loss()
+            if self._shell_failures < self.SHELL_FAILURE_LIMIT:
+                return None
+            self._shell_failures = 0
+            state.observed_loss()
             raise DeviceUnreachable(f"安卓模拟器 {self.serial} 连续 {self.SHELL_FAILURE_LIMIT} 次没有回应 ADB 命令，任务已停止："
                                     "请重启 ADB server（adb kill-server; adb start-server），确认模拟器还在，再重试。")
-        return None
 
     def exists(self) -> bool:
         # Only a confirmed absence ends the task as "game closed"; an unreadable answer is not one. Whether the

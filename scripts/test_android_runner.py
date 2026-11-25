@@ -97,10 +97,15 @@ class RunnerTests(unittest.TestCase):
                          {"name": "B", "pipeline_override": {"N": {"b": 1}}}]}}}
         self.assertEqual(runner.task_override(interface, "E", {}), [{"N": {"a": 1}}, {"N": {"b": 1}}])
         self.assertEqual(runner.task_override(interface, "E", {"Pages": "B"}), [{"N": {"b": 1}}])
+        self.assertEqual(runner.task_override(interface, "E", {"Pages": "A,B"}), [{"N": {"a": 1}}, {"N": {"b": 1}}])
+        single = {**interface, "option": {"Pages": {**interface["option"]["Pages"], "type": "switch",
+                                                    "default_case": "A"}}}
+        with self.assertRaises(runner.RunnerError):
+            runner.task_override(single, "E", {"Pages": "A,B"})  # one case only
         runner.task_override(self.interface, "MaaNikki_MonthlyPass", {})  # the real list default resolves
 
-    def test_an_interrupted_run_stops_the_task_reaps_the_agent_and_the_next_run_works(self):
-        import tempfile
+    def fake_framework(self, *, interrupt_runs=(), on_disconnect=None, child_waits=None):
+        """Fake maa modules and agent child; returns (modules, calls, children, Child)."""
         import types
         calls = {"post_stop": 0, "runs": 0}
 
@@ -126,7 +131,7 @@ class RunnerTests(unittest.TestCase):
 
             def post_task(self, entry, override):
                 calls["runs"] += 1
-                return Job(interrupt=calls["runs"] == 1)
+                return Job(interrupt=calls["runs"] in interrupt_runs)
 
             def post_stop(self):
                 calls["post_stop"] += 1
@@ -160,6 +165,8 @@ class RunnerTests(unittest.TestCase):
                 return True
 
             def disconnect(self):
+                if on_disconnect:
+                    on_disconnect()
                 return True
 
         children = []
@@ -171,8 +178,8 @@ class RunnerTests(unittest.TestCase):
 
             def wait(self, timeout=None):
                 self.calls.append("wait")
-                if len(children) == 1 and self.calls.count("wait") == 1:
-                    raise subprocess.TimeoutExpired("agent", timeout)  # the first agent is slow to exit
+                if child_waits and child_waits(self, len(children)):
+                    raise subprocess.TimeoutExpired("agent", timeout)
                 return 0
 
             def terminate(self):
@@ -184,22 +191,61 @@ class RunnerTests(unittest.TestCase):
                    "maa.controller": types.SimpleNamespace(AdbController=Controller),
                    "maa.resource": types.SimpleNamespace(Resource=Resource),
                    "maa.tasker": types.SimpleNamespace(Tasker=Tasker)}
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, modules), \
-                patch.object(runner, "adb_alive"), patch.object(runner.subprocess, "Popen", Child), \
-                patch.object(runner, "LOG_ROOT", Path(tmp) / "logs"), patch.object(runner, "RUN_LOG", Path(tmp) / "runs.jsonl"), \
-                patch("builtins.print"), patch("sys.stderr"):
+        return modules, calls, children, Child
+
+    def run_fakes(self, tmp, modules, Child, runs=1):
+        from contextlib import ExitStack
+        results, records = [], []
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(sys.modules, modules))
+            stack.enter_context(patch.object(runner, "adb_alive"))
+            stack.enter_context(patch.object(runner.subprocess, "Popen", Child))
+            stack.enter_context(patch.object(runner, "LOG_ROOT", Path(tmp) / "logs"))
+            stack.enter_context(patch.object(runner, "RUN_LOG", Path(tmp) / "runs.jsonl"))
+            stack.enter_context(patch("builtins.print"))
+            stack.enter_context(patch("sys.stderr"))
             argv = ["run", "MaaNikki_AndroidCheck", "--purpose", "t", "--data-root", str(Path(tmp) / "data")]
-            self.assertEqual(runner.main(argv), 2)
-            first = json.loads((Path(tmp) / "runs.jsonl").read_text(encoding="utf-8").splitlines()[0])
-            self.assertEqual(first["status"], "interrupted")
-            self.assertIs(first["stop_requested"], True)
-            self.assertEqual(calls["post_stop"], 1)
-            self.assertEqual(children[0].calls[:2], ["wait", "terminate"])  # reaped before the runner returned
-            time.sleep(1.1)  # a new log directory name
-            self.assertEqual(runner.main(argv), 0)
-            second = json.loads((Path(tmp) / "runs.jsonl").read_text(encoding="utf-8").splitlines()[1])
-            self.assertEqual(second["status"], "succeeded")
-            self.assertEqual(calls["post_stop"], 1)
+            for index in range(runs):
+                if index:
+                    time.sleep(1.1)  # a new log directory name
+                results.append(runner.main(argv))
+        records = [json.loads(line) for line in (Path(tmp) / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
+        return results, records
+
+    def test_an_interrupted_run_stops_the_task_reaps_the_agent_and_the_next_run_works(self):
+        import tempfile
+        modules, calls, children, Child = self.fake_framework(
+            interrupt_runs={1}, child_waits=lambda child, count: count == 1 and child.calls.count("wait") == 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            results, records = self.run_fakes(tmp, modules, Child, runs=2)
+        self.assertEqual(results, [2, 0])
+        self.assertEqual((records[0]["status"], records[0]["stop_requested"]), ("interrupted", True))
+        self.assertEqual(calls["post_stop"], 1)
+        self.assertEqual(children[0].calls[:2], ["wait", "terminate"])  # reaped before the runner returned
+        self.assertEqual(records[1]["status"], "succeeded")
+
+    def test_a_ctrl_c_during_teardown_is_deferred_until_the_agent_is_reaped(self):
+        import os
+        import signal
+        import tempfile
+        modules, calls, children, Child = self.fake_framework(
+            on_disconnect=lambda: os.kill(os.getpid(), signal.SIGINT))
+        with tempfile.TemporaryDirectory() as tmp:
+            results, records = self.run_fakes(tmp, modules, Child)
+        self.assertEqual(results, [130])
+        self.assertEqual(children[0].calls, ["wait"])  # still reaped
+        self.assertIs(records[0]["interrupted_during_cleanup"], True)
+        self.assertEqual(records[0]["agent_exit"], 0)
+        self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)  # restored
+
+    def test_an_agent_that_cannot_be_reaped_fails_the_run(self):
+        import tempfile
+        modules, calls, children, Child = self.fake_framework(child_waits=lambda child, count: True)
+        with tempfile.TemporaryDirectory() as tmp:
+            results, records = self.run_fakes(tmp, modules, Child)
+        self.assertEqual(results, [1])
+        self.assertEqual(children[0].calls, ["wait", "terminate", "wait", "kill", "wait"])
+        self.assertEqual((records[0]["status"], records[0]["agent_exit"]), ("error", "unreaped"))
 
     def test_the_command_line(self):
         args = runner.build_parser().parse_args(["run", "MaaNikki_AndroidCheck", "--purpose", "t", "--option", "A=B"])

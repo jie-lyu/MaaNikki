@@ -26,6 +26,7 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import threading
@@ -111,7 +112,11 @@ def task_override(interface: dict, entry: str, chosen: dict[str, str]) -> list[d
         if definition is None:
             raise RunnerError(f"option {name} is not defined")
         cases = {case["name"]: case for case in definition.get("cases", [])}
-        selected = chosen[name].split(",") if name in chosen else definition.get("default_case")
+        checkbox = definition.get("type") == "checkbox"
+        if name in chosen and "," in chosen[name] and not checkbox:
+            raise RunnerError(f"option {name} takes one case, got {chosen[name]!r}")
+        selected = (chosen[name].split(",") if checkbox else chosen[name]) if name in chosen \
+            else definition.get("default_case")
         if selected is None:
             if definition.get("cases"):
                 raise RunnerError(f"option {name} has no default case; pass --option {name}=CASE ({sorted(cases)})")
@@ -243,12 +248,26 @@ def run(args) -> int:
         record["stop_requested"] = stop_tasker(tasker)
         raise
     finally:
+        # Once the agent exists, a Ctrl-C during cleanup is deferred: the child is always reaped and the record
+        # always written.
+        deferred = []
+        previous = signal.signal(signal.SIGINT, lambda *_: deferred.append(True)) \
+            if threading.current_thread() is threading.main_thread() else None
         try:
-            within(15, "断开 agent", client.disconnect)
-        except (RunnerError, Exception):
-            record["disconnect"] = "timed out or failed"
-        record["agent_exit"] = reap(child)
-        agent_log.close()
+            try:
+                within(15, "断开 agent", client.disconnect)
+            except (RunnerError, Exception):
+                record["disconnect"] = "timed out or failed"
+            record["agent_exit"] = reap(child)
+            agent_log.close()
+        finally:
+            if previous is not None:
+                signal.signal(signal.SIGINT, previous)
+        if deferred:
+            record["interrupted_during_cleanup"] = True
+        if record["agent_exit"] == "unreaped":
+            record["status"] = "error"
+            record["error"] = "agent 子进程没能结束（终止和强制结束都没有确认）"
         log_file = log_dir / "maafw.log"
         record["methods"] = methods_in_log(log_file.read_text(encoding="utf-8", errors="replace")) \
             if log_file.exists() else None
@@ -257,6 +276,8 @@ def run(args) -> int:
         with RUN_LOG.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         print(json.dumps(record, ensure_ascii=False, indent=1))
+    if record.get("interrupted_during_cleanup"):
+        return 130
     return 0 if record.get("status") == "succeeded" else 1
 
 

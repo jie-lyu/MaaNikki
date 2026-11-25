@@ -271,6 +271,10 @@ class UnreachableDeviceTests(FreshAndroidState):
         self.assertIn("adb kill-server", str(caught.exception))
         controller.outputs["mCurrentFocus"] = FOCUS_GAME
         self.assertTrue(target.foreground())  # a success starts the count again
+        controller.outputs.clear()
+        self.assertFalse(target.foreground())
+        controller.outputs["mCurrentFocus"] = FOCUS_GAME
+        self.assertTrue(target.foreground())
 
     def test_an_unreachable_device_makes_earlier_frames_stale(self):
         import numpy as np
@@ -284,10 +288,18 @@ class UnreachableDeviceTests(FreshAndroidState):
         with self.assertRaises(host.DeviceUnreachable):
             target.foreground()                # third: raised before any focus reading was recorded
         self.assertNotEqual(self.state.marks_of(frame), (0, self.state.epoch))  # the old frame no longer counts
-        controller.outputs.clear()
-        self.assertFalse(target.foreground())
-        controller.outputs["mCurrentFocus"] = FOCUS_GAME
-        self.assertTrue(target.foreground())
+
+    def test_shell_reads_hold_the_device_input_lock(self):
+        owned = []
+
+        class Device(FakeShellController):
+            def post_shell(inner, command, timeout):
+                owned.append(self.state.lock._is_owned())
+                return super().post_shell(command, timeout)
+        target = AndroidTarget(INFO, Device({"mCurrentFocus": FOCUS_GAME, "pidof": "4242\n__exit=0\n"}))
+        target.exists()
+        target.foreground()
+        self.assertEqual(owned, [True, True])  # pidof as well as the focus read
 
 
 class SessionTests(FreshAndroidState):

@@ -112,7 +112,8 @@
     "TaskListTests.test_the_mac_development_switch_does_not_open_android_tasks",
     "TaskListTests.test_the_shipped_list_is_well_formed_and_holds_only_the_read_only_check",
     "UnreachableDeviceTests.test_an_unreachable_device_makes_earlier_frames_stale",
-    "UnreachableDeviceTests.test_repeated_shell_failures_stop_with_adb_restart_advice"
+    "UnreachableDeviceTests.test_repeated_shell_failures_stop_with_adb_restart_advice",
+    "UnreachableDeviceTests.test_shell_reads_hold_the_device_input_lock"
    ],
    "known_failures": [],
    "skips": [
@@ -144,6 +145,8 @@
   "test_android_runner.py": {
    "tests": [
     "RunnerTests.test_a_blocking_step_that_overruns_ends_with_the_adb_advice",
+    "RunnerTests.test_a_ctrl_c_during_teardown_is_deferred_until_the_agent_is_reaped",
+    "RunnerTests.test_an_agent_that_cannot_be_reaped_fails_the_run",
     "RunnerTests.test_an_interrupted_run_stops_the_task_reaps_the_agent_and_the_next_run_works",
     "RunnerTests.test_options_resolve_to_defaults_or_the_chosen_case",
     "RunnerTests.test_options_with_several_cases",
