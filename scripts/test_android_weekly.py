@@ -276,6 +276,10 @@ class FlowTests(unittest.TestCase):
                 self.assertNotIn("back", game.touches)
                 self.assertTrue(any(words in line for line in rt.logs), rt.logs)
                 self.assertEqual(len(stop_diagnostics(rt)), 1)
+                # What the band read is in the saved scene only (review d2-mailstart-r2, 4).
+                band = changed["band"].replace(" ", "")  # the band is read with its spaces removed
+                self.assertFalse(any(f"价格栏「{band}」" in line for line in rt.logs), rt.logs)
+                self.assertIn(f"价格栏「{band}」", stop_diagnostics(rt)[0].args[1])
 
     def test_a_list_that_stops_moving_before_every_gift_was_seen_stops(self):
         game = Game({"虹迹赠礼": gift(1200, 839), "芳馨赠礼": gift(1700, 839)}, end=700)  # 星实置业之礼 missing

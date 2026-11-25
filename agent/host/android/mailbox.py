@@ -79,7 +79,9 @@ def run(rt) -> bool:
             for frame, reason in start:  # the screen the task would not start from (e.g. a popup)
                 rt.diagnostic("android_mailbox_start", f"开始时不在大世界，也没法安全地回去：{reason}", image=frame)
             return fail(rt, "没能回到大世界")
-        if not rt.key("menu"):
+        # The strict duck tap, not the named action: that one cancels a quit dialog and goes on (decision 2), and a
+        # quit dialog between the start and this tap must stop the task with its frame instead.
+        if not pages.tap_duck(rt):
             return False
         # Each wait stops at once on a recognised screen that is neither the one being left nor the one expected.
         if pages.wait_screen(rt, "打开美鸭梨菜单", _menu, lambda s, f, r: s.kind == "hud", 5) is None:

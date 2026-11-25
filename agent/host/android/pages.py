@@ -508,6 +508,24 @@ def tap_shortcut(rt, action: str, *, delay: float = .35) -> bool:
     raise PageMismatch(f"连续 {rt.TOUCH_KEY_ATTEMPTS} 次没能在稳定的画面上确认「{name}」快捷入口（焦点在变）")
 
 
+def tap_duck(rt) -> bool:
+    """The 美鸭梨 menu from the HUD by one strict tap on the duck (tap_on_layer: the HUD with the duck in the same
+    place on both tap frames, no forbidden label near it). Unlike the shared named action (Runtime.key("menu"), which
+    cancels a quit dialog and decides again, architecture decision 2), a quit dialog or any other screen on any
+    frame stops with that frame (FrameMismatch); there is no second attempt. False when the run stopped."""
+    from host.android import touch_point
+    screen, frame, recognize = screen_now(rt)
+    if frame is None:
+        return False
+    if screen is None or screen.kind != "hud":
+        raise FrameMismatch("要打开美鸭梨菜单时画面不是大世界", screen, frame, recognize)
+    point = touch_point(screen.targets["duck"])
+
+    def accept(screen_, _recognize_):
+        return screen_.kind == "hud" and actions._near(screen_.targets.get("duck"), point)
+    return tap_on_layer(rt, "鸭子图标在原处的大世界", accept, point)
+
+
 def back_through(rt, titles, attempts: int = 3) -> bool:
     """The way back after a task: the back arrow, tapped only on pages whose title starts with one of ``titles``
     (both tap frames, with the forbidden-label check); any other screen stops input."""

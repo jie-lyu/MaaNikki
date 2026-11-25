@@ -371,21 +371,8 @@ def _banner_shown(screen, frame, recognize) -> bool:
 
 # ---- the way in and out ----
 
-def tap_duck(rt) -> bool:
-    """The 美鸭梨 menu from the HUD by one strict tap on the duck (pages.tap_on_layer: the HUD with the duck in the same
-    place on both tap frames, no forbidden label near it). Unlike the shared named action, a quit dialog or any other
-    screen on either frame stops the task with that frame; there is no second attempt."""
-    from host.android import touch_point
-    screen, frame, _recognize = pages.screen_now(rt)
-    if frame is None:
-        return False
-    if screen.kind != "hud":
-        raise Stop("要打开美鸭梨菜单时画面不是大世界", [frame])
-    point = touch_point(screen.targets["duck"])
-
-    def accept(screen_, _recognize_):
-        return screen_.kind == "hud" and actions._near(screen_.targets.get("duck"), point)
-    return pages.tap_on_layer(rt, "鸭子图标在原处的大世界", accept, point)
+# The 美鸭梨 menu by one strict duck tap (shared with the mail task): any other screen stops with that frame.
+tap_duck = pages.tap_duck
 
 
 def _left(title):

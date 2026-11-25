@@ -122,11 +122,14 @@ SHIFT_STRIP = (520, 640)  # rows of the earlier frame looked for in the later on
 
 
 class Stop(Exception):
-    """Something unexpected: report it and send nothing more (not even the way back). ``frames`` are saved."""
+    """Something unexpected: report it and send nothing more (not even the way back). ``frames`` are saved. The
+    message reaches the user and never quotes OCR'd text; ``read`` (what was read) goes to the saved scene only."""
 
-    def __init__(self, reason, frames=()):
+    def __init__(self, reason, frames=(), read=None):
         super().__init__(reason)
         self.frames = [frame for frame in frames if frame is not None]
+        self.read = read
+        self.detail = f"{reason}（读到 {read}）" if read else reason
 
 
 @dataclass(frozen=True)
@@ -506,14 +509,14 @@ def scan(rt):
         try:
             gifts = read_gifts(recognize)
         except Stop as error:  # read on this frame
-            raise Stop(str(error), error.frames or [frame]) from error
+            raise Stop(str(error), error.frames or [frame], error.read) from error
         for name, card in gifts.items():
             if name in cards:
                 continue
             if card.state not in ("sold_out", "claimable"):
                 what = "价格栏不是「免费」" if card.state == "not_free" else "认不出是否已售罄"
-                raise Stop(f"「{name}」的卡片{what}（价格栏「{card.band}」，已售罄标记 {card.sold_out_pill}，"
-                           f"本周限购 {card.limit}）", [frame])
+                raise Stop(f"「{name}」的卡片{what}", [frame],
+                           f"价格栏「{card.band}」，已售罄标记 {card.sold_out_pill}，本周限购 {card.limit}")
             cards[name] = card
         if len(cards) == len(GIFTS):
             return cards
@@ -595,7 +598,7 @@ def run(rt) -> bool:
         if not leave(rt):
             return False
     except Stop as error:
-        return stopped(rt, str(error), error.frames)
+        return stopped(rt, str(error), error.frames, detail=error.detail)
     except pages.FrameMismatch as error:  # a tap or swipe frame that was not the expected state: no retry
         return stopped(rt, str(error), [error.frame])
     except (pages.GuardRefusal, actions.ScreenUnrecognised, NavigationError) as error:

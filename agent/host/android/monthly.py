@@ -287,7 +287,9 @@ def run(rt) -> bool:
             for frame, reason in start:  # the screen the task would not start from (e.g. a reward layer)
                 rt.diagnostic("android_monthly_start", f"开始时不在大世界，也没法安全地回去：{reason}", image=frame)
             return fail(rt, "没能回到大世界")
-        if not rt.key("monthly"):
+        # The strict shortcut tap (as the weekly gifts), not the named action: that one cancels a quit dialog and
+        # goes on (decision 2); here any screen but the HUD on either tap frame stops with that frame.
+        if not pages.tap_shortcut(rt, "monthly"):
             return False
         # From the HUD to the settled page: HUD frames are waited through, anything else stops.
         if wait_state(rt, "打开奇迹之旅页面", lambda kind, v: kind == "view",

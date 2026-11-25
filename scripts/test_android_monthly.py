@@ -180,10 +180,31 @@ class FlowTests(unittest.TestCase):
                              _frame_still_valid=Mock(return_value=True), pause=Mock(return_value=True),
                              diagnostic=Mock(), TOUCH_KEY_ATTEMPTS=3, action=game.click)
         rt.log = rt.logs.append
+        # The 奇迹之旅 shortcut: the strict HUD tap, scripted here (its own frames are tested in test_android_weekly.py
+        # and below); the game answers as to a tap on the shortcut.
         with patch.object(pages, "screen_now", side_effect=game.screen_now), \
+                patch.object(pages, "tap_shortcut", side_effect=lambda rt_, action: game.key(action)), \
                 patch("time.monotonic", side_effect=itertools.count(0, .5).__next__):
             result = monthly.run(rt)
         return result, rt
+
+    def test_a_quit_dialog_after_the_start_stops_with_its_frame_and_sends_nothing(self):
+        # Review d2-mailstart-r2, 1: HUD (the start) -> quit dialog -> HUD -> HUD. The named action would cancel the
+        # dialog and tap the shortcut; the strict shortcut tap stops on the dialog's frame.
+        quit_frame = other(Screen("quit_dialog", {"cancel": [430, 460, 130, 50]}))
+        frames = iter([other(HUD), quit_frame, other(HUD), other(HUD), other(HUD)])
+        clicks = []
+        rt = SimpleNamespace(stopped=False, logs=[], key=Mock(return_value=True), _frame_still_valid=Mock(return_value=True),
+                             pause=Mock(return_value=True), diagnostic=Mock(), TOUCH_KEY_ATTEMPTS=3,
+                             action=lambda *a, **k: clicks.append(k) or True)
+        rt.log = rt.logs.append
+        with patch.object(pages, "screen_now", side_effect=lambda rt_: next(frames)), \
+                patch("host.android_user_stop", return_value=False):
+            self.assertFalse(monthly.run(rt))
+        self.assertEqual(clicks, [])
+        rt.key.assert_not_called()
+        self.assertIs(rt.diagnostic.call_args.kwargs["image"], quit_frame[1])
+        self.assertEqual(len(rt.logs), 1)
 
     def test_a_gold_claim_on_the_task_tab_is_claimed_and_checked_on_settled_frames(self):
         game = Game(buttons={monthly.TASK: "enabled"})

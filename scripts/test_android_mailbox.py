@@ -80,6 +80,8 @@ HUD = Screen("hud", {"duck": [30, 18, 54, 54]})
 QUIT = Screen("quit_dialog", {"cancel": [430, 460, 130, 50]})
 BLANK = Screen("unknown", reason="认不出当前画面")  # with no node recognised on it: a transition
 ARROW = {actions.BACK_ARROW: hit([37, 22, 40, 40])}
+# The start's look at the HUD, then the strict duck tap's look, deciding and confirming frames (all the HUD).
+DUCK = [(HUD, {})] * 4
 
 
 class PageTapTests(unittest.TestCase):
@@ -212,69 +214,79 @@ class MailboxTests(unittest.TestCase):
         return [tuple(target) for _name, target in rt.clicks]
 
     def test_a_disabled_button_means_nothing_to_claim(self):
-        result, rt = self.play([(HUD, {}), self.menu(), self.menu(), self.menu(), self.mail("disabled"),
+        result, rt = self.play(DUCK + [self.menu(), self.menu(), self.menu(), self.mail("disabled"),
                                 self.mail("disabled"), self.mail("disabled"), self.mail("disabled"),
                                 self.mail("disabled"), self.menu(), self.menu(), self.menu(), (HUD, {})])
         self.assertTrue(result, rt.logs)
-        rt.key.assert_called_once_with("menu")
+        rt.key.assert_not_called()  # the strict duck tap, not the named action
         # The envelope, then the way back (the arrow on the mail page, then on the menu); never claim or delete.
-        self.assertEqual(self.taps(rt), [(530, 645, 55, 50), (37, 22, 40, 40), (37, 22, 40, 40)])
+        self.assertEqual(self.taps(rt), [(56, 44), (530, 645, 55, 50), (37, 22, 40, 40), (37, 22, 40, 40)])
         self.assertIn("邮箱没有可领取的附件。", rt.logs)
 
     def test_an_enabled_button_is_claimed_and_checked_on_one_mail_frame(self):
-        result, rt = self.play([(HUD, {}), self.menu(), self.menu(), self.menu(), self.mail("enabled"),
+        result, rt = self.play(DUCK + [self.menu(), self.menu(), self.menu(), self.mail("enabled"),
                                 self.mail("enabled"), self.mail("enabled"), self.mail("enabled"),
                                 (BLANK, {}), self.mail("disabled"), self.mail("disabled"), self.mail("disabled"),
                                 self.mail("disabled"), self.menu(), self.menu(), self.menu(), (HUD, {})])
         self.assertTrue(result, rt.logs)
-        self.assertEqual(self.taps(rt), [(530, 645, 55, 50), (311, 650, 132, 41), (37, 22, 40, 40),
+        self.assertEqual(self.taps(rt), [(56, 44), (530, 645, 55, 50), (311, 650, 132, 41), (37, 22, 40, 40),
                                          (37, 22, 40, 40)])
         self.assertIn("邮箱附件已全部领取。", rt.logs)
 
     def test_another_screen_after_claiming_stops_at_once_with_that_frame(self):
         layer = Screen("unknown", reason="认不出")
-        result, rt = self.play([(HUD, {}), self.menu(), self.menu(), self.menu(), self.mail("enabled"),
+        result, rt = self.play(DUCK + [self.menu(), self.menu(), self.menu(), self.mail("enabled"),
                                 self.mail("enabled"), self.mail("enabled"), self.mail("enabled"),
                                 (layer, {actions.MODAL_CLOSE: hit([1100, 60, 40, 40])}), self.mail("disabled")])
         self.assertFalse(result)
         self.assertNotIn("邮箱附件已全部领取。", rt.logs)
-        self.assertEqual(len(rt.clicks), 2)  # the envelope and the claim; no way back from an unexpected screen
+        self.assertEqual(len(rt.clicks), 3)  # duck, envelope, claim; no way back from an unexpected screen
         self.assertIs(rt.diagnostic.call_args.kwargs["image"], rt.frame_of("unknown"))
 
     def test_an_unexpected_screen_while_opening_the_menu_or_the_mail_stops_with_that_frame(self):
-        for frames in ([(HUD, {}), (HUD, {}), (page("设置"), ARROW), self.menu()],
-                       [(HUD, {}), self.menu(), self.menu(), self.menu(), self.menu(), (QUIT, {}),
-                        self.mail("disabled")]):
+        for frames in (DUCK + [(HUD, {}), (page("设置"), ARROW), self.menu()],
+                       DUCK + [self.menu(), self.menu(), self.menu(), self.menu(), (QUIT, {}),
+                               self.mail("disabled")]):
             with self.subTest(frames=len(frames)):
                 result, rt = self.play(frames)
                 self.assertFalse(result)
-                self.assertLessEqual(len(rt.clicks), 1)  # at most the envelope
+                self.assertLessEqual(len(rt.clicks), 2)  # at most the duck and the envelope
                 image = rt.diagnostic.call_args.kwargs["image"]
                 self.assertIs(image, rt.served[-1][0])  # the unexpected frame itself
                 self.assertIn(rt.served[-1][1].kind, ("page", "quit_dialog"))
                 self.assertTrue(any("不该出现的画面" in line for line in rt.logs), rt.logs)
 
     def test_an_unclear_button_stops_without_a_claim_or_navigation(self):
-        result, rt = self.play([(HUD, {}), self.menu(), self.menu(), self.menu(), self.mail("odd")])
+        result, rt = self.play(DUCK + [self.menu(), self.menu(), self.menu(), self.mail("odd")])
         self.assertFalse(result)
-        self.assertEqual(len(rt.clicks), 1)
+        self.assertEqual(len(rt.clicks), 2)  # duck and envelope
         rt.diagnostic.assert_called_once()
 
     def test_a_fatal_device_error_sends_nothing_more(self):
         from host import DeviceUnreachable
         with patch.object(mailbox, "claim", side_effect=DeviceUnreachable("ADB 没有回应")):
             with self.assertRaises(DeviceUnreachable):
-                self.play([(HUD, {}), self.menu(), self.menu(), self.menu(), self.mail("disabled")])
-        self.assertEqual(len(self.rt.clicks), 1)
+                self.play(DUCK + [self.menu(), self.menu(), self.menu(), self.mail("disabled")])
+        self.assertEqual(len(self.rt.clicks), 2)
 
     def test_a_guard_refusal_ends_all_input_with_a_fixed_message(self):
         delete = {pages.FORBIDDEN: hit([480, 655, 40, 30], "删除已读 奇迹之旅即将")}
         nodes = {**self.MENU_NODES, **delete}
-        result, rt = self.play([(HUD, {}), self.menu(), (page("美鸭梨"), nodes)])
+        result, rt = self.play(DUCK + [self.menu(), (page("美鸭梨"), nodes)])
         self.assertFalse(result)
-        self.assertEqual(rt.clicks, [])
+        self.assertEqual(self.taps(rt), [(56, 44)])  # the duck; the envelope is refused
         self.assertEqual(rt.logs, [f"邮箱领取：{pages.GUARD_TAP}，本项未完成。"])  # the row is not shown ...
         self.assertIn("删除已读 奇迹之旅即将", rt.diagnostic.call_args.args[1])  # ... it is in the saved scene
+
+    def test_a_quit_dialog_after_the_start_stops_with_its_frame_and_sends_nothing(self):
+        # Review d2-mailstart-r2, 1: HUD (the start) -> quit dialog -> HUD -> HUD. The named action would cancel the
+        # dialog and tap the duck; the strict duck tap stops on the dialog's frame.
+        result, rt = self.play([(HUD, {}), (QUIT, {}), (HUD, {}), (HUD, {}), (HUD, {})])
+        self.assertFalse(result)
+        self.assertEqual(rt.clicks, [])
+        rt.key.assert_not_called()
+        self.assertIs(rt.diagnostic.call_args.kwargs["image"], rt.frame_of("quit_dialog"))
+        self.assertEqual(len(rt.logs), 1)
 
     def test_starting_on_the_mail_page_leaves_it_through_its_back_arrow(self):
         # One live mail page read 「邮件 7/300 i」, 「邮件7/300 i」 and 「邮件7/300i」 on consecutive frames; the first
@@ -334,24 +346,18 @@ class StartFromMailTests(unittest.TestCase):
 
     def test_monthly_and_weekly_leave_the_mail_page_one_arrow_at_a_time(self):
         from host.android import monthly, shop
-        for name, module, after in (("monthly", monthly, None), ("weekly", shop, "tap_shortcut")):
+        for name, module, shortcut in (("monthly", monthly, "monthly"), ("weekly", shop, "shop")):
             with self.subTest(task=name):
                 rt = Rt(self.frames())
-                rt.key = Mock(return_value=False)  # ends the run right after the start
-                patches = [patch.object(pages, "tap_shortcut", return_value=False)] if after else []
+                # The strict shortcut tap ends the run right after the start (False: as after a stop).
                 with scripted(rt), patch("host.android_user_stop", return_value=False), \
-                        patch.object(pages, "LEAVE_PAGE_WAIT", 1):
-                    for extra in patches:
-                        extra.start()
-                    try:
-                        module.run(rt)
-                    finally:
-                        for extra in patches:
-                            extra.stop()
+                        patch.object(pages, "LEAVE_PAGE_WAIT", 1), \
+                        patch.object(pages, "tap_shortcut", return_value=False) as tap:
+                    module.run(rt)
                 self.assertEqual(rt.clicks, [("Click", [37, 22, 40, 40])] * 2)
                 self.assertEqual(rt.served[-1][1].kind, "hud")
-                if name == "monthly":
-                    rt.key.assert_called_once_with("monthly")  # got past the start
+                tap.assert_called_once_with(rt, shortcut)  # got past the start
+                rt.key.assert_not_called()  # never the named action, which cancels a quit dialog and goes on
                 rt.diagnostic.assert_not_called()
 
     def test_redeem_leaves_the_mail_page_and_its_messages_quote_no_title(self):
