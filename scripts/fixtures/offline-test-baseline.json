@@ -708,6 +708,7 @@
     "CallSiteGuardTests.test_only_desktop_modules_ask_for_the_desktop_backend",
     "GameBackendSelectionTests.test_a_desktop_controller_selects_its_backend_only_on_its_own_desktop",
     "GameBackendSelectionTests.test_adb_and_malformed_controllers_select_no_backend_yet",
+    "GameBackendSelectionTests.test_other_controller_types_keep_the_desktop_rules",
     "GameBackendSelectionTests.test_without_a_submitted_controller_it_is_the_desktop_backend",
     "MacOSUnchangedTests.test_tiers_notices_and_keys_match_the_unsubmitted_case",
     "Win32UnchangedTests.test_assets_resolve_in_the_main_resource_only",

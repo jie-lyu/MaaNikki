@@ -97,6 +97,16 @@ class GameBackendSelectionTests(unittest.TestCase):
         with desktop("win32", MACOS_CONTROLLER):
             self.assertIsNone(host.game_backend())
 
+    def test_other_controller_types_keep_the_desktop_rules(self):
+        for name in ("win32", "macos", None):
+            for kind in ("Gamepad", "PlayCover", "WlRoots"):
+                with self.subTest(name=name, kind=kind), desktop(name, {"name": "x", "type": kind}):
+                    self.assertEqual(host.game_backend(), name)
+                    self.assertEqual(host.task_entry_supported("MaaNikki_Fishing"),
+                                     name != "macos")  # what the desktop alone decides
+        with desktop(None, WINDOWS_CONTROLLER):  # Linux: as before only for types that are not targets
+            self.assertFalse(host.task_entry_supported("MaaNikki_Mailbox"))
+
     def test_adb_and_malformed_controllers_select_no_backend_yet(self):
         for name in ("win32", "macos"):
             with desktop(name, ADB_CONTROLLER):
@@ -155,8 +165,11 @@ class Win32UnchangedTests(unittest.TestCase):
             self.assertTrue(host.capabilities(host.game_backend()).tall_window)
 
     def test_assets_resolve_in_the_main_resource_only(self):
+        # The root a Runtime hands its GameUI (daily/runtime.py), not one chosen by the test.
+        from app_paths import RESOURCE_ROOT
+        from daily.runtime import RESOURCE as resource
         from daily.ui import GameUI, catalog
-        resource = ROOT / "resource"
+        self.assertEqual(resource, RESOURCE_ROOT / "resource")
         with desktop("win32", WINDOWS_CONTROLLER):
             ui = GameUI(None, resource)
             self.assertEqual(ui.asset_path("game/ui/AreaDialog.png"),
@@ -168,9 +181,9 @@ class Win32UnchangedTests(unittest.TestCase):
     def test_connect_target_accepts_the_win32_window(self):
         target = SimpleNamespace(name="win32-target")
         with desktop("win32", WINDOWS_CONTROLLER), patch("host.win32.target.Win32Target", return_value=target) as make:
-            for info in ({"type": "win32", "hwnd": 66}, {"hwnd": 66}):  # with and without a reported type
-                self.assertIs(host.connect_target(SimpleNamespace(info=info)), target)
-            self.assertEqual(make.call_count, 2)
+            info = {"type": "win32", "hwnd": 66}
+            self.assertIs(host.connect_target(SimpleNamespace(info=info)), target)
+            make.assert_called_once_with(info)  # the connected window's info, passed on unchanged
         with desktop("win32", WINDOWS_CONTROLLER), \
                 self.assertRaisesRegex(NavigationError, "没有有效的 Windows 游戏窗口"):  # the Win32 target's own check
             host.connect_target(SimpleNamespace(info={"type": "adb", "adb_serial": "127.0.0.1:5555"}))

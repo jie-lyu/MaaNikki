@@ -455,6 +455,9 @@ async fn start_single_agent(
             cmd.env("MAANIKKI_MOUSE_GUARD_CHANNEL", guard_channel);
         }
 
+        // 本次运行的控制器只能来自这次提交：客户端自身环境里继承来的 PI_CONTROLLER 不传给 agent。
+        cmd.env_remove("PI_CONTROLLER");
+
         // PI v2.5.0: 仅允许注入 PI_* 环境变量，避免覆盖宿主进程关键环境。
         let mut injected_count = 0usize;
         for (key, value) in pi_envs.iter() {
@@ -637,15 +640,27 @@ pub async fn start_tasks_impl(
     // 在重新连接或启动 agent 之前按当前系统筛掉不能运行的任务：全部被拒绝时直接返回原因；
     // 部分被拒绝时，交给 agent 的运行计划只列出会执行的任务，避免被跳过的任务影响其余任务的行为。
     // Windows 上没有任务被拒绝，不做任何改动。
-    // 按本次提交的控制器决定游戏目标（与 agent 的 host.game_backend 相同）；没有控制器信息时按当前系统。
-    let target = super::utils::submitted_game_target(
+    // 按已连接的控制器决定游戏目标，并核对它与本次提交的控制器一致（与 agent 的 host.game_backend 相同）；
+    // 两者都没有时按当前系统。控制器本身不能运行时整批拒绝，即使没有任务。
+    let connected = {
+        let instances = maa_state.instances.lock().map_err(|e| e.to_string())?;
+        instances
+            .get(&instance_id)
+            .and_then(|inst| inst.controller_config.as_ref())
+            .and_then(super::utils::GameTarget::of_connection)
+    };
+    let submitted = super::utils::submitted_game_target(
         pi_envs.as_ref(),
         controller_info.as_ref().and_then(|info| info.type_name.as_deref()),
     );
-    let refusals: Vec<Option<String>> = tasks
-        .iter()
-        .map(|task| super::utils::target_refuses_task(target, &task.entry))
-        .collect();
+    let entries: Vec<&str> = tasks.iter().map(|task| task.entry.as_str()).collect();
+    let refusals = match super::utils::admit_tasks(connected, submitted, &entries) {
+        Ok(refusals) => refusals,
+        Err(reason) => {
+            emit_agent_output(&app, &instance_id, "stderr", &reason);
+            return Err(reason);
+        }
+    };
     if refusals.iter().any(Option::is_some) {
         if refusals.iter().all(Option::is_some) {
             let reason = refusals.into_iter().flatten().next().unwrap_or_default();

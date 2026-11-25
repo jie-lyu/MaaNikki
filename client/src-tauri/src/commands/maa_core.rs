@@ -1419,13 +1419,20 @@ pub fn run_task_impl(
     pipeline_override: &str,
     selected_task_id: Option<&str>,
 ) -> Result<i64, String> {
-    let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
-    let instance = instances.get_mut(instance_id).ok_or("Instance not found")?;
-    // 追加的任务按已连接的控制器决定游戏目标；还没有连接时按当前系统（原规则）。
-    let target = instance.controller_config.as_ref().map(super::utils::GameTarget::of_connection);
-    if let Some(reason) = super::utils::target_refuses_task(target, entry) {
+    // 追加的任务按已连接的控制器决定游戏目标；没有实例或还没有连接时按当前系统（原规则）。
+    // 只在读取目标时持锁，判断（可能读清单文件）在锁外，顺序与原来相同：先判断，再查实例。
+    let connected = {
+        let instances = state.instances.lock().map_err(|e| e.to_string())?;
+        instances
+            .get(instance_id)
+            .and_then(|inst| inst.controller_config.as_ref())
+            .and_then(super::utils::GameTarget::of_connection)
+    };
+    if let Some(reason) = super::utils::target_refuses_task(connected, entry) {
         return Err(reason);
     }
+    let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
+    let instance = instances.get_mut(instance_id).ok_or("Instance not found")?;
     // Mac 测试预览不在运行中追加单个任务：Mac 上每一轮运行由 start_tasks 取得并独占（重连、新建
     // Tasker、启动 agent），追加的任务不属于任何一轮。拒绝时不改变代数，以免取消正在进行的释放。
     if matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. })) {

@@ -151,7 +151,9 @@ def platform_backend() -> str | None:
     return None
 
 
-# interface.json controller types and the backend that drives each. Adb (Android emulators) has no backend yet.
+# interface.json controller types that decide the game target, and the backend that drives each. Adb (Android
+# emulators) has no backend yet. Other types (Gamepad, PlayCover, …) keep the desktop's rules, as before; the
+# client applies the same rule (client/src-tauri/src/commands/utils.rs, GameTarget).
 TARGET_TYPES = {"Win32": "win32", "MacOS": "macos", "Adb": "adb"}
 NO_SUBMITTED_CONTROLLER = object()
 
@@ -181,13 +183,17 @@ def game_backend() -> str | None:
 
     Follows the submitted controller: Win32 and MacOS controllers select their backend only on their own
     desktop; an Adb controller has no backend yet; a malformed value selects none, so target-dependent work
-    is refused rather than run with the desktop's rules. Without a submitted controller it is the desktop's
-    backend, as before.
+    is refused rather than run with the desktop's rules. Without a submitted controller, or with one of
+    another type, it is the desktop's backend, as before.
     """
     kind = submitted_controller_type()
     if kind is NO_SUBMITTED_CONTROLLER:
         return platform_backend()
+    if kind is None:
+        return None  # malformed
     target = TARGET_TYPES.get(kind)
+    if target is None:
+        return platform_backend()
     if target in ("win32", "macos"):
         return target if target == platform_backend() else None
     return None
@@ -292,9 +298,18 @@ def task_entry_supported(entry) -> bool:
             return task_tier(entry) is not None
         except (OSError, ValueError, KeyError, TypeError):
             return False  # no readable list: refuse, like the client
-    if backend is None and submitted_controller_type() is not NO_SUBMITTED_CONTROLLER:
+    if backend is None and _target_refused():
         return False
     return True
+
+
+def _target_refused() -> bool:
+    """Whether the submitted controller itself rules out running tasks here (Adb for now, a Win32 or MacOS
+    controller on the other desktop, a malformed value); False without one or for other types."""
+    kind = submitted_controller_type()
+    if kind is NO_SUBMITTED_CONTROLLER:
+        return False
+    return kind is None or kind in TARGET_TYPES
 
 
 def task_refusal_reason(entry) -> str:
@@ -306,7 +321,7 @@ def task_refusal_reason(entry) -> str:
     kind = submitted_controller_type()
     if backend is None and kind == "Adb":
         return "安卓模拟器支持还在开发中，暂不运行任务，已跳过。"
-    if backend is None and kind is not NO_SUBMITTED_CONTROLLER:
+    if backend is None and _target_refused():
         return f"所选的控制器（{kind or '无效'}）不能在当前系统上运行任务，已跳过。"
     return "当前系统不支持这个任务，已跳过。"
 
