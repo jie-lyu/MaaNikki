@@ -8,6 +8,18 @@ use super::file_ops::get_exe_dir;
 use super::project_patch::checked_join;
 use super::types::ChangesJson;
 
+/// macOS 发布构建拒绝应用内更新：程序文件在签名后的应用包里（Contents/Resources），改动会破坏签名，
+/// Mac 版只以完整 DMG 更新。所有会写入程序目录的更新命令都先经过这里；其他系统直接放行，行为不变。
+pub(crate) fn refuse_in_app_update() -> Result<(), String> {
+    #[cfg(all(target_os = "macos", not(debug_assertions)))]
+    {
+        warn!("拒绝应用内更新：macOS 应用包是签名后的只读内容");
+        return Err("Mac 版不支持应用内更新，请下载新的安装包替换。".to_string());
+    }
+    #[allow(unreachable_code)]
+    Ok(())
+}
+
 /// 解压压缩文件到指定目录，支持 zip 和 tar.gz/tgz 格式
 #[tauri::command]
 pub fn extract_zip(zip_path: String, dest_dir: String) -> Result<(), String> {
@@ -150,6 +162,7 @@ pub fn move_file_to_old(file_path: String) -> Result<(), String> {
 
 /// 将文件或目录移动到程序目录下的 cache/old 文件夹，处理重名冲突（内部函数）
 pub fn move_to_old_folder(source: &std::path::Path) -> Result<(), String> {
+    refuse_in_app_update()?;
     if !source.exists() {
         return Ok(());
     }
@@ -228,6 +241,7 @@ pub fn apply_incremental_update(
     deleted_files: Vec<String>,
     deleted_dirs: Option<Vec<String>>,
 ) -> Result<(), String> {
+    refuse_in_app_update()?;
     info!("apply_incremental_update called");
     info!("extract_dir: {}, target_dir: {}", extract_dir, target_dir);
     info!("deleted_files: {:?}", deleted_files);
@@ -300,6 +314,7 @@ pub fn apply_incremental_update(
 /// 即使移动旧文件失败，也会继续复制新文件，确保程序可用
 #[tauri::command]
 pub fn apply_full_update(extract_dir: String, target_dir: String) -> Result<(), String> {
+    refuse_in_app_update()?;
     info!("apply_full_update called");
     info!("extract_dir: {}, target_dir: {}", extract_dir, target_dir);
 
@@ -496,6 +511,7 @@ pub fn fallback_update(
     target_dir: String,
     new_version: String,
 ) -> Result<String, String> {
+    refuse_in_app_update()?;
     info!(
         "fallback_update called: extract_dir={}, target_dir={}, new_version={}",
         extract_dir, target_dir, new_version

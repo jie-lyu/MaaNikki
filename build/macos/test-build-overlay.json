@@ -1,0 +1,21 @@
+{
+  "comment": "Applied after interface-overlay.json, only to macOS test packages (scripts/macos_package.py), never to the development home or the Windows package. A test package shares its version with the Windows release, so it must not report to or update from the project's production services: no Sentry telemetry or failure uploads (telemetry), no statistics (statistics), no update check or self-install (mirrorchyan_rid and github; both must be absent for the client to skip updates). scripts/macos_interface.py fails the package if a removed key, or any value it had in interface.json, is still present. The window title names the commit the package was built from. The agent runs the bundle's Python isolated from the user's PYTHON* variables and user site-packages (-I), without writing bytecode into the signed bundle (-B), in UTF-8 mode (-I ignores PYTHONUTF8).",
+  "remove": [
+    "telemetry",
+    "statistics",
+    "mirrorchyan_rid",
+    "github"
+  ],
+  "agent": {
+    "child_args": [
+      "-I",
+      "-B",
+      "-X",
+      "utf8",
+      "./agent/main.py"
+    ]
+  },
+  "set": {
+    "title": "MaaNikki Mac 测试版（{commit}）- 无限暖暖自动化"
+  }
+}

@@ -1343,6 +1343,22 @@ export function savePendingUpdateInfo(info: PendingUpdateInfo): void {
 }
 
 /**
+ * 只读查看待安装更新记录：只返回比当前版本新的记录，不清理记录、不移动文件。
+ * 供未配置更新源的构建（Mac 测试包）提示用户，记录留给配置了更新源的构建处理。
+ */
+export function peekPendingUpdateInfo(currentVersion?: string): PendingUpdateInfo | null {
+  try {
+    const data = localStorage.getItem(PENDING_UPDATE_STORAGE_KEY);
+    if (!data) return null;
+    const info = JSON.parse(data) as PendingUpdateInfo;
+    if (!info.versionName || !currentVersion || compareVersions(info.versionName, currentVersion) <= 0) return null;
+    return info;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 读取待安装更新信息（不自动清除，需要手动调用 clearPendingUpdateInfo）
  * 如果更新包文件已被删除，会自动清除待安装信息并返回 null
  */

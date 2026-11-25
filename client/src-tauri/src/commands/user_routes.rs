@@ -138,6 +138,10 @@ pub async fn generate_gingerbread_routes(params: Value) -> Result<Value, String>
         );
 
         let mut cmd = std::process::Command::new(python);
+        // macOS 应用包内的 Python：隔离用户的 PYTHON* 变量和 user site（-I），不写字节码（-B，
+        // 否则会写进签名后的应用包），并保持 UTF-8 模式（-I 会忽略 PYTHONUTF8）。
+        #[cfg(all(target_os = "macos", not(debug_assertions)))]
+        cmd.args(["-I", "-B", "-X", "utf8"]);
         cmd.current_dir(&exe_dir).args(["-c", code, &req_str]);
         super::utils::apply_agent_root_env(&mut cmd);
         #[cfg(windows)]
