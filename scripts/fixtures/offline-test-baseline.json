@@ -130,7 +130,13 @@
     "UnreachableDeviceTests.test_repeated_shell_failures_stop_with_adb_restart_advice",
     "UnreachableDeviceTests.test_shell_reads_hold_the_device_input_lock",
     "NoKeyboardOrMouseTests.test_a_stop_request_seen_with_the_touch_reserved_sends_nothing_and_frees_the_marker",
-    "NoKeyboardOrMouseTests.test_the_stop_request_lives_next_to_the_marker_and_unknown_means_requested"
+    "NoKeyboardOrMouseTests.test_the_stop_request_lives_next_to_the_marker_and_unknown_means_requested",
+    "StopIsNotAnAdbFaultTests.test_a_dead_adb_server_without_a_stop_is_still_reported",
+    "StopIsNotAnAdbFaultTests.test_a_stop_never_confirms_a_touch_it_cannot_read",
+    "StopIsNotAnAdbFaultTests.test_a_user_stop_ends_the_action_quietly",
+    "StopIsNotAnAdbFaultTests.test_an_unknown_stop_state_still_reports_the_unreachable_device",
+    "StopIsNotAnAdbFaultTests.test_failed_reads_after_a_stop_request_are_not_counted",
+    "StopIsNotAnAdbFaultTests.test_failed_reads_while_the_tasker_stops_are_not_counted"
    ],
    "known_failures": [],
    "skips": [

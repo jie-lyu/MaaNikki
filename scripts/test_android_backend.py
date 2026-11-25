@@ -402,6 +402,144 @@ class UnreachableDeviceTests(FreshAndroidState):
         self.assertEqual(owned, [True, True])  # pidof as well as the focus read
 
 
+
+class StopIsNotAnAdbFaultTests(FreshAndroidState):
+    """A user stop (stop.request, then the framework's post_stop, which also stops controller operations) makes shell
+    reads fail although ADB is fine: those failures end the run as stopped, not as an unreachable device."""
+
+    def request_stop(self):
+        path = self.state.stop_request()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("stop", encoding="utf-8")
+        return path
+
+    def test_failed_reads_after_a_stop_request_are_not_counted(self):
+        controller = FakeShellController({"mCurrentFocus": FOCUS_GAME})
+        target = AndroidTarget(INFO, controller)
+        self.assertTrue(target.foreground())
+        request = self.request_stop()
+        controller.outputs.clear()  # the framework stopped: every controller operation fails
+        for _ in range(3 * AndroidTarget.SHELL_FAILURE_LIMIT):
+            self.assertFalse(target.foreground())        # focus not confirmed
+            self.assertIs(target.exists(), True)          # unreadable is not "gone"
+            self.assertIsNone(target.touch_snapshot())   # no touch state (an in-flight touch stays unconfirmed)
+        request.unlink()  # without a stop the same failures are an unreachable device again, counted from zero
+        target.exists()
+        target.exists()
+        with self.assertRaises(host.DeviceUnreachable) as caught:
+            target.foreground()
+        self.assertIn("没有回应 ADB 命令", str(caught.exception))
+
+    def test_failed_reads_while_the_tasker_stops_are_not_counted(self):
+        controller = FakeShellController({})
+        target = AndroidTarget(INFO, controller)
+        tasker = SimpleNamespace(stopping=True)
+        session = SimpleNamespace(context=SimpleNamespace(tasker=tasker))
+        with patch("task_control.active_session", return_value=session):
+            for _ in range(3 * AndroidTarget.SHELL_FAILURE_LIMIT):
+                self.assertFalse(target.foreground())
+            tasker.stopping = False
+            target.exists()
+            target.exists()
+            with self.assertRaises(host.DeviceUnreachable):
+                target.foreground()
+
+    def test_an_unknown_stop_state_still_reports_the_unreachable_device(self):
+        class Tasker:
+            @property
+            def stopping(self):
+                raise RuntimeError("agent channel closed")
+        target = AndroidTarget(INFO, FakeShellController({}))
+        session = SimpleNamespace(context=SimpleNamespace(tasker=Tasker()))
+        with patch("task_control.active_session", return_value=session), \
+                patch.object(self.state, "stop_request", return_value=None):  # no data directory to look in
+            target.exists()
+            target.exists()
+            with self.assertRaises(host.DeviceUnreachable):
+                target.exists()
+
+    def test_a_stop_never_confirms_a_touch_it_cannot_read(self):
+        from daily.runtime import Runtime
+        self.request_stop()
+        target = AndroidTarget(INFO, FakeShellController({}))
+        rt = Runtime.__new__(Runtime)
+        with patch("daily.runtime.wall_time.sleep"):
+            self.assertIsNone(rt._device_touch_released(target, 900))  # unreadable: the dispatch halts as before
+
+    def run_registered(self, *, stop):
+        """A registered Android action in a real task session: running with the game in focus, then either the user
+        stops (stop.request, then post_stop) or the ADB server stops answering, and the action goes on to its next
+        capture's focus step (Runtime._device_focus_ready) on a stop answer cached from just before."""
+        import registration
+        from daily.runtime import Runtime
+        from task_control import _SESSIONS, active_session
+        clock = SimpleNamespace(now=0.0)
+        controller = FakeShellController({"mCurrentFocus": FOCUS_GAME, "pidof": "4242\n__exit=0\n"})
+        controller.info = INFO
+        tasker = SimpleNamespace(controller=controller, stopping=False)
+
+        def post_stop():
+            tasker.stopping = True
+        tasker.post_stop = post_stop
+        notices = []
+        context = SimpleNamespace(tasker=tasker, run_recognition=Mock(), get_node_data=Mock(return_value={}),
+                                  run_task=Mock(side_effect=lambda entry, override: notices.append(
+                                      override["MaaNikki_Daily_Message"]["focus"]["Node.Action.Starting"])))
+        outcome = {}
+        token = registration._LOCAL_REGISTRATION.set(True)
+        try:
+            @registration.agent_action("test.android_backend.stop_is_not_an_adb_fault")
+            class Probe:
+                def run(self, context, argv):
+                    session = active_session()
+                    session.ensure_adapter().check()  # the game has focus on the device
+                    session.stopped()                 # the stop answer the next steps reuse
+                    if stop:
+                        self.request_stop()
+                        context.tasker.post_stop()
+                    controller.outputs.clear()        # stopped framework, or a dead ADB server
+                    rt = Runtime.__new__(Runtime)
+                    rt.navigation_inputs = None
+                    outcome["focus"] = rt._device_focus_ready()
+                    return True
+            Probe.request_stop = lambda probe: self.request_stop()
+        finally:
+            registration._LOCAL_REGISTRATION.reset(token)
+        _SESSIONS.clear()
+        saved = []
+
+        def sleep(seconds):
+            clock.now += max(seconds, 1e-9)
+        argv = SimpleNamespace(task_detail=SimpleNamespace(task_id=41, entry="MaaNikki_Mailbox"),
+                               node_name="MaaNikki_Mailbox", custom_action_param="{}")
+        try:
+            with android_run(), \
+                    patch.object(registration, "_START_NOTICES", registration.deque(maxlen=256)), \
+                    patch("registration.traceback.print_exc"), \
+                    patch("diagnostics.FailureEvidence.save",
+                          side_effect=lambda stage, reason, **kw: saved.append((stage, reason))), \
+                    patch("task_control.wall_time.monotonic", side_effect=lambda: clock.now), \
+                    patch("task_control.wall_time.sleep", side_effect=sleep):
+                result = Probe().run(context, argv)
+        finally:
+            _SESSIONS.clear()
+            registration._ACTION_TYPES.pop("test.android_backend.stop_is_not_an_adb_fault", None)
+        return result, outcome, saved, notices
+
+    def test_a_user_stop_ends_the_action_quietly(self):
+        result, outcome, saved, notices = self.run_registered(stop=True)
+        self.assertFalse(result)
+        self.assertNotIn("focus", outcome)  # ended as stopped inside the focus wait
+        self.assertEqual(saved, [])         # no failure scene
+        self.assertFalse([n for n in notices if "ADB" in n or "未完成" in n], notices)
+
+    def test_a_dead_adb_server_without_a_stop_is_still_reported(self):
+        result, outcome, saved, notices = self.run_registered(stop=False)
+        self.assertFalse(result)
+        self.assertEqual([stage for stage, _reason in saved], ["action_exception"])
+        self.assertIn("没有回应 ADB 命令", saved[0][1])
+        self.assertTrue(any("连续 3 次没有回应 ADB 命令" in n and "adb kill-server" in n for n in notices), notices)
+
 class SessionTests(FreshAndroidState):
     """The real task session with an Android target: waits for device focus and sends no key on its own."""
 
