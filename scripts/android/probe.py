@@ -40,9 +40,13 @@ A gesture or steps file is a JSON list of steps, run in order on one connection:
 
 Contacts still held when the file ends, or when any step fails or raises, are lifted. `reco`
 loads resource/ as the agent does (pipeline, images, OCR model) and registers the agent's custom
-recognitions (nikki.ui_template, nikki.crown_ready) unguarded, so nodes are judged as the agent
-would judge them. --any-roi re-runs a missed node with its ROI widened to the whole frame, which
-tells "the element exists but moved" apart from "the element is not there".
+recognitions (nikki.ui_template, nikki.crown_ready) with their analyze unwrapped from the agent's task-session
+guard. A result describes the node's own definition on these pixels; it skips what the agent adds around it
+(pause and recapture, frame-size checks, runtime pipeline overrides some tasks apply, and the Python-side
+matching of the MaaNikki_Asset_* entries, which GameUI.asset_boxes does with caller-specific methods and
+thresholds). --any-roi re-runs a missed node with its ROI widened to the whole frame. A widened hit is only a
+candidate: it can be the same element moved, or a different element with the same text or shape (the HUD's
+商城 shortcut satisfies the shop page title), so each one needs a look at the frame.
 """
 from __future__ import annotations
 
@@ -96,82 +100,144 @@ class InputLog:
 
 
 def focused_package(shell) -> str | None:
-    """Package of the focused window from `dumpsys window`, or None when it cannot be read."""
-    output = shell("dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'") or ""
+    """Package of the window that has input focus (`mCurrentFocus`), or None when there is none or it cannot be read.
+
+    Only mCurrentFocus counts: mFocusedApp still names the game while a system dialog, the launcher or
+    `mCurrentFocus=null` (no focused window) holds focus.
+    """
+    output = shell("dumpsys window | grep mCurrentFocus") or ""
+    packages = set()
     for line in output.splitlines():
-        match = re.search(r"\su0\s+([\w.]+)/", line)
-        if match:
-            return match.group(1)
-    return None
+        if "mCurrentFocus" not in line:
+            continue
+        match = re.search(r"\su\d+\s+([\w.]+)/", line)
+        packages.add(match.group(1) if match else None)
+    return packages.pop() if len(packages) == 1 else None
+
+
+MAX_DURATION_MS = 20000  # swipe, drag, hold and wait; MaaFramework casts a negative duration to a ~49-day hold
+SHELL_READERS = ("dumpsys", "getprop", "ls", "cat", "id", "ps", "pidof", "uname", "df",
+                 "settings get", "getevent -p", "getevent -lp", "getevent -pl", "logcat -d", "cmd package list")
+SHELL_EXACT = ("wm size", "wm density")  # with an argument these set the display size or density
+SHELL_FILTERS = ("grep", "head", "tail", "wc", "sort", "cut")
+
+
+def check_duration(ms) -> int:
+    value = int(ms)
+    if not 0 <= value <= MAX_DURATION_MS:
+        raise ProbeError(f"duration {ms!r} ms is outside 0..{MAX_DURATION_MS}")
+    return value
+
+
+def check_read_only_shell(command: str) -> None:
+    """Refuse anything but a reader optionally piped into text filters: `shell` is for diagnostics, inputs go
+    through the logged and focus-checked commands."""
+    if re.search(r"[;&<>`$\n]", command):
+        raise ProbeError(f"shell: only a reader piped into filters is allowed, got {command!r}")
+    first, *rest = [part.strip() for part in command.split("|")]
+    if first not in SHELL_EXACT and not any(first == reader or first.startswith(reader + " ") for reader in SHELL_READERS):
+        raise ProbeError(f"shell: {first.split()[0] if first else command!r} is not an allowed reader")
+    if any(not part or part.split()[0] not in SHELL_FILTERS for part in rest):
+        raise ProbeError(f"shell: only {', '.join(SHELL_FILTERS)} may follow a pipe")
 
 
 class Device:
-    """One AdbController connection plus the guard and log every input goes through."""
+    """One AdbController connection plus the guard and log every input goes through.
 
-    def __init__(self, controller, log: InputLog, *, raw: bool, guard: bool = True):
+    Every input that starts a gesture or sends a key or text (tap, swipe, down, key, text, input) is preceded by a
+    check that the game's window has input focus; moves and ups of a contact already down are not, because
+    Android delivers the rest of a touch gesture to the window that received its down, and a release must never
+    be held back. Each input is logged before it is sent (an unwritable log stops it) and its outcome after.
+    """
+
+    def __init__(self, controller, log: InputLog):
         self.controller = controller
         self.log = log
-        self.raw = raw
-        self.guard = guard
         self.held: set[int] = set()
+        self.release_failed: set[int] = set()
 
     # Shell runs through the controller's own adb, so it shares the transport the inputs use.
     def shell(self, command: str, timeout_ms: int = 10000) -> str | None:
         job = self.controller.post_shell(command, timeout_ms).wait()
         return job.get() if job.succeeded else None
 
-    def check_foreground(self) -> None:
-        if not self.guard:
-            return
+    def check_foreground(self, command="input", args=None) -> None:
         package = focused_package(self.shell)
         if package != GAME_PACKAGE:
-            raise ProbeError(f"the focused window is {package!r}, not the game; refusing to send input")
+            self.log.write(command, args, False, refused=f"focused window is {package!r}, not the game")
+            raise ProbeError(f"the focused window is {package!r}, not the game; refusing to send {command}")
 
-    def _send(self, command: str, args, job_factory) -> bool:
+    def _send(self, command: str, args, job_factory, *, starts=True) -> bool:
+        if starts:
+            self.check_foreground(command, args)
+        self.log.write(command, args, None, phase="sending")
         started = time.perf_counter()
         try:
             ok = bool(job_factory().wait().succeeded)
         except BaseException:
-            self.log.write(command, args, None, error="interrupted or raised while waiting")
+            self.log.write(command, args, None, phase="interrupted", error="interrupted or raised while waiting")
             raise
-        self.log.write(command, args, ok, ms=round((time.perf_counter() - started) * 1000, 1))
+        # ok means the request reached the input tool (for Maatouch a pipe write), not that the game acted on it.
+        self.log.write(command, args, ok, phase="done", ms=round((time.perf_counter() - started) * 1000, 1))
         return ok
 
     def tap(self, x, y, contact=0, hold_ms=0) -> bool:
-        if hold_ms <= 0:
-            return self._send("tap", [x, y, contact], lambda: self.controller.post_click(x, y, contact, 1))
+        hold_ms = check_duration(hold_ms)
+        if hold_ms == 0:
+            ok = self._send("tap", [x, y, contact], lambda: self.controller.post_click(x, y, contact, 1))
+            if not ok:
+                self._recover(contact)
+            return ok
         if not self.down(x, y, contact):
             return False
         time.sleep(hold_ms / 1000)
         return self.up(contact)
 
-    def swipe(self, x1, y1, x2, y2, ms) -> bool:
-        return self._send("swipe", [x1, y1, x2, y2, ms],
-                          lambda: self.controller.post_swipe(x1, y1, x2, y2, ms))
+    def swipe(self, x1, y1, x2, y2, ms, contact=0) -> bool:
+        ms = check_duration(ms)
+        ok = self._send("swipe", [x1, y1, x2, y2, ms, contact],
+                        lambda: self.controller.post_swipe(x1, y1, x2, y2, ms, contact, 1))
+        if not ok:
+            self._recover(contact)
+        return ok
+
+    def _recover(self, contact) -> None:
+        """A click or swipe is down/move/up inside the core, which forgets the contact before sending the up; after a
+        failure the contact may still be down on the device, so send an explicit up."""
+        self.held.add(contact)
+        self.up(contact)
 
     def down(self, x, y, contact=0) -> bool:
+        self.check_foreground("touch_down", [x, y, contact])
         self.held.add(contact)  # before sending: a down that raised may still have reached the device
-        return self._send("touch_down", [x, y, contact], lambda: self.controller.post_touch_down(x, y, contact, 1))
+        return self._send("touch_down", [x, y, contact], lambda: self.controller.post_touch_down(x, y, contact, 1),
+                          starts=False)
 
     def move(self, x, y, contact=0) -> bool:
-        return self._send("touch_move", [x, y, contact], lambda: self.controller.post_touch_move(x, y, contact, 1))
+        return self._send("touch_move", [x, y, contact], lambda: self.controller.post_touch_move(x, y, contact, 1),
+                          starts=False)
 
     def up(self, contact=0) -> bool:
-        ok = self._send("touch_up", [contact], lambda: self.controller.post_touch_up(contact))
+        ok = False
+        for _attempt in range(2):  # one retry: an up that failed leaves the finger on the screen
+            try:
+                ok = self._send("touch_up", [contact], lambda: self.controller.post_touch_up(contact), starts=False)
+            except Exception:
+                ok = False
+            if ok:
+                break
         if ok:
             self.held.discard(contact)
+            self.release_failed.discard(contact)
+        else:
+            self.release_failed.add(contact)
         return ok
 
     def release_all(self) -> list[int]:
         """Lift every contact this connection may still hold; returns the contacts whose up failed."""
-        failed = []
         for contact in sorted(self.held):
-            try:
-                if not self.up(contact):
-                    failed.append(contact)
-            except Exception:
-                failed.append(contact)
-        return failed
+            self.up(contact)
+        return sorted(self.release_failed)
 
     def key(self, code) -> bool:
         return self._send("key", [code], lambda: self.controller.post_click_key(code))
@@ -186,26 +252,29 @@ class Device:
         """
         if not re.fullmatch(r"[\w .:-]+", arguments):
             raise ProbeError(f"unexpected characters in input arguments {arguments!r}")
+        self.check_foreground("input", [arguments])
         command = f"input {arguments}; echo __exit=$?"
-        def job():
-            return self.controller.post_shell(command, 10000)
+        self.log.write("input", [arguments], None, phase="sending")
         started = time.perf_counter()
         try:
-            result = job().wait()
+            result = self.controller.post_shell(command, 10000).wait()
         except BaseException:
-            self.log.write("input", [arguments], None, error="interrupted or raised while waiting")
+            self.log.write("input", [arguments], None, phase="interrupted", error="interrupted or raised while waiting")
             raise
         output = result.get() if result.succeeded else None
         ok = bool(output is not None and "__exit=0" in output)
-        self.log.write("input", [arguments], ok, ms=round((time.perf_counter() - started) * 1000, 1),
+        self.log.write("input", [arguments], ok, phase="done", ms=round((time.perf_counter() - started) * 1000, 1),
                        output=(output or "").replace("__exit=0", "").strip()[:300] or None)
         return ok
 
     def drag(self, x1, y1, x2, y2, ms, contact=0, steps=10) -> bool:
         """Touch down and move in `steps` even moves over `ms`; the contact stays held."""
+        ms = check_duration(ms)
+        steps = int(steps)
+        if not 1 <= steps <= 200:
+            raise ProbeError(f"drag steps {steps} outside 1..200")
         if not self.down(x1, y1, contact):
             return False
-        steps = max(1, int(steps))
         for index in range(1, steps + 1):
             time.sleep(ms / 1000 / steps)
             x = round(x1 + (x2 - x1) * index / steps)
@@ -242,10 +311,14 @@ def connect(args):
     connect_ms = (time.perf_counter() - started) * 1000
     # The core learns the frame size, which it needs to scale touch coordinates, from the first capture;
     # before that a click logs "Invalid image target size". Capture once so every input is scaled the same way.
+    # A failed first capture leaves the scale unknown, and the core then sends touches to (0, 0).
     if not controller.post_screencap().wait().succeeded:
-        raise ProbeError("the first capture after connecting failed")
+        raise ProbeError("the first capture after connecting failed; no input is sent without a known frame size")
+    width, height = controller.resolution
+    if width <= 0 or height <= 0:
+        raise ProbeError(f"the device resolution is unknown ({width}x{height}); no input is sent")
     log = InputLog(Path(args.log), getattr(args, "purpose", None))
-    device = Device(controller, log, raw=getattr(args, "raw", False), guard=not getattr(args, "no_guard", False))
+    device = Device(controller, log)
     device.connect_ms = connect_ms
     return device
 
@@ -310,7 +383,7 @@ class Recognizer:
         for name in names:
             result = judged(name, context.run_recognition(name, image))
             if any_roi and not result["hit"]:
-                override = full_roi_override(self.node(name))
+                override = full_roi_override(self.node(name), image.shape[1], image.shape[0])
                 if override:
                     widened = judged(name, context.run_recognition(name, image, {name: override}))
                     result.update(widened_hit=widened["hit"], widened_box=widened["box"],
@@ -381,12 +454,13 @@ def _score(item):
     return None
 
 
-def full_roi_override(node: dict) -> dict:
-    """Pipeline override that widens a node's ROI to the whole frame (built-in and nikki.ui_template).
+def full_roi_override(node: dict, width: int = FRAME[0], height: int = FRAME[1]) -> dict:
+    """Pipeline override that widens a node's ROI to the whole width x height frame (built-in and nikki.ui_template).
 
-    Returns {} for And/Or (their sub-recognitions carry their own ROIs) and anything else without one.
+    Returns {} for And/Or (their sub-recognitions carry their own ROIs) and anything else without one. Widening
+    also drops the positional constraint between a ui_template's main template and its fallback_all templates.
     """
-    whole = [0, 0, FRAME[0], FRAME[1]]
+    whole = [0, 0, int(width), int(height)]
     reco = node.get("recognition") or {}
     kind = reco.get("type") if isinstance(reco, dict) else reco
     param = reco.get("param", {}) if isinstance(reco, dict) else {}
@@ -460,6 +534,9 @@ def frame_controller(path: Path):
     image = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if image is None:
         raise ProbeError(f"could not read {path}")
+    height, width = image.shape[:2]
+    if abs(width * 9 - height * 16) > 16:  # resources are 1280x720; another aspect would not scale to it
+        raise ProbeError(f"{path} is {width}x{height}, not 16:9")
 
     class FrameController(CustomController):
         def connect(self):
@@ -539,7 +616,7 @@ def run_steps(device: Device, steps: list, *, out: Path | None, recognizer=None)
             entry = {"step": index, **step}
             started = time.perf_counter()
             if "wait" in step:
-                time.sleep(float(step["wait"]) / 1000)
+                time.sleep(check_duration(step["wait"]) / 1000)
                 ok = True
             elif "capture" in step:
                 frame = device.capture()
@@ -551,7 +628,9 @@ def run_steps(device: Device, steps: list, *, out: Path | None, recognizer=None)
                 if recognizer is None:
                     raise ProbeError("reco step without a recognizer")
                 entry["results"] = recognizer.run_many(list(step["reco"]))
-                ok = True
+                # A capture or recognition error is not a miss: stop before any later input relies on it.
+                ok = not any(isinstance(r.get("detail"), dict) and r["detail"].get("error") or r.get("error")
+                             for r in entry["results"])
             else:
                 ok = _input_step(device, step, contact)
             entry["ok"] = ok
@@ -563,7 +642,10 @@ def run_steps(device: Device, steps: list, *, out: Path | None, recognizer=None)
     finally:
         failed = device.release_all()
         if failed:
-            print(f"WARNING: could not lift contacts {failed}", file=sys.stderr, flush=True)
+            print(f"ERROR: could not lift contacts {failed}; check the device before sending more input",
+                  file=sys.stderr, flush=True)
+    if failed:
+        raise ProbeError(f"contacts {failed} may still be held on the device")
     return report
 
 
@@ -579,7 +661,7 @@ def _input_step(device: Device, step: dict, contact: int) -> bool:
     if "tap" in step:
         return device.tap(*step["tap"], contact, int(step.get("hold", 0)))
     if "swipe" in step:
-        return device.swipe(*step["swipe"], int(step.get("ms", 300)))
+        return device.swipe(*step["swipe"], int(step.get("ms", 300)), contact)
     if "key" in step:
         return device.key(int(step["key"]))
     if "text" in step:
@@ -636,13 +718,13 @@ def cmd_capture(args) -> int:
 def _with_after(device: Device, args, action) -> int:
     import cv2
 
-    device.check_foreground()
     try:
         ok = action()
     finally:
         failed = device.release_all()
     if failed:
-        print(f"WARNING: could not lift contacts {failed}", file=sys.stderr)
+        print(f"ERROR: could not lift contacts {failed}; check the device before sending more input", file=sys.stderr)
+        ok = False
     if args.after:
         time.sleep(args.after_ms / 1000)
         frame = device.capture()
@@ -677,6 +759,7 @@ def cmd_text(args) -> int:
 
 
 def cmd_shell(args) -> int:
+    check_read_only_shell(args.command)
     device = connect(args)
     output = device.shell(args.command, args.timeout)
     if output is None:
@@ -690,7 +773,6 @@ def cmd_steps(args) -> int:
     steps = load_steps(args.file)
     device = connect(args)
     recognizer = Recognizer(device.controller) if any(isinstance(s, dict) and "reco" in s for s in steps) else None
-    device.check_foreground()
     report = run_steps(device, steps, out=Path(args.out) if args.out else None, recognizer=recognizer)
     if args.report:
         Path(args.report).write_text(json.dumps(report, ensure_ascii=False, indent=1, default=_jsonable),
@@ -731,7 +813,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--screencap", choices=sorted(SCREENCAP_METHODS), default="netcat")
     parser.add_argument("--log", default=str(DEFAULT_LOG))
     parser.add_argument("--raw", action="store_true", help="device pixels instead of the 1280x720 frame")
-    parser.add_argument("--no-guard", action="store_true", help="skip the focused-window check (non-game tests)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def with_purpose(p):
