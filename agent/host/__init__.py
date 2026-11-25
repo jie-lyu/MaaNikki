@@ -98,6 +98,74 @@ class InputUnconfirmed(Exception):
     OSError/RuntimeError/ValueError, so no fallback catches it: the run stops before any further input."""
 
 
+class DeviceInputState:
+    """Process-wide state of input to an Android device; only Android code paths create or change it.
+
+    - halted: a touch was not confirmed released. Nothing more is sent by this agent, and the halt survives the
+      client starting a new agent process for the next batch (a marker under the data root's cache/); the client
+      clears it when MaaNikki starts (phase B5), which is the recovery boundary.
+    - epoch: advanced by every observed loss of device focus (AndroidTarget.foreground records its own negative
+      readings, so every caller takes part); a frame captured before it is stale.
+    - marks: (focus generation, epoch) per captured frame, recorded only if no loss was observed since the epoch
+      the capture started with (compared and recorded under the lock).
+    - lock: one touch at a time; halt, focus and marks are checked inside it right before dispatch.
+    """
+
+    MARKER = ("cache", "android-input-halted.json")
+
+    def __init__(self, marker=None):
+        import threading
+        self.lock = threading.RLock()
+        self.marker = marker
+        self.halted = bool(marker is not None and marker.exists())
+        self.epoch = 0
+        self._marks = {}
+
+    def halt(self):
+        with self.lock:
+            self.halted = True
+            if self.marker is not None:
+                try:
+                    import datetime as _dt
+                    self.marker.parent.mkdir(parents=True, exist_ok=True)
+                    self.marker.write_text(json.dumps({"halted_at": _dt.datetime.now().astimezone().isoformat()}),
+                                           encoding="utf-8")
+                except OSError:
+                    pass  # the in-process halt still holds
+
+    def observed_loss(self):
+        with self.lock:
+            self.epoch += 1
+
+    def mark_if_unchanged(self, frame, generation, epoch) -> bool:
+        import weakref
+        with self.lock:
+            if self.epoch != epoch:
+                return False
+            self._marks = {key: value for key, value in self._marks.items() if value[0]() is not None}
+            self._marks[id(frame)] = (weakref.ref(frame), (generation, epoch))
+            return True
+
+    def mark(self, frame, generation):
+        with self.lock:
+            return self.mark_if_unchanged(frame, generation, self.epoch)
+
+    def marks_of(self, frame):
+        entry = self._marks.get(id(frame)) if frame is not None else None
+        return entry[1] if entry is not None and entry[0]() is frame else None
+
+
+_DEVICE_INPUT = None
+
+
+def device_input() -> DeviceInputState:
+    global _DEVICE_INPUT
+    if _DEVICE_INPUT is None:
+        from app_paths import DATA_ROOT
+        _DEVICE_INPUT = DeviceInputState(DATA_ROOT.joinpath(*DeviceInputState.MARKER))
+    return _DEVICE_INPUT
+
+
 class Target(Protocol):
     """The connected game window.
 

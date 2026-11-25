@@ -22,6 +22,15 @@ DISPATCHABLE_ACTIONS = {"Click": frozenset({"target"}), "Swipe": frozenset({"beg
 FRAME_SIZE = (1280, 720)
 
 
+def touch_point(target):
+    """The integer pixel a tap on ``target`` uses: the point itself, or the middle pixel of a rectangle (always
+    inside it, also for a one-pixel rectangle on the frame's edge)."""
+    if len(target) == 2:
+        return [target[0], target[1]]
+    x, y, w, h = target
+    return [x + (w - 1) // 2, y + (h - 1) // 2]
+
+
 def check_touch_fields(action, fields) -> None:
     """Raise UnsupportedInput unless ``action`` is a tap or swipe with only its own fields, inside the frame."""
     from host import UnsupportedInput
@@ -42,8 +51,7 @@ def check_touch_fields(action, fields) -> None:
         x, y = value[0], value[1]
         if len(value) == 4:
             w, h = value[2], value[3]
-            # A rectangle is tapped at its rounded centre; keep it off the last row and column so that never rounds out.
-            inside = w > 0 and h > 0 and 0 <= x and x + w < width and 0 <= y and y + h < height
+            inside = w > 0 and h > 0 and 0 <= x and x + w <= width and 0 <= y and y + h <= height
         else:
             inside = 0 <= x < width and 0 <= y < height
         if not inside:

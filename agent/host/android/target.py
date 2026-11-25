@@ -122,7 +122,11 @@ class AndroidTarget:
         return False  # the emulator window's own state does not stop ADB capture or input (minimised: unverified)
 
     def foreground(self) -> bool:
-        return self.focus_package() == GAME_PACKAGE
+        focused = self.focus_package() == GAME_PACKAGE
+        if not focused:
+            from host import device_input
+            device_input().observed_loss()  # every caller's negative reading makes earlier frames stale
+        return focused
 
     def hung(self) -> bool:
         return False
