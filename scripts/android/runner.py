@@ -111,15 +111,17 @@ def task_override(interface: dict, entry: str, chosen: dict[str, str]) -> list[d
         if definition is None:
             raise RunnerError(f"option {name} is not defined")
         cases = {case["name"]: case for case in definition.get("cases", [])}
-        case_name = chosen.get(name, definition.get("default_case"))
-        if case_name is None:
+        selected = chosen[name].split(",") if name in chosen else definition.get("default_case")
+        if selected is None:
             if definition.get("cases"):
                 raise RunnerError(f"option {name} has no default case; pass --option {name}=CASE ({sorted(cases)})")
             continue  # an input-type option without cases: not supported here
-        if case_name not in cases:
-            raise RunnerError(f"option {name} has no case {case_name!r}; cases: {sorted(cases)}")
-        if cases[case_name].get("pipeline_override"):
-            overrides.append(cases[case_name]["pipeline_override"])
+        # A checkbox option selects several cases (its default is a list; on the command line A,B).
+        for case_name in selected if isinstance(selected, list) else [selected]:
+            if case_name not in cases:
+                raise RunnerError(f"option {name} has no case {case_name!r}; cases: {sorted(cases)}")
+            if cases[case_name].get("pipeline_override"):
+                overrides.append(cases[case_name]["pipeline_override"])
     return overrides
 
 
@@ -216,9 +218,10 @@ def run(args) -> int:
     client = AgentClient()
     if not client.bind(resource):
         raise RunnerError("agent 客户端无法绑定资源")
+    agent_log = open(log_dir / "agent.log", "w", encoding="utf-8")
     child = subprocess.Popen([sys.executable, str(ROOT / "agent" / "main.py"), client.identifier], cwd=str(ROOT),
-                             env=agent_environment(controller_def, data_root),
-                             stdout=open(log_dir / "agent.log", "w", encoding="utf-8"), stderr=subprocess.STDOUT)
+                             env=agent_environment(controller_def, data_root), stdout=agent_log,
+                             stderr=subprocess.STDOUT)
     tasker = None
     try:
         if not within(60, "连接 agent", client.connect):
@@ -230,28 +233,22 @@ def run(args) -> int:
         detail = within(args.timeout, f"任务 {args.entry}", lambda: job.wait().get())
         record["status"] = "succeeded" if job.succeeded else "failed"
         record["nodes"] = [getattr(node, "name", None) for node in (getattr(detail, "nodes", None) or [])][-10:]
+    except KeyboardInterrupt:
+        record["status"] = "interrupted"
+        record["stop_requested"] = stop_tasker(tasker)
+        raise RunnerError("运行被中断（Ctrl-C）；已请求停止任务。") from None
     except RunnerError as error:
         record["status"] = "error"
         record["error"] = str(error)
-        if tasker is not None:
-            try:
-                tasker.post_stop()
-            except Exception:
-                pass
+        record["stop_requested"] = stop_tasker(tasker)
         raise
     finally:
         try:
-            client.disconnect()
-        except Exception:
-            pass
-        try:
-            child.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            child.terminate()
-            try:
-                child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                child.kill()
+            within(15, "断开 agent", client.disconnect)
+        except (RunnerError, Exception):
+            record["disconnect"] = "timed out or failed"
+        record["agent_exit"] = reap(child)
+        agent_log.close()
         log_file = log_dir / "maafw.log"
         record["methods"] = methods_in_log(log_file.read_text(encoding="utf-8", errors="replace")) \
             if log_file.exists() else None
@@ -261,6 +258,29 @@ def run(args) -> int:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         print(json.dumps(record, ensure_ascii=False, indent=1))
     return 0 if record.get("status") == "succeeded" else 1
+
+
+def stop_tasker(tasker) -> bool:
+    """Ask a running task to stop and wait a bounded time; False when there was nothing to stop or it overran."""
+    if tasker is None:
+        return False
+    try:
+        within(20, "停止任务", lambda: tasker.post_stop().wait())
+        return True
+    except (RunnerError, Exception):
+        return False
+
+
+def reap(child) -> int | str:
+    """The agent child's exit code: waited for, then terminated, then killed; it never outlives the runner."""
+    for step in ("wait", "terminate", "kill"):
+        if step != "wait":
+            getattr(child, step)()
+        try:
+            return child.wait(timeout=15 if step == "wait" else 10)
+        except subprocess.TimeoutExpired:
+            continue
+    return "unreaped"
 
 
 def agent_messages(data_root: Path, since: dt.datetime) -> list[str]:
@@ -315,6 +335,9 @@ def main(argv=None) -> int:
     except RunnerError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:  # before the agent started: nothing to stop
+        print("error: 运行被中断（Ctrl-C）", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

@@ -271,6 +271,19 @@ class UnreachableDeviceTests(FreshAndroidState):
         self.assertIn("adb kill-server", str(caught.exception))
         controller.outputs["mCurrentFocus"] = FOCUS_GAME
         self.assertTrue(target.foreground())  # a success starts the count again
+
+    def test_an_unreachable_device_makes_earlier_frames_stale(self):
+        import numpy as np
+        controller = FakeShellController({"mCurrentFocus": FOCUS_GAME})
+        target = AndroidTarget(INFO, controller)
+        frame = np.zeros((720, 1280, 3), np.uint8)
+        self.state.mark(frame, 0)
+        controller.outputs.clear()
+        self.assertIs(target.exists(), True)  # unreadable is not "gone" (first failure)
+        target.exists()                        # second failure
+        with self.assertRaises(host.DeviceUnreachable):
+            target.foreground()                # third: raised before any focus reading was recorded
+        self.assertNotEqual(self.state.marks_of(frame), (0, self.state.epoch))  # the old frame no longer counts
         controller.outputs.clear()
         self.assertFalse(target.foreground())
         controller.outputs["mCurrentFocus"] = FOCUS_GAME

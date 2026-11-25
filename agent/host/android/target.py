@@ -107,6 +107,7 @@ class AndroidTarget:
         self._shell_failures = 0
 
     def _shell(self, command: str) -> str | None:
+        unreachable = False
         with _SHELL_LOCK:
             try:
                 job = self.controller.post_shell(command, 5000).wait()
@@ -118,11 +119,16 @@ class AndroidTarget:
                 return output
             self._shell_failures += 1
             if self._shell_failures >= self.SHELL_FAILURE_LIMIT:
-                from host import DeviceUnreachable
                 self._shell_failures = 0
-                raise DeviceUnreachable(f"安卓模拟器 {self.serial} 连续 {self.SHELL_FAILURE_LIMIT} 次没有回应 ADB 命令，任务已停止："
-                                        "请重启 ADB server（adb kill-server; adb start-server），确认模拟器还在，再重试。")
-            return None
+                unreachable = True
+        if unreachable:
+            # Outside the shell lock (the device-input lock is taken first everywhere): every frame captured before
+            # now is stale, so a caller that catches this and carries on cannot tap on one of them.
+            from host import DeviceUnreachable, device_input
+            device_input().observed_loss()
+            raise DeviceUnreachable(f"安卓模拟器 {self.serial} 连续 {self.SHELL_FAILURE_LIMIT} 次没有回应 ADB 命令，任务已停止："
+                                    "请重启 ADB server（adb kill-server; adb start-server），确认模拟器还在，再重试。")
+        return None
 
     def exists(self) -> bool:
         # Only a confirmed absence ends the task as "game closed"; an unreadable answer is not one. Whether the

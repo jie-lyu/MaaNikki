@@ -89,6 +89,118 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual((summary["maatouch"], summary["minitouch"]), (True, False))
         self.assertEqual(len(summary["lines"]), 3)
 
+    def test_options_with_several_cases(self):
+        interface = {"controller": [{"name": "nikki_android", "type": "Adb"}], "resource": [], "import": [],
+                     "task": [{"entry": "E", "option": ["Pages"]}],
+                     "option": {"Pages": {"type": "checkbox", "default_case": ["A", "B"], "cases": [
+                         {"name": "A", "pipeline_override": {"N": {"a": 1}}},
+                         {"name": "B", "pipeline_override": {"N": {"b": 1}}}]}}}
+        self.assertEqual(runner.task_override(interface, "E", {}), [{"N": {"a": 1}}, {"N": {"b": 1}}])
+        self.assertEqual(runner.task_override(interface, "E", {"Pages": "B"}), [{"N": {"b": 1}}])
+        runner.task_override(self.interface, "MaaNikki_MonthlyPass", {})  # the real list default resolves
+
+    def test_an_interrupted_run_stops_the_task_reaps_the_agent_and_the_next_run_works(self):
+        import tempfile
+        import types
+        calls = {"post_stop": 0, "runs": 0}
+
+        class Job:
+            def __init__(self, interrupt):
+                self.interrupt, self.succeeded = interrupt, not interrupt
+
+            def wait(self):
+                if self.interrupt:
+                    raise KeyboardInterrupt
+                return self
+
+            def get(self):
+                return types.SimpleNamespace(nodes=[types.SimpleNamespace(name="MaaNikki_AndroidCheck")])
+
+        class Tasker:
+            @staticmethod
+            def set_log_dir(path):
+                pass
+
+            def bind(self, resource, controller):
+                return True
+
+            def post_task(self, entry, override):
+                calls["runs"] += 1
+                return Job(interrupt=calls["runs"] == 1)
+
+            def post_stop(self):
+                calls["post_stop"] += 1
+                return types.SimpleNamespace(wait=lambda: None)
+
+        class Controller:
+            resolution = (1920, 1080)
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def set_screenshot_target_short_side(self, side):
+                pass
+
+            def post_connection(self):
+                return types.SimpleNamespace(wait=lambda: types.SimpleNamespace(succeeded=True))
+
+            post_screencap = post_connection
+
+        class Resource:
+            def post_bundle(self, path):
+                return types.SimpleNamespace(wait=lambda: types.SimpleNamespace(succeeded=True))
+
+        class Client:
+            identifier = "test-socket"
+
+            def bind(self, resource):
+                return True
+
+            def connect(self):
+                return True
+
+            def disconnect(self):
+                return True
+
+        children = []
+
+        class Child:
+            def __init__(self, *args, **kwargs):
+                self.calls = []
+                children.append(self)
+
+            def wait(self, timeout=None):
+                self.calls.append("wait")
+                if len(children) == 1 and self.calls.count("wait") == 1:
+                    raise subprocess.TimeoutExpired("agent", timeout)  # the first agent is slow to exit
+                return 0
+
+            def terminate(self):
+                self.calls.append("terminate")
+
+            def kill(self):
+                self.calls.append("kill")
+        modules = {"maa.agent_client": types.SimpleNamespace(AgentClient=Client),
+                   "maa.controller": types.SimpleNamespace(AdbController=Controller),
+                   "maa.resource": types.SimpleNamespace(Resource=Resource),
+                   "maa.tasker": types.SimpleNamespace(Tasker=Tasker)}
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, modules), \
+                patch.object(runner, "adb_alive"), patch.object(runner.subprocess, "Popen", Child), \
+                patch.object(runner, "LOG_ROOT", Path(tmp) / "logs"), patch.object(runner, "RUN_LOG", Path(tmp) / "runs.jsonl"), \
+                patch("builtins.print"), patch("sys.stderr"):
+            argv = ["run", "MaaNikki_AndroidCheck", "--purpose", "t", "--data-root", str(Path(tmp) / "data")]
+            self.assertEqual(runner.main(argv), 2)
+            first = json.loads((Path(tmp) / "runs.jsonl").read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(first["status"], "interrupted")
+            self.assertIs(first["stop_requested"], True)
+            self.assertEqual(calls["post_stop"], 1)
+            self.assertEqual(children[0].calls[:2], ["wait", "terminate"])  # reaped before the runner returned
+            time.sleep(1.1)  # a new log directory name
+            self.assertEqual(runner.main(argv), 0)
+            second = json.loads((Path(tmp) / "runs.jsonl").read_text(encoding="utf-8").splitlines()[1])
+            self.assertEqual(second["status"], "succeeded")
+            self.assertEqual(calls["post_stop"], 1)
+
     def test_the_command_line(self):
         args = runner.build_parser().parse_args(["run", "MaaNikki_AndroidCheck", "--purpose", "t", "--option", "A=B"])
         self.assertEqual((args.entry, args.option, args.func), ("MaaNikki_AndroidCheck", ["A=B"], runner.run))
