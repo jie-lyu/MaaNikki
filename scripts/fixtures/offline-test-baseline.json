@@ -81,6 +81,7 @@
     "NoKeyboardOrMouseTests.test_each_touch_is_on_disk_before_it_is_sent_and_cleared_once_confirmed",
     "NoKeyboardOrMouseTests.test_edge_rectangles_tap_a_pixel_inside_them",
     "NoKeyboardOrMouseTests.test_every_key_is_refused",
+    "NoKeyboardOrMouseTests.test_every_sent_touch_is_logged_with_its_outcome",
     "NoKeyboardOrMouseTests.test_focus_is_read_inside_the_dispatch_lock",
     "NoKeyboardOrMouseTests.test_integer_key_actions_are_refused_before_dispatch",
     "NoKeyboardOrMouseTests.test_named_keys_and_mouse_buttons_are_refused_and_nothing_is_released",

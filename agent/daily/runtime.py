@@ -544,9 +544,11 @@ class Runtime:
                     with measure("input.action"):
                         result = _android_dispatch(self.context, action, fields)
                     succeeded = result is not None and bool(result.success)
-                except BaseException:
+                except BaseException as error:
+                    state.record_touch(action, fields, f"raised {type(error).__name__}")
                     self._halt_unconfirmed()
                     raise
+                state.record_touch(action, fields, "confirmed" if succeeded else "unconfirmed")
             finally:
                 if not sent:
                     self._release_touch(state)

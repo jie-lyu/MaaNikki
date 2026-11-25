@@ -267,6 +267,7 @@ def run(args) -> int:
             record["methods"] = methods_in_log(log_file.read_text(encoding="utf-8", errors="replace")) \
                 if log_file.exists() else None
             record["agent_messages"] = agent_messages(data_root, started)
+            record["touches"] = touches(data_root, started)
             if deferred:
                 record["interrupted_during_cleanup"] = True
             RUN_LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -304,6 +305,20 @@ def reap(child) -> int | str:
         except subprocess.TimeoutExpired:
             continue
     return "unreaped"
+
+
+def touches(data_root: Path, since: dt.datetime) -> list[dict]:
+    """The touches the agent sent during this run (logs/android-input.jsonl under its data root)."""
+    path = data_root / "logs" / "android-input.jsonl"
+    found = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines() if path.exists() else []:
+            entry = json.loads(line)
+            if dt.datetime.fromisoformat(entry["time"]) >= since:
+                found.append(entry)
+    except (OSError, ValueError, KeyError):
+        pass
+    return found
 
 
 def agent_messages(data_root: Path, since: dt.datetime) -> list[str]:

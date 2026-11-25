@@ -177,6 +177,23 @@ class DeviceInputState:
                 self.release_touch()  # nothing was sent: the half-written reservation is ours to remove
                 raise UnsupportedInput("无法记录安卓模拟器上的触摸（数据目录不可写），这一步暂不发送。") from None
 
+    def record_touch(self, action, fields, outcome):
+        """Append one sent touch to logs/android-input.jsonl under the data root (the rule: every input is logged).
+        Best effort: a log that cannot be written does not change what happened on the device."""
+        if self.root is None:
+            return
+        import datetime as _dt
+        entry = {"time": _dt.datetime.now().astimezone().isoformat(timespec="milliseconds"), "pid": os.getpid(),
+                 "action": action, **{key: fields[key] for key in ("target", "begin", "end", "duration") if key in fields},
+                 "outcome": outcome}
+        try:
+            path = self.root / "logs" / "android-input.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
     def release_touch(self):
         """Remove this process's reservation: the touch was confirmed, or never sent. A reservation that cannot be
         removed halts this process (the next one will see it and refuse as well)."""

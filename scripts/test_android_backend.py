@@ -441,6 +441,23 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
         self.assertFalse(marker.exists())
         self.assertEqual(marker.parent, self.data_root / "config" / "android-input")  # not under the clearable cache
 
+    def test_every_sent_touch_is_logged_with_its_outcome(self):
+        rt = self.tap_runtime()
+        with android_run(), patch("daily.runtime.active_session", return_value=None):
+            self.assertTrue(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
+            self.assertTrue(rt.action("Swipe", begin=[100, 100], end=[300, 100], duration=300,
+                                      source_frame=self.frame))
+        log = self.data_root / "logs" / "android-input.jsonl"
+        entries = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([(e["action"], e["outcome"]) for e in entries], [("Click", "confirmed"), ("Swipe", "confirmed")])
+        self.assertEqual(entries[0]["target"], [119, 209])  # the pixel actually tapped
+        self.assertEqual((entries[1]["begin"], entries[1]["end"], entries[1]["duration"]), ([100, 100], [300, 100], 300))
+        rt.context.run_action_direct.return_value = SimpleNamespace(success=False)
+        with android_run(), patch("daily.runtime.active_session", return_value=None), \
+                self.assertRaises(host.InputUnconfirmed):
+            rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
+        self.assertEqual(json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["outcome"], "unconfirmed")
+
     def test_an_unconfirmed_touch_halts_the_next_agent_process_under_any_serial(self):
         rt = self.tap_runtime(success=False)
         with android_run(), patch("daily.runtime.active_session", return_value=None), \
