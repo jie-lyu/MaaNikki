@@ -751,6 +751,9 @@ pub fn maa_create_instance(state: State<Arc<MaaState>>, instance_id: String) -> 
 /// 销毁实例的内部实现（可从 Tauri 命令和 HTTP 处理器共享调用）
 pub fn destroy_instance_impl(state: &Arc<MaaState>, instance_id: &str) -> Result<(), String> {
     info!("destroy_instance_impl called, instance_id: {}", instance_id);
+    // 安卓模拟器：这个实例有安卓运行（包括收尾）时拒绝。
+    #[cfg(target_os = "macos")]
+    super::android_run::refuse_while_busy(state, instance_id, super::android_run::Op::DestroyInstance)?;
 
     let cleanup_key = {
         let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
@@ -934,6 +937,10 @@ pub async fn connect_controller_impl(
     config: ControllerConfig,
     on_event: Arc<dyn Fn(&str, &str) + Send + Sync + 'static>,
 ) -> Result<i64, String> {
+    // 安卓模拟器：这个实例有安卓运行时拒绝重连和换控制器；Adb 控制器固定用 Maatouch 和 RawWithGzip；
+    // 连接进行中时安卓的开始被拒绝。其他控制器的配置原样通过。
+    #[cfg(target_os = "macos")]
+    let (config, _android_connect) = super::android_run::enter_connect(&state_arc, &instance_id, config)?;
     super::maa_library::ensure_loaded(&state_arc)?;
     tokio::task::spawn_blocking(move || {
         let pool_key = (instance_id.clone(), config.clone());
@@ -1277,6 +1284,9 @@ pub fn load_resource_impl(
         "load_resource_impl called, instance: {}, paths: {:?}",
         instance_id, paths
     );
+    // 安卓模拟器：这个实例有安卓运行（包括收尾）时拒绝。
+    #[cfg(target_os = "macos")]
+    super::android_run::refuse_while_busy(state, instance_id, super::android_run::Op::LoadResource)?;
 
     super::maa_library::ensure_loaded(state)?;
 
@@ -1389,6 +1399,9 @@ pub fn maa_destroy_resource(
     state: State<Arc<MaaState>>,
     instance_id: String,
 ) -> Result<(), String> {
+    // 安卓模拟器：这个实例有安卓运行（包括收尾）时拒绝。
+    #[cfg(target_os = "macos")]
+    super::android_run::refuse_while_busy(&state, &instance_id, super::android_run::Op::DestroyResource)?;
     let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
     let instance = instances
         .get_mut(&instance_id)
@@ -1419,6 +1432,9 @@ pub fn run_task_impl(
     pipeline_override: &str,
     selected_task_id: Option<&str>,
 ) -> Result<i64, String> {
+    // 安卓模拟器：这个实例有安卓运行（包括收尾）时拒绝追加。
+    #[cfg(target_os = "macos")]
+    super::android_run::refuse_while_busy(state, instance_id, super::android_run::Op::AppendTask)?;
     // 追加的任务按已连接的控制器决定游戏目标；没有实例或还没有连接时按当前系统（原规则）。
     // 只在读取目标时持锁，判断（可能读清单文件）在锁外，顺序与原来相同：先判断，再查实例。
     let connected = {
@@ -1975,6 +1991,9 @@ pub fn disconnect_controller_impl(
     state: &Arc<MaaState>,
     instance_id: &str,
 ) -> Result<(), String> {
+    // 安卓模拟器：这个实例有安卓运行（包括收尾）时拒绝。
+    #[cfg(target_os = "macos")]
+    super::android_run::refuse_while_busy(state, instance_id, super::android_run::Op::Disconnect)?;
     try_release_controller_handles(app, state, instance_id, false, None).map(|_| ())
 }
 
@@ -1990,6 +2009,11 @@ pub fn maa_disconnect_controller(
 /// 停止任务
 /// 停止任务的内部实现（可从 Tauri 命令和 HTTP 处理器共享调用）
 pub fn stop_task_impl(state: &MaaState, instance_id: &str) -> Result<(), String> {
+    // 安卓模拟器：这个实例有安卓运行时由它自己停止和收尾。
+    #[cfg(target_os = "macos")]
+    if let Some(result) = super::android_run::stop_if_busy(state, instance_id) {
+        return result;
+    }
     let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
     let instance = instances.get_mut(instance_id).ok_or("Instance not found")?;
     instance.start_generation = instance.start_generation.wrapping_add(1);
@@ -2090,6 +2114,9 @@ pub fn override_pipeline_impl(
     task_id: i64,
     pipeline_override: &str,
 ) -> Result<bool, String> {
+    // 安卓模拟器：这个实例有安卓运行（包括收尾）时拒绝修改选项。
+    #[cfg(target_os = "macos")]
+    super::android_run::refuse_while_busy(state, instance_id, super::android_run::Op::ChangeOptions)?;
     let instances = state.instances.lock().map_err(|e| e.to_string())?;
     let instance = instances.get(instance_id).ok_or("Instance not found")?;
     // 安卓模拟器上运行中不能修改任务选项。
@@ -2117,6 +2144,11 @@ pub fn maa_override_pipeline(
 /// 检查是否正在运行
 #[tauri::command]
 pub fn maa_is_running(state: State<Arc<MaaState>>, instance_id: String) -> Result<bool, String> {
+    // 安卓模拟器：这一轮的 Tasker 不在实例上，按安卓运行槽回答。
+    #[cfg(target_os = "macos")]
+    if super::android_run::reports_running(&state, &instance_id) {
+        return Ok(true);
+    }
     let instances = state.instances.lock().map_err(|e| e.to_string())?;
     let instance = instances.get(&instance_id).ok_or("Instance not found")?;
 
@@ -2129,6 +2161,9 @@ pub fn maa_is_running(state: State<Arc<MaaState>>, instance_id: String) -> Resul
 
 /// 发起点击请求（内部实现）
 pub fn post_click_impl(state: &MaaState, instance_id: &str, x: i32, y: i32) -> Result<i64, String> {
+    // 安卓模拟器：直接点击一律拒绝（安卓运行期间，以及任何 Adb 实例）。
+    #[cfg(target_os = "macos")]
+    super::android_run::refuse_click(state, instance_id)?;
     let instances = state.instances.lock().map_err(|e| e.to_string())?;
     let instance = instances.get(instance_id).ok_or("Instance not found")?;
     let controller = instance

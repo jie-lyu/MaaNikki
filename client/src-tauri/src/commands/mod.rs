@@ -20,6 +20,8 @@ pub mod utils;
 pub mod account_state;
 pub mod adventure_report;
 pub mod android_input;
+#[cfg(target_os = "macos")]
+pub mod android_run;
 pub mod app_config;
 pub mod data_update;
 mod diagnostic_images;

@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore } from '@/stores/appStore';
-import { macStartBlockedReason } from '@/utils/macTaskTiers';
+import { startBlockedReasonFor } from '@/utils/taskTiers';
 import { useShallow } from 'zustand/react/shallow';
 import { isControllerAllowed, isResourceAllowed, isTaskCompatible } from '@/stores/helpers';
 import { maaService } from '@/services/maaService';
@@ -400,7 +400,15 @@ export function Toolbar({ showAddPanel, onToggleAddPanel, className }: ToolbarPr
       if (wardrobeBusy()) return failStart('衣柜正在读取，请先停止衣柜读取。');
       if (fishingBusy()) return failStart('正在钓鱼，请先停止钓鱼。');
       // macOS：任务档位与说明读到之前不开始（定时运行同样），读取失败时也不开始；其他系统为空字符串。
-      const macBlocked = macStartBlockedReason(useAppStore.getState().backendOS, useAppStore.getState().macTaskTiers);
+      // 档位按这次要连接的控制器（与下面取控制器的方式相同）：Adb 查安卓档位，其他控制器仍查 Mac 档位。
+      const tierState = useAppStore.getState();
+      const gateControllerName = selectedController[targetId] || projectInterface?.controller[0]?.name;
+      const macBlocked = startBlockedReasonFor(
+        tierState.backendOS,
+        projectInterface?.controller.find((c) => c.name === gateControllerName)?.type,
+        tierState.macTaskTiers,
+        tierState.androidTaskTiers,
+      );
       if (macBlocked) return failStart(macBlocked);
 
       // UID is confirmed inside the game task before consulting period state.

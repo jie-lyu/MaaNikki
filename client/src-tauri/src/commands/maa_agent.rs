@@ -359,7 +359,7 @@ fn agent_spawn_hint_tag(error: &std::io::Error) -> Option<&'static str> {
 }
 
 /// 启动单个 Agent 子进程并完成连接
-async fn start_single_agent(
+pub(super) async fn start_single_agent(
     app: tauri::AppHandle,
     agent: AgentConfig,
     agent_index: usize,
@@ -675,6 +675,13 @@ pub async fn start_tasks_impl(
             emit_agent_output(&app, &instance_id, "stderr", &reason);
             return Err(reason);
         }
+        // 安卓模拟器（只在 macOS 上开放）：这一轮由 android_run 独占，不走下面的共用流程。
+        #[cfg(target_os = "macos")]
+        return super::android_run::start(
+            app, maa_state, instance_id, tasks, agent_configs, cwd, tcp_compat_mode, pi_envs, reset_state,
+            controller_info, refusals,
+        )
+        .await;
     }
     // 绑定控制器之前按新的连接重新准入时用（见下方）。
     let admitted_names: Vec<String> = entries.iter().map(|e| e.to_string()).collect();
@@ -1325,6 +1332,11 @@ pub async fn maa_start_tasks(
 /// 返回是否真的停止了（Mac 这一轮仍在进行、它的 agent 留给它自己时返回 false，调用方也不应释放连接）。
 pub fn stop_agent_impl(maa_state: &Arc<MaaState>, instance_id: &str) -> Result<bool, String> {
     info!("stop_agent_impl called for instance: {}", instance_id);
+    // 安卓模拟器：这个实例有安卓运行时由它自己停止和收尾（它的 agent 不在实例上）。
+    #[cfg(target_os = "macos")]
+    if let Some(result) = super::android_run::stop_if_busy(maa_state, instance_id) {
+        return result.map(|()| false);
+    }
 
     let (clients, children) = {
         let mut instances = maa_state.instances.lock().map_err(|e| e.to_string())?;

@@ -716,6 +716,8 @@ fn controller_refusal(host: Option<GameTarget>, target: Option<GameTarget>) -> O
     match target {
         None => None,
         Some(t) if Some(t) == host && matches!(t, GameTarget::Win32 | GameTarget::MacOS) => None,
+        // 安卓模拟器只在 macOS 上开放（按安卓清单逐个入口准入，运行由 android_run 负责）；其他系统照旧拒绝。
+        Some(GameTarget::Adb) if host == Some(GameTarget::MacOS) => None,
         Some(GameTarget::Adb) => Some("安卓模拟器支持还在开发中，暂不运行任务。".to_string()),
         Some(GameTarget::Malformed) => Some("所选的控制器定义无效，无法运行任务，请重新选择控制器。".to_string()),
         Some(t) => Some(format!("所选的控制器（{:?}）不能在当前系统上运行任务。", t)),
@@ -834,6 +836,11 @@ fn readmit_on(
     let now = ControllerKind::of_instance(now);
     if now.as_ref() == admitted {
         return Ok(());
+    }
+    // macOS：安卓运行从不走到这里（在准入之后就转到 android_run），共用流程的连接中途换成了 Adb 一律拒绝。
+    // 其他系统照旧（Adb 在下面的准入里被拒绝，原因和原来相同）。
+    if host == Some(GameTarget::MacOS) && targets_android(now.as_ref(), None) {
+        return Err(CONNECTION_CHANGED.to_string());
     }
     match admit_batch_on(host, now.as_ref(), submitted, entries, host_rules) {
         Ok(again) if again == refusals => Ok(()),
@@ -1266,14 +1273,16 @@ mod preview_task_tests {
         let admit_all = |_: &str| None;
         let adb = submitted_controller_kind(Some(&envs(ADB)), None);
         assert_eq!(adb, kind("Adb"));
+        // Windows refuses an emulator controller even with no tasks: a batch must not start up an agent for a
+        // controller that cannot run there. (macOS admits it by the Android tiers, see below.)
+        for entries in [&["MaaNikki_Mailbox"][..], &[][..]] {
+            let host = GameTarget::Win32;
+            let reason = admit_batch_on(Some(host), adb.as_ref(), adb.as_ref(), entries, admit_all).unwrap_err();
+            assert!(reason.contains("安卓"), "{}", reason);
+            assert!(admit_batch_on(Some(host), adb.as_ref(), None, entries, admit_all).is_err());
+            assert!(admit_batch_on(Some(host), None, adb.as_ref(), entries, admit_all).is_err());
+        }
         for (host, name) in [(GameTarget::Win32, "Win32"), (GameTarget::MacOS, "MacOS")] {
-            // Refused even with no tasks: a batch must not start up an agent for a controller that cannot run.
-            for entries in [&["MaaNikki_Mailbox"][..], &[][..]] {
-                let reason = admit_batch_on(Some(host), adb.as_ref(), adb.as_ref(), entries, admit_all).unwrap_err();
-                assert!(reason.contains("安卓"), "{}", reason);
-                assert!(admit_batch_on(Some(host), adb.as_ref(), None, entries, admit_all).is_err());
-                assert!(admit_batch_on(Some(host), None, adb.as_ref(), entries, admit_all).is_err());
-            }
             // Connected to an emulator while the request says the desktop controller (stale or missing metadata).
             assert!(admit_batch_on(Some(host), adb.as_ref(), kind(name).as_ref(), &["A"], admit_all).is_err());
         }
@@ -1286,21 +1295,32 @@ mod preview_task_tests {
         }
         assert_eq!(submitted_controller_kind(None, Some("")), None);
         assert_eq!(submitted_controller_kind(None, None), None);
-        assert!(target_refuses_task(kind("Adb").as_ref(), "X").unwrap().contains("已跳过 X"));
+        // An append on an emulator is refused with the entry named (Windows: the controller; macOS: the Android
+        // tiers, which do not list X).
+        let reason = target_refuses_task(kind("Adb").as_ref(), "X").unwrap();
+        assert!(reason.contains("已跳过") && reason.contains('X'), "{}", reason);
     }
 
-    /// The Android rules are in place but not reachable yet: every host refuses an emulator controller before any
-    /// entry is looked at (the client opens Adb admission in its own later step).
+    /// Emulator admission is open on macOS only, entry by entry by the Android tiers (never the host rules);
+    /// Windows refuses the controller before any entry is looked at, as before.
     #[test]
-    fn android_tiers_are_prepared_while_admission_stays_closed() {
-        let host_rules = |_: &str| None;
-        let android_rules = |_: &str| None;
+    fn android_admission_is_open_on_macos_only_and_by_the_android_tiers() {
+        let host_rules = |_: &str| Some("host".to_string());
+        let android_rules = |e: &str| (e != "MaaNikki_AndroidCheck").then(|| "android".to_string());
         let adb = kind("Adb");
-        for host in [GameTarget::Win32, GameTarget::MacOS] {
-            let reason = admit_batch_with(Some(host), adb.as_ref(), adb.as_ref(), &["MaaNikki_AndroidCheck"],
-                                          host_rules, android_rules).unwrap_err();
-            assert!(reason.contains("安卓"), "{}", reason);
+        let reason = admit_batch_with(Some(GameTarget::Win32), adb.as_ref(), adb.as_ref(), &["MaaNikki_AndroidCheck"],
+                                      host_rules, android_rules).unwrap_err();
+        assert!(reason.contains("安卓"), "{}", reason);
+        for (connected, submitted) in [(&adb, &adb), (&None, &adb), (&adb, &None)] {
+            assert_eq!(admit_batch_with(Some(GameTarget::MacOS), connected.as_ref(), submitted.as_ref(),
+                                        &["MaaNikki_AndroidCheck", "MaaNikki_Dig"], host_rules, android_rules).unwrap(),
+                       vec![None, Some("android".to_string())]);
         }
+        // Still refused when the request and the connection disagree.
+        assert!(admit_batch_with(Some(GameTarget::MacOS), adb.as_ref(), kind("MacOS").as_ref(), &["A"],
+                                 host_rules, android_rules).is_err());
+        assert!(admit_batch_with(Some(GameTarget::MacOS), kind("MacOS").as_ref(), adb.as_ref(), &["A"],
+                                 host_rules, android_rules).is_err());
         let manifest = include_str!("../../../../agent/host/android/tasks.json");
         assert_eq!(preview_task_allowed(manifest, "MaaNikki_AndroidCheck"), Ok(true));
         assert_eq!(preview_task_allowed(manifest, "MaaNikki_Dig"), Ok(false));
@@ -1355,9 +1375,14 @@ mod preview_task_tests {
         // Windows as before: the request named Win32 and the first connection completed after admission.
         assert!(readmit_on(host, None, Some(&win32), kind("Win32").as_ref(), &["A"], &ok, admit_all).is_ok());
         assert!(readmit_on(host, None, Some(&win32), None, &["A"], &ok, admit_all).is_ok());
-        // Switched to (or first connected as) an emulator: refused.
+        // Switched to (or first connected as) an emulator: refused, on macOS too where emulator admission is open
+        // (an Android run never reaches the shared binding; it is diverted right after admission).
         assert!(readmit_on(host, kind("Win32").as_ref(), Some(&adb), kind("Win32").as_ref(), &["A"], &ok, admit_all).is_err());
         assert!(readmit_on(host, None, Some(&adb), None, &["A"], &ok, admit_all).is_err());
+        let mac = Some(GameTarget::MacOS);
+        assert_eq!(readmit_on(mac, None, Some(&adb), None, &["A"], &ok, admit_all).unwrap_err(), super::CONNECTION_CHANGED);
+        assert_eq!(readmit_on(mac, kind("MacOS").as_ref(), Some(&adb), kind("MacOS").as_ref(), &["A"], &ok, admit_all)
+                       .unwrap_err(), super::CONNECTION_CHANGED);
         // Admission results that differ under the new connection also refuse.
         let refusing = |_: &str| Some("no".to_string());
         assert_eq!(readmit_on(host, None, Some(&win32), None, &["A"], &ok, refusing).unwrap_err(),

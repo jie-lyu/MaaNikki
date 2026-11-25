@@ -346,6 +346,9 @@ pub struct MaaState {
     pub log_buffer: Mutex<LogBuffer>,
     /// 后端统一截图服务（确保每实例只有一份 post_screencap 在运行）
     pub screenshot_service: crate::screenshot_service::ScreenshotService,
+    /// 安卓模拟器：整个进程唯一的安卓运行槽（只在 macOS 上开放）
+    #[cfg(target_os = "macos")]
+    pub android_run: super::android_run::AndroidRunSlot,
 }
 
 impl MaaState {

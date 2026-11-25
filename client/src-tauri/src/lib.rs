@@ -397,6 +397,9 @@ pub fn run() {
                 tauri::WindowEvent::Destroyed => {
                     if let Some(state) = window.try_state::<Arc<MaaState>>() {
                         state.cleanup_all_agent_children();
+                        // 安卓运行的 agent 不在实例上，单独结束（只在 macOS 上有）。
+                        #[cfg(target_os = "macos")]
+                        commands::android_run::kill_on_exit(&state);
                     }
                 }
                 _ => {}

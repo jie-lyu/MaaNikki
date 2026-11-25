@@ -40,16 +40,28 @@ pub fn maa_get_instance_state(
         instance_id
     );
 
+    // 安卓模拟器：这一轮的 Tasker 不在实例上，按安卓运行槽回答「正在运行」（在拿实例锁之前读槽）。
+    #[cfg(target_os = "macos")]
+    let android_running = super::android_run::reports_running(&state, &instance_id);
     let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
     let instance = instances
         .get_mut(&instance_id)
         .ok_or("Instance not found")?;
 
+    #[cfg(target_os = "macos")]
+    if android_running {
+        let mut snapshot = snapshot_instance_state(instance);
+        snapshot.is_running = true;
+        return Ok(snapshot);
+    }
     Ok(snapshot_instance_state(instance))
 }
 
 /// 获取所有实例的状态快照（供 Tauri 命令与 HTTP Web 服务共用）
 pub fn get_all_states_impl(state: &MaaState) -> Result<AllInstanceStates, String> {
+    // 安卓模拟器：在拿实例锁之前读安卓运行槽（锁的顺序是槽 → 实例）。
+    #[cfg(target_os = "macos")]
+    let android_running = super::android_run::running_instance(state);
     let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
     let cached_adb = state.cached_adb_devices.lock().map_err(|e| e.to_string())?;
     let cached_win32 = state
@@ -68,6 +80,13 @@ pub fn get_all_states_impl(state: &MaaState) -> Result<AllInstanceStates, String
     let mut instance_states = HashMap::new();
 
     for (id, instance) in instances.iter_mut() {
+        #[cfg(target_os = "macos")]
+        if android_running.as_deref() == Some(id.as_str()) {
+            let mut snapshot = snapshot_instance_state(instance);
+            snapshot.is_running = true;
+            instance_states.insert(id.clone(), snapshot);
+            continue;
+        }
         instance_states.insert(id.clone(), snapshot_instance_state(instance));
     }
 

@@ -432,6 +432,9 @@ export interface AppState {
   /** Mac 任务档位（只在 macOS 后端加载，不持久化；null = 未加载，Windows 始终为 null，不做任何标记） */
   macTaskTiers: import('@/utils/macTaskTiers').MacTaskTiers | null;
   setMacTaskTiers: (tiers: import('@/utils/macTaskTiers').MacTaskTiers | null) => void;
+  /** 安卓模拟器任务档位（只在 macOS 后端加载，同样的格式；选了 Adb 控制器的实例用它，其他实例仍用 macTaskTiers） */
+  androidTaskTiers: import('@/utils/macTaskTiers').MacTaskTiers | null;
+  setAndroidTaskTiers: (tiers: import('@/utils/macTaskTiers').MacTaskTiers | null) => void;
 
   // 托盘设置
   minimizeToTray: boolean;
