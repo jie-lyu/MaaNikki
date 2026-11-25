@@ -894,9 +894,13 @@ def background_sample(device: Device, recognizer) -> dict:
     else is sent. Stops sending at the first input that fails. Whenever input was attempted, the window state is
     recorded again afterwards."""
     sample = {"time": dt.datetime.now().astimezone().isoformat(timespec="seconds"), "window": mac_window_state()}
+    started = time.perf_counter()
     first = device.capture()
+    first_ms = (time.perf_counter() - started) * 1000
     time.sleep(1)
+    started = time.perf_counter()
     second = device.capture()
+    sample["capture_ms"] = [round(first_ms), round((time.perf_counter() - started) * 1000)]
     if first is None or second is None:
         return {**sample, "capture": "failed"}
     # A stale frame repeats pixel for pixel; a live scene with motion (water, foliage) does not. A static scene would
