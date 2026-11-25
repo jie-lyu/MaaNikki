@@ -27,6 +27,8 @@ use tauri::Emitter;
 
 use super::types::{AgentConfig, ControllerConfig, ControllerInfo, InstanceRuntime, MaaState, TaskConfig};
 
+mod activity;
+
 /// 被停止取消的开始返回给前端的标记（与共用流程相同，前端据此不报错）。
 const CANCELLED: &str = "MXU_PRE_ACTION_CANCELLED";
 
@@ -246,13 +248,17 @@ struct SlotInner {
     /// and held until the slot is Idle again: the developer runner (scripts/android/runner.py) and other clients take
     /// the same lock, so only one MaaNikki process drives an emulator at a time.
     device_lock: Option<std::fs::File>,
+    /// The macOS process activity (App Nap off, see activity.rs) of the run, begun at the claim and ended when the slot
+    /// is Idle again or the finishing worker has released the run's handles, whichever comes first.
+    activity: Option<activity::Activity>,
 }
 
 impl SlotInner {
-    /// Back to Idle; the device lock is released with it.
+    /// Back to Idle; the device lock is released and the process activity ended with it.
     fn to_idle(&mut self) {
         self.phase = Phase::Idle;
         self.device_lock = None;
+        self.activity = None;
     }
 }
 
@@ -266,6 +272,8 @@ pub struct AndroidRunSlot {
     timing: Timing,
     /// 取得槽时对实例连接的检查（单元测试没有原生的控制器句柄，换成只看配置的检查）。
     connection_check: fn(&MaaState, &str) -> Result<(), String>,
+    /// Begins the run's process activity at the claim (the unit tests count begins and ends instead).
+    begin_activity: activity::BeginActivity,
 }
 
 impl Default for AndroidRunSlot {
@@ -276,6 +284,7 @@ impl Default for AndroidRunSlot {
             device_lock_dir: None,
             timing: Timing::default(),
             connection_check: instance_is_connected_adb,
+            begin_activity: activity::process_activity(),
         }
     }
 }
@@ -298,7 +307,19 @@ impl AndroidRunSlot {
             lock_dir: Some(lock_dir),
             timing,
             connection_check,
+            begin_activity: Arc::new(|| Box::new(()) as activity::Activity),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_activity(mut self, begin_activity: activity::BeginActivity) -> Self {
+        self.begin_activity = begin_activity;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn holds_activity(&self) -> bool {
+        lock(&self.inner).activity.is_some()
     }
 
     fn lock_dir(&self) -> Result<PathBuf, String> {
@@ -771,6 +792,8 @@ fn claim(state: &Arc<MaaState>, instance_id: &str) -> Result<StartClaim, String>
     };
     super::android_input::clear_stop_request(&dir)?;
     inner.device_lock = Some(device_lock);
+    // From here to the run's retirement the process is not napped (activity.rs): the swipes' 10 ms steps run in it.
+    inner.activity = Some((slot.begin_activity)());
     inner.next_token += 1;
     let token = inner.next_token;
     inner.phase = Phase::Starting { token, instance_id: instance_id.to_string(), cancelled: false };
@@ -1264,6 +1287,8 @@ impl FinishJob {
                         inner.to_idle();
                     } else {
                         *released = true;
+                        // The run's handles are gone and its agent has exited: nothing of it runs in this process.
+                        inner.activity = None;
                     }
                 }
             }

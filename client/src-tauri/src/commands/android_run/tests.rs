@@ -68,8 +68,12 @@ fn state() -> (Arc<MaaState>, PathBuf) {
 }
 
 fn state_in(dir: PathBuf) -> (Arc<MaaState>, PathBuf) {
+    state_with(dir, |slot| slot)
+}
+
+fn state_with(dir: PathBuf, slot: impl FnOnce(AndroidRunSlot) -> AndroidRunSlot) -> (Arc<MaaState>, PathBuf) {
     let mut state = MaaState::default();
-    state.android_run = AndroidRunSlot::for_tests(dir.clone(), timing(), adb_configured);
+    state.android_run = slot(AndroidRunSlot::for_tests(dir.clone(), timing(), adb_configured));
     {
         let mut instances = state.instances.lock().unwrap();
         for (id, config) in [(A, adb()), (B, adb()), (W, win32()), (M, macos())] {
@@ -1307,4 +1311,94 @@ fn the_device_lock_is_held_from_the_claim_until_the_slot_is_idle() {
     assert_eq!(refuse_while_busy(&state, A, Op::Connect), Ok(()));  // heals
     assert_eq!(state.android_run.phase(), Phase::Idle);
     assert!(free());
+}
+
+// ----------------------------------------------------------------------------
+// The process activity (App Nap off) of a run
+// ----------------------------------------------------------------------------
+
+struct CountedActivity(Arc<AtomicU64>);
+
+impl Drop for CountedActivity {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// A state whose slot counts the activities it begins and ends, as (begun, ended).
+fn counted_state() -> (Arc<MaaState>, PathBuf, impl Fn() -> (u64, u64)) {
+    let begun = Arc::new(AtomicU64::new(0));
+    let ended = Arc::new(AtomicU64::new(0));
+    let (b, e) = (Arc::clone(&begun), Arc::clone(&ended));
+    let (state, dir) = state_with(temp_dir(), move |slot| {
+        slot.with_activity(Arc::new(move || {
+            b.fetch_add(1, Ordering::SeqCst);
+            Box::new(CountedActivity(Arc::clone(&e))) as activity::Activity
+        }))
+    });
+    (state, dir, move || (begun.load(Ordering::SeqCst), ended.load(Ordering::SeqCst)))
+}
+
+#[test]
+fn a_run_holds_the_process_activity_from_its_claim_to_its_retirement() {
+    let _serial = serial();
+    let (state, dir, counts) = counted_state();
+    let events = Arc::new(Recorded::default());
+
+    // A refused start begins none, and Win32 and MacOS instances never claim the slot.
+    assert_eq!(claim(&state, W).err().as_deref(), Some(NOT_CONNECTED));
+    assert_eq!(claim(&state, M).err().as_deref(), Some(NOT_CONNECTED));
+    let holder = hold_lock(&dir);
+    assert_eq!(claim(&state, A).err().as_deref(), Some(OWNER_LOCK_BUSY));
+    drop(holder);
+    assert_eq!(counts(), (0, 0));
+
+    // A start that fails before the agent ends it when it gives the slot back.
+    let claimed = claim(&state, A).unwrap();
+    assert!(state.android_run.holds_activity());
+    assert_eq!(counts(), (1, 0));
+    drop(claimed);
+    assert_eq!((counts(), state.android_run.holds_activity()), ((1, 1), false));
+
+    // A committed run holds it while running and through the stop's finishing, until the slot is idle.
+    let claimed = claim(&state, A).unwrap();
+    let (result, job) = claimed.commit(handles(Some(sleeper("0.2")), &events), |_| Ok(vec![11]));
+    assert!(result.is_ok() && job.is_none());
+    assert_eq!(counts(), (2, 1));
+    assert_eq!(stop_if_busy(&state, A), Some(Ok(())));
+    wait_for_idle(&state);
+    assert_eq!((counts(), state.android_run.holds_activity()), ((2, 2), false));
+
+    // A failed post finishes the run, and the finishing ends it.
+    let (result, job) = claim(&state, A).unwrap().commit(handles(None, &events), |_| Err("post failed".to_string()));
+    assert!(result.is_err());
+    assert_eq!(counts(), (3, 2));
+    job.unwrap().run();
+    assert_eq!((state.android_run.phase(), counts()), (Phase::Idle, (3, 3)));
+
+    // owner.lock still held after the agent exited: the slot stays Finishing, but the run's handles are released and
+    // the activity ends with them; the next start begins a new one.
+    let holder = hold_lock(&dir);
+    running(&state, 40, None, &events);
+    lock(&state.android_run.inner).activity = Some((state.android_run.begin_activity)());
+    let job = {
+        let mut inner = lock(&state.android_run.inner);
+        begin_finishing(&state.android_run, &mut inner, 40, "task-stopped")
+    };
+    job.run();
+    assert_eq!(state.android_run.phase(), Phase::Finishing { token: 40, instance_id: A.into(), released: true });
+    assert_eq!((counts(), state.android_run.holds_activity()), ((4, 4), false));
+    drop(holder);
+    drop(claim(&state, A).unwrap());
+    assert_eq!(counts(), (5, 5));
+
+    // A start that panics while it holds the claim ends it while unwinding.
+    let panicking = Arc::clone(&state);
+    assert!(std::thread::spawn(move || {
+        let _claimed = claim(&panicking, A).unwrap();
+        panic!("start failed");
+    })
+    .join()
+    .is_err());
+    assert_eq!((state.android_run.phase(), counts()), (Phase::Idle, (6, 6)));
 }
