@@ -522,8 +522,12 @@ class Runtime:
             if state.halted or self.stopped:
                 return False
             target = self._sessionless_target()
+            # The device reading kept with the source frame (no device I/O between the decision and the send): the
+            # touch state and baseline below, and the guest the reservation names.
+            before = state.touch_of(source_frame)
+            booted = getattr(before, "boot_id", None)
             try:
-                state.begin_touch(target.identity())  # reserved on disk first, or nothing is sent
+                state.begin_touch({"serial": target.serial, "boot_id": booted} if booted else None)
             except BaseException:
                 if state.halted:
                     self._halt_unconfirmed()
@@ -541,9 +545,7 @@ class Runtime:
                     return False
                 # Nothing may have been held when the source frame was captured (a contact left by anything earlier
                 # stops all input), and the dispatcher's latest event then is the baseline this touch's own lift
-                # must come after. The reading was taken with the frame, so no device I/O is added between the
-                # decision and the send.
-                before = state.touch_of(source_frame)
+                # must come after.
                 if before is None or before.state != "none":
                     self._halt_unconfirmed()
                     from host import InputUnconfirmed

@@ -55,8 +55,9 @@ def android_run():
         yield
 
 
-SETTLED = TouchSnapshot("none", 900, 900)  # the touch reading kept with a frame: nothing held, last event at 900
 DEVICE = {"serial": "127.0.0.1:5555", "boot_id": "992f1bef-d353-4a1b-b401-b9867f884164"}
+# The touch reading kept with a frame: nothing held, last event at 900, and the guest's boot id.
+SETTLED = TouchSnapshot("none", 900, 900, DEVICE["boot_id"])
 
 
 def advancing_snapshots():
@@ -235,34 +236,37 @@ class TargetTests(FreshAndroidState):
         empty = touch_snapshot(TOUCH_NONE + "  RecentQueue: <empty>\n")
         self.assertEqual((empty.latest, empty.injected_up), (-1, None))
         boot = "992f1bef-d353-4a1b-b401-b9867f884164"
-        controller = FakeShellController({"dumpsys input": TOUCH_HELD + RECENT, "boot_id": boot + "\n"})
+        controller = FakeShellController({"dumpsys input": f"{boot}\n__input__\n{TOUCH_HELD}{RECENT}"})
         target = AndroidTarget(INFO, controller)
-        self.assertEqual(target.touch_snapshot().state, "injected")
-        self.assertEqual(target.identity(), {"serial": INFO["adb_serial"], "boot_id": boot})
-        self.assertEqual(controller.commands, ["dumpsys input", "cat /proc/sys/kernel/random/boot_id"])
-        unreadable = AndroidTarget(INFO, FakeShellController({"boot_id": "not a uuid\n"}))
-        self.assertIsNone(unreadable.identity())
+        snapshot = target.touch_snapshot()
+        self.assertEqual((snapshot.state, snapshot.boot_id), ("injected", boot))
+        self.assertEqual(len(controller.commands), 1)  # boot id and dispatcher in one shell call
+        self.assertIsNone(touch_snapshot(f"not a uuid\n__input__\n{TOUCH_NONE}{RECENT}").boot_id)
 
     def test_the_recovery_reading_needs_every_part_from_one_output(self):
         from host.android.target import RECOVERY_READING
         boot = "992f1bef-d353-4a1b-b401-b9867f884164"
         queues = "  PendingEvent: <none>\n  InboundQueue: <empty>\n"
         ps = "ARGS\ninit second_stage\n[kthreadd]\n" + "".join(f"[kworker/{n}]\n" for n in range(20)) + \
-            f"sh -c {RECOVERY_READING}\n"  # the reading's own command line
+            f"sh -c {RECOVERY_READING}\n__rc=0\n"  # the reading's own command line, then ps's exit status
         helper = "/system/bin/app_process /data/local/tmp com.shxyke.MaaTouch.App\n"
 
         def reading(dump=TOUCH_NONE + queues, before=ps, after=ps, booted=boot):
             return recovery_reading(f"{booted}\n__ps__\n{before}__input__\n{dump}__ps__\n{after}")
         self.assertEqual(reading(), {"boot_id": boot, "state": "none", "queued": False, "maatouch": False})
-        self.assertTrue(reading(before=ps + helper)["maatouch"])  # a helper that exited while the dispatcher was read
-        self.assertTrue(reading(after=ps + "app_process /data/local/tmp com.shxyke.MaaTouch.App\n")["maatouch"])
+        self.assertTrue(reading(before=ps.replace("__rc=0", helper + "__rc=0"))["maatouch"])  # a helper that exited while the dispatcher was read
+        self.assertTrue(reading(after=ps.replace("__rc=0", "app_process /data/local/tmp com.shxyke.MaaTouch.App\n__rc=0"))["maatouch"])
         self.assertTrue(reading(dump=TOUCH_NONE + "  PendingEvent: <none>\n  InboundQueue: length=1\n"
                                      "    MotionEvent(deviceId=-1, eventTime=1, action=DOWN)\n")["queued"])
         self.assertTrue(reading(dump=TOUCH_NONE + "  PendingEvent:\n    MotionEvent(...)\n  InboundQueue: <empty>\n")
                         ["queued"])
         self.assertEqual(reading(dump=TOUCH_HELD + queues)["state"], "injected")
         for broken in (reading(booted="nope"), reading(dump=TOUCH_NONE), reading(dump="  Display: 0\n" + queues),
-                       reading(before="ARGS\n"), reading(after="ARGS\ninit second_stage\n"),  # not a whole listing
+                       reading(before="ARGS\n__rc=0\n"), reading(after="ARGS\ninit second_stage\n__rc=0\n"),
+                       reading(before=ps.replace("__rc=0", "__rc=1")),  # ps did not finish cleanly
+                       reading(before=ps.replace("__rc=0\n", "")),  # no exit status: may be cut short
+                       reading(before="".join(ps.splitlines(keepends=True)[:21]) + "__rc=0\n",
+                               after=ps + "".join(f"[proc{n}]\n" for n in range(40))),  # far shorter than the other
                        reading(after=ps.replace("init second_stage", "zygote")), recovery_reading(None),
                        recovery_reading(f"{boot}\n__input__\n{TOUCH_NONE}{queues}__ps__\n{ps}")):
             self.assertIsNone(broken)
@@ -491,7 +495,7 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
         rt.pause = Mock(return_value=True)
         rt.ui = SimpleNamespace(unhover=Mock(return_value=True))  # without pointer hover it returns at once
         rt._device_target = SimpleNamespace(foreground=Mock(return_value=focused), exists=Mock(return_value=True),
-                                            serial=INFO["adb_serial"], identity=Mock(return_value=DEVICE),
+                                            serial=INFO["adb_serial"],
                                             touch_snapshot=Mock(side_effect=advancing_snapshots()))
         return rt
 
@@ -619,7 +623,6 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
                 self.state = state
                 nxt = self.tap_runtime()
                 nxt._device_target.serial = serial
-                nxt._device_target.identity.return_value = {**DEVICE, "serial": serial}
                 with android_run(), patch("daily.runtime.active_session", return_value=None):
                     with self.assertRaises(host.InputUnconfirmed):
                         nxt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
@@ -632,7 +635,7 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
 
     def test_a_touch_counts_as_confirmed_only_once_the_device_shows_its_own_lift(self):
         # The framework reports the lift done once written to MaaTouch; the device's own state decides.
-        before = TouchSnapshot("none", 500, 400)
+        before = TouchSnapshot("none", 500, 400, DEVICE["boot_id"])
         held, idle = TouchSnapshot("injected", 600, 400), TouchSnapshot("none", 500, 400)
         for index, (readings, outcome) in enumerate((
                 ([held] * 6, "unconfirmed: device reports injected"),

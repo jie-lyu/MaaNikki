@@ -99,8 +99,9 @@ class TouchSnapshot:
     """One `dumpsys input` reading: the touch state (see touch_state()), the latest event time in the dispatcher's
     RecentQueue (-1 when it is empty) and the latest injected UP's event time (None when there is none)."""
 
-    def __init__(self, state, latest, injected_up):
+    def __init__(self, state, latest, injected_up, boot_id=None):
         self.state, self.latest, self.injected_up = state, latest, injected_up
+        self.boot_id = boot_id  # the guest's boot id, read in the same shell call (None when not read)
 
     def released_after(self, baseline) -> bool:
         """True when nothing is held and an injected UP was dispatched after ``baseline`` (an earlier reading's
@@ -139,13 +140,22 @@ def recent_events(output: str | None):
     return events if entries == length else None  # a cut-off queue could hide the newest events
 
 
+# The guest's boot id and the input dispatcher in one shell call (the separator is quoted apart in the command).
+TOUCH_READING = "cat /proc/sys/kernel/random/boot_id; echo __in''put__; dumpsys input"
+
+
 def touch_snapshot(output: str | None) -> TouchSnapshot | None:
-    """Touch state and recent events from one `dumpsys input` output; None when either cannot be read."""
+    """Touch state and recent events from one `dumpsys input` output, optionally preceded by the boot id and the
+    TOUCH_READING separator; None when the state or the events cannot be read."""
+    booted = None
+    if output is not None and output.count("__input__") == 1:
+        head, output = output.split("__input__")
+        booted = boot_id(head)
     state, events = touch_state(output), recent_events(output)
     if state is None or events is None:
         return None
     ups = [time for device, time, action in events if device == INJECTED_DEVICE and action == "UP"]
-    return TouchSnapshot(state, max((time for _d, time, _a in events), default=-1), max(ups, default=None))
+    return TouchSnapshot(state, max((time for _d, time, _a in events), default=-1), max(ups, default=None), booted)
 
 
 def boot_id(output: str | None) -> str | None:
@@ -156,8 +166,8 @@ def boot_id(output: str | None) -> str | None:
 # One shell invocation for the runner's recovery decision: the guest's boot id, the input dispatcher and the
 # processes are read together, so they describe the same guest at (nearly) the same moment. The separators are
 # quoted apart in the command, so the command's own line in the process list does not contain them.
-RECOVERY_READING = ("cat /proc/sys/kernel/random/boot_id; echo __p''s__; ps -A -o ARGS; echo __in''put__; "
-                    "dumpsys input; echo __p''s__; ps -A -o ARGS")
+RECOVERY_READING = ("cat /proc/sys/kernel/random/boot_id; echo __p''s__; ps -A -o ARGS; echo __r''c=$?; "
+                    "echo __in''put__; dumpsys input; echo __p''s__; ps -A -o ARGS; echo __r''c=$?")
 
 
 def recovery_reading(output: str | None) -> dict | None:
@@ -174,8 +184,9 @@ def recovery_reading(output: str | None) -> dict | None:
     pending = [line.strip() for line in dump.splitlines() if line.strip().startswith("PendingEvent:")]
     inbound = [line.strip() for line in dump.splitlines() if line.strip().startswith("InboundQueue:")]
     if boot_id(booted) is None or state is None or len(pending) != 1 or len(inbound) != 1 \
-            or not (process_listing(before) and process_listing(after)):
-        return None
+            or not (process_listing(before) and process_listing(after)) \
+            or abs(_listing_size(before) - _listing_size(after)) > max(10, _listing_size(after) // 10):
+        return None  # two listings a moment apart differ by a few processes, not by most of the list
     return {"boot_id": boot_id(booted), "state": state,
             "queued": pending != ["PendingEvent: <none>"] or inbound != ["InboundQueue: <empty>"],
             "maatouch": any(MAATOUCH_CLASS in line for line in (before + after).splitlines())}
@@ -185,9 +196,17 @@ MAATOUCH_CLASS = "com.shxyke.MaaTouch"
 
 
 def process_listing(output: str) -> bool:
-    """`ps -A -o ARGS` output that looks whole: the header, init, and a plausible number of processes."""
+    """`ps -A -o ARGS` output that finished (its exit status 0 follows it) and looks whole: the header, init, and a
+    plausible number of processes."""
     lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines or lines[-1] != "__rc=0":
+        return False
+    lines = lines[:-1]
     return len(lines) >= 20 and lines[0] == "ARGS" and any(line.split()[0].endswith("init") for line in lines[1:3])
+
+
+def _listing_size(output: str) -> int:
+    return len([line for line in output.splitlines() if line.strip()])
 
 
 def check_controller_info(info) -> str:
@@ -293,14 +312,9 @@ class AndroidTarget:
             return package
 
     def touch_snapshot(self) -> TouchSnapshot | None:
-        """Whether a contact is held on the device now, with the dispatcher's recent events; None when unreadable."""
-        return touch_snapshot(self._shell("dumpsys input"))
-
-    def identity(self) -> dict | None:
-        """The connected guest: its serial and its boot id (a different guest behind the same forwarded address,
-        or the same guest rebooted, has another), read now; None when the boot id cannot be read."""
-        booted = boot_id(self._shell("cat /proc/sys/kernel/random/boot_id"))
-        return None if booted is None else {"serial": self.serial, "boot_id": booted}
+        """Whether a contact is held on the device now, with the dispatcher's recent events and the guest's boot
+        id; None when unreadable."""
+        return touch_snapshot(self._shell(TOUCH_READING))
 
     def hung(self) -> bool:
         return False
