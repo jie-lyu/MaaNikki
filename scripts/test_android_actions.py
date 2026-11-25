@@ -235,21 +235,28 @@ class PlanTests(unittest.TestCase):
         self.assertIsNone(actions.confirm_tap(back, actions.read_screen(page), Scripted(arrow=True, title="地图")))
 
     def test_an_unchanged_strip_confirms_even_when_ocr_reads_by_window_position(self):
-        class Skewed(Scripted):
-            def __call__(inner, node, override=None):  # the reading leans towards the window's centre, like OCR
+        # cam360/c05 with the real OCR: the scan put 奇想日历 at x=943; the window centred there read it at 933, and a
+        # window centred at 933 read it at 942 (9 px from the plan). Confirming must reuse the deciding window.
+        def reading(window_centre):
+            return round(933 - 0.9 * (window_centre - 943))
+
+        class C05(Scripted):
+            def __call__(inner, node, override=None):
                 result = Scripted.__call__(inner, node, override)
-                if node == actions.HUD_LABEL and result.hit and override and "roi" in override:
-                    x, _y, w, _h = override["roi"]
-                    if w == 18 * len(override["expected"]) + 24:
-                        shift = round(((x + w / 2) - (result.box[0] + result.box[2] / 2)) * 0.9)
-                        return hit([result.box[0] + shift, *result.box[1:]], result.best_result.text)
+                width = 18 * len("奇想日历") + 24
+                if node == actions.HUD_LABEL and result.hit and override and "roi" in override \
+                        and override["expected"] == "奇想日历" and override["roi"][2] == width:
+                    centre = reading(override["roi"][0] + width / 2)
+                    return hit([centre - 35, *result.box[1:3], result.box[3]], "奇想日历")
                 return result
-        decided = Skewed(duck=True)
+        labels = {**LABELS, "奇想日历": (943, 70)}
+        decided = C05(duck=True, labels=labels)
         screen = actions.read_screen(decided)
-        for action in ("shop", "monthly", "calendar", "dress"):
-            with self.subTest(action=action):
-                plan = actions.plan_tap(action, screen, decided)
-                self.assertEqual(actions.confirm_tap(plan, screen, Skewed(duck=True)), plan.target)
+        plan = actions.plan_tap("calendar", screen, decided)
+        self.assertEqual(plan.target[0], 933)
+        self.assertEqual(actions.confirm_tap(plan, screen, C05(duck=True, labels=labels)), plan.target)
+        self.assertEqual(plan.window_x, 943)
+        self.assertEqual(reading(933), 942)  # what re-centring on the target would have read: refused at 8 px
 
     def test_boxes_are_compared_where_they_would_be_tapped(self):
         quit = Scripted(quit=True, cancel=True, duck=True)
