@@ -269,8 +269,10 @@ class FreshAndroidState(unittest.TestCase):
         self.state = patcher.start()
         self.addCleanup(patcher.stop)
 
-    def fresh_state(self):
-        return host.DeviceInputState(self.data_root)
+    def fresh_state(self, root=...):
+        state = host.DeviceInputState(self.data_root if root is ... else root)
+        self.addCleanup(lambda: state._owner.close() if state._owner is not None else None)
+        return state
 
 
 class NoKeyboardOrMouseTests(FreshAndroidState):
@@ -358,66 +360,133 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
 
     def test_each_touch_is_on_disk_before_it_is_sent_and_cleared_once_confirmed(self):
         rt = self.tap_runtime()
-        marker = self.state.marker(INFO["adb_serial"])
+        marker = self.state.marker()
         seen = []
         rt.context.run_action_direct.side_effect = lambda *a: (seen.append(marker.is_file()),
                                                                SimpleNamespace(success=True))[1]
         with android_run(), patch("daily.runtime.active_session", return_value=None):
             self.assertTrue(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
-        self.assertEqual(seen, [True])
+            self.assertTrue(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
+        self.assertEqual(seen, [True, True])
         self.assertFalse(marker.exists())
         self.assertEqual(marker.parent, self.data_root / "config" / "android-input")  # not under the clearable cache
 
-    def test_an_unconfirmed_touch_halts_the_next_agent_process_on_that_device(self):
+    def test_an_unconfirmed_touch_halts_the_next_agent_process_under_any_serial(self):
         rt = self.tap_runtime(success=False)
         with android_run(), patch("daily.runtime.active_session", return_value=None), \
                 self.assertRaises(host.InputUnconfirmed):
             rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
-        self.assertTrue(self.state.marker(INFO["adb_serial"]).is_file())
-        with patch.object(host, "_DEVICE_INPUT", self.fresh_state()) as state:  # a new agent process
-            self.state = state
-            nxt = self.tap_runtime()
-            self.assertFalse(state.halted)
-            with android_run(), patch("daily.runtime.active_session", return_value=None):
-                with self.assertRaises(host.InputUnconfirmed):
-                    nxt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
-                self.assertTrue(state.halted)
-                self.assertTrue(nxt.stopped)
-            nxt.context.run_action_direct.assert_not_called()
-            nxt.context.tasker.post_stop.assert_called_once()
+        self.assertTrue(self.state.marker().is_file())
+        self.state._owner.close()  # this process exits
+        for serial in ("127.0.0.1:5555", "emulator-5554"):  # one BlueStacks instance under two serials
+            with self.subTest(serial=serial), patch.object(host, "_DEVICE_INPUT", self.fresh_state()) as state:
+                self.state = state
+                nxt = self.tap_runtime()
+                nxt._device_target.serial = serial
+                with android_run(), patch("daily.runtime.active_session", return_value=None):
+                    with self.assertRaises(host.InputUnconfirmed):
+                        nxt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
+                    self.assertTrue(state.halted)
+                    self.assertTrue(nxt.stopped)
+                nxt.context.run_action_direct.assert_not_called()
+                nxt.context.tasker.post_stop.assert_called_once()
+                self.assertTrue(state.marker().is_file())  # still there for the next one
+                state._owner.close()
 
-    def test_another_device_is_not_halted_by_this_one(self):
-        self.state.marker("emulator-5556").parent.mkdir(parents=True)
-        self.state.marker("emulator-5556").write_text("{}")
+    def test_only_one_agent_process_uses_android_input(self):
+        import subprocess
+        import textwrap
+        lock = self.data_root / "config" / "android-input" / "owner.lock"
+        lock.parent.mkdir(parents=True)
+        holder = subprocess.Popen([sys.executable, "-c", textwrap.dedent(f"""
+            import fcntl, sys
+            handle = open({str(lock)!r}, "a+b")
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            print("held", flush=True)
+            sys.stdin.read()
+        """)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.stdin.close)
+        self.addCleanup(holder.stdout.close)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
         rt = self.tap_runtime()
         with android_run(), patch("daily.runtime.active_session", return_value=None):
-            self.assertTrue(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
+            with self.assertRaises(host.UnsupportedInput):
+                rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
+            with self.assertRaises(host.UnsupportedInput):
+                self.state.claim()  # capture claims the same way
+        rt.context.run_action_direct.assert_not_called()
+        self.assertFalse(self.state.marker().exists())
+        self.assertFalse(self.state.halted)
 
     def test_a_touch_that_cannot_be_recorded_is_not_sent(self):
-        for root in (None, "file"):
-            with self.subTest(root=root):
-                if root == "file":
-                    blocker = self.data_root / "blocker"
-                    blocker.write_text("")
-                    state = host.DeviceInputState(blocker)  # config/ cannot be created under a file
-                else:
-                    state = host.DeviceInputState(None)
+        import stat
+        blocker = self.data_root / "blocker"
+        blocker.write_text("")
+        locked = self.data_root / "locked"
+        for case in ("no data root", "data root is a file", "directory not writable", "write fails"):
+            with self.subTest(case=case):
+                root = {"no data root": None, "data root is a file": blocker}.get(case, self.data_root)
+                if case == "directory not writable":
+                    root = locked
+                state = self.fresh_state(root)
+                if case == "directory not writable":
+                    state.claim()
+                    state.directory().chmod(stat.S_IRUSR | stat.S_IXUSR)
+                    self.addCleanup(state.directory().chmod, stat.S_IRWXU)
                 with patch.object(host, "_DEVICE_INPUT", state):
                     self.state = state
                     rt = self.tap_runtime()
-                    with android_run(), patch("daily.runtime.active_session", return_value=None), \
+                    write = patch("host.os.write", side_effect=OSError(28, "No space left on device")) \
+                        if case == "write fails" else nullcontext()
+                    with android_run(), patch("daily.runtime.active_session", return_value=None), write, \
                             self.assertRaises(host.UnsupportedInput):
                         rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
                     rt.context.run_action_direct.assert_not_called()
                     self.assertFalse(state.halted)
+                    if case == "write fails":
+                        self.assertFalse(state.marker().exists())  # the partial reservation was removed
+                        with android_run(), patch("daily.runtime.active_session", return_value=None):
+                            self.assertTrue(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
+                if state._owner is not None:
+                    state._owner.close()
 
-    def test_a_tap_without_a_known_device_is_not_sent(self):
-        rt = self.tap_runtime()
-        rt._device_target.serial = None
-        with android_run(), patch("daily.runtime.active_session", return_value=None), \
-                self.assertRaises(host.UnsupportedInput):
-            rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
-        rt.context.run_action_direct.assert_not_called()
+    def test_the_last_checks_follow_the_reservation(self):
+        from task_control import ForegroundChanged
+        for change in ("focus", "stopping", "halted"):
+            with self.subTest(change=change):
+                rt = self.tap_runtime()
+                original = self.state.begin_touch
+
+                def begin_touch_while_something_changes(change=change, rt=rt, original=original):
+                    original()
+                    if change == "focus":
+                        rt._device_target.foreground.return_value = False
+                    elif change == "stopping":
+                        rt.context.tasker.stopping = True
+                    else:
+                        self.state.halted = True
+                with patch.object(self.state, "begin_touch", begin_touch_while_something_changes), \
+                        android_run(), patch("daily.runtime.active_session", return_value=None):
+                    if change == "focus":
+                        with self.assertRaises(ForegroundChanged):
+                            rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
+                    else:
+                        self.assertFalse(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
+                rt.context.run_action_direct.assert_not_called()
+                self.assertFalse(self.state.marker().exists())  # nothing was sent: the reservation is released
+                self.state.halted = False
+
+    def test_without_a_chosen_data_root_android_input_is_refused(self):
+        env = {k: v for k, v in os.environ.items() if k != "MAANIKKI_DATA_ROOT"}
+        with patch.object(host, "_DEVICE_INPUT", None), patch.dict(os.environ, env, clear=True):
+            state = host.device_input()
+            self.assertIsNone(state.root)
+            with self.assertRaises(host.UnsupportedInput):
+                state.claim()
+        with patch.object(host, "_DEVICE_INPUT", None), \
+                patch.dict(os.environ, {"MAANIKKI_DATA_ROOT": str(self.data_root)}):
+            self.assertIsNotNone(host.device_input().root)
 
     def test_edge_rectangles_tap_a_pixel_inside_them(self):
         from host.android import touch_point
@@ -505,7 +574,7 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
     def test_an_unconfirmed_tap_halts_every_runtime_and_the_queue(self):
         for failure in ("rejected", "raised"):
             with self.subTest(failure=failure), \
-                    patch.object(host, "_DEVICE_INPUT", self.fresh_state()) as state:
+                    patch.object(host, "_DEVICE_INPUT", self.fresh_state(self.data_root / failure)) as state:
                 self.state = state
                 rt = self.tap_runtime(success=False)
                 if failure == "raised":
@@ -685,6 +754,35 @@ class DeviceFocusCaptureTests(FreshAndroidState):
             image = rt._capture()
         self.assertEqual(int(image[0, 0, 0]), 2)
         self.assertEqual(rt.controller.post_screencap.call_count, 2)
+
+    def test_validation_and_mark_are_one_locked_step(self):
+        rt, inputs = self.runtime([True, True])
+        owned = []
+        rt.validate_frame = lambda image: owned.append(self.state.lock._is_owned())
+        with android_run(), patch("daily.runtime.active_session", return_value=None):
+            image = rt._capture()
+        self.assertEqual(owned, [True])  # no loss can be recorded between validating and marking
+        self.assertEqual(self.state.marks_of(image), (0, self.state.epoch))
+
+    def test_a_loss_before_validation_skips_the_validator(self):
+        rt, inputs = self.runtime([True, True, True, True])
+        validated = []
+        rt.validate_frame = validated.append
+        original = rt._device_focus_ready
+        calls = []
+
+        def ready():
+            result = original()
+            calls.append(result)
+            if len(calls) == 2:
+                self.state.observed_loss()  # after the post-capture check, before validation
+            return result
+        rt._device_focus_ready = ready
+        with android_run(), patch("daily.runtime.active_session", return_value=None):
+            image = rt._capture()
+        self.assertEqual(len(validated), 1)  # the first frame never reached the validator (nor its evidence)
+        self.assertIs(validated[0], image)
+        self.assertEqual(int(image[0, 0, 0]), 2)
 
     def test_only_an_accepted_frame_becomes_evidence(self):
         rt, inputs = self.runtime([True, True, True, True])

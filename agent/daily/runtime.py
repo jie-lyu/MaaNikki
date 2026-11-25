@@ -512,30 +512,37 @@ class Runtime:
             raise ForegroundChanged("依据的截图已经过时（之后焦点变过），已取消本次输入，等待重新核对")
         state = device_input()
         with state.lock:
-            # Inside the lock, right before sending: another caller may have halted input, seen focus go, or the
-            # player may have switched apps while this caller waited for the lock.
             if state.halted or self.stopped:
                 return False
-            if not self._device_focus_now():
-                raise ForegroundChanged("设备上游戏不在前台，已取消本次输入，等待重新核对")
-            if state.marks_of(source_frame) != (self._focus_generation, state.epoch):
-                raise ForegroundChanged("依据的截图已经过时（之后焦点变过），已取消本次输入，等待重新核对")
-            serial = self._device_serial()
             try:
-                state.begin_touch(serial)  # on disk before the touch, or nothing is sent
+                state.begin_touch()  # reserved on disk first, or nothing is sent
             except BaseException:
                 if state.halted:
                     self._halt_unconfirmed()
                 raise
+            sent = False
             try:
-                with measure("input.action"):
-                    result = _android_dispatch(self.context, action, fields)
-                succeeded = result is not None and bool(result.success)
-            except BaseException:
-                self._halt_unconfirmed()
-                raise
+                # After the reservation (which does file I/O), right before sending: another caller may have halted
+                # input, the run may be stopping, or the player may have switched apps meanwhile.
+                if state.halted or self.stopped:
+                    return False
+                if not self._device_focus_now():
+                    raise ForegroundChanged("设备上游戏不在前台，已取消本次输入，等待重新核对")
+                if state.marks_of(source_frame) != (self._focus_generation, state.epoch):
+                    raise ForegroundChanged("依据的截图已经过时（之后焦点变过），已取消本次输入，等待重新核对")
+                sent = True
+                try:
+                    with measure("input.action"):
+                        result = _android_dispatch(self.context, action, fields)
+                    succeeded = result is not None and bool(result.success)
+                except BaseException:
+                    self._halt_unconfirmed()
+                    raise
+            finally:
+                if not sent:
+                    self._release_touch(state)
             if succeeded:
-                state.end_touch(serial)
+                self._release_touch(state)
             else:
                 self._halt_unconfirmed()
                 from host import InputUnconfirmed
@@ -544,6 +551,13 @@ class Runtime:
         if action == "Click":
             return self.pause(.1) and self.ui.unhover()
         return True
+
+    def _release_touch(self, state):
+        try:
+            state.release_touch()
+        except BaseException:
+            self._halt_unconfirmed()
+            raise
 
     def _halt_unconfirmed(self):
         """The touch may have gone down without coming up: nothing more is sent by this process, and the tasker's
@@ -609,19 +623,6 @@ class Runtime:
 
     def capture(self):
         return self._capture()
-
-    def _device_serial(self):
-        inputs = self._active_inputs()
-        target = getattr(inputs, "target", None) if inputs is not None else None
-        if target is None:
-            session = active_session()
-            adapter = session.ensure_adapter() if session is not None else None
-            target = getattr(adapter, "target", None) if adapter is not None else self._sessionless_target()
-        serial = getattr(target, "serial", None)
-        if not isinstance(serial, str) or not serial:
-            from host import UnsupportedInput
-            raise UnsupportedInput("不知道当前连接的是哪台安卓模拟器，这一步暂不发送。")
-        return serial
 
     def _sessionless_target(self):
         target = getattr(self, "_device_target", None)
@@ -763,6 +764,8 @@ class Runtime:
             if available is not None and not available():
                 return None
             self.check_focus()
+            if device_focus:
+                device_input().claim()  # capture, decision and dispatch belong to one agent process
             # The epoch is read before the focus check, so a loss seen anywhere after it discards this frame.
             epoch = device_input().epoch if device_focus else None
             if device_focus and not self._device_focus_ready():
@@ -819,9 +822,16 @@ class Runtime:
                 if adjusted is not None:
                     image = adjusted
             if device_focus:
-                self.validate_frame(image)
-                if not device_input().mark_if_unchanged(image, self._focus_generation, epoch):
-                    count("capture.discarded")  # a focus loss was observed after the last check (e.g. while validating)
+                # One locked step: no focus loss can be recorded between the epoch check, the validation (which on
+                # a wrong-size frame saves it as evidence and stops the task) and the mark.
+                with device_input().lock:
+                    if device_input().epoch != epoch:
+                        count("capture.discarded")
+                        continue
+                    self.validate_frame(image)
+                    marked = device_input().mark_if_unchanged(image, self._focus_generation, epoch)
+                if not marked:
+                    count("capture.discarded")
                     continue
                 self.evidence.remember_frame(image, self._focus_generation)  # only an accepted frame is evidence
                 return image

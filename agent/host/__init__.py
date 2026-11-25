@@ -101,17 +101,22 @@ class InputUnconfirmed(Exception):
 class DeviceInputState:
     """Process-wide state of input to Android devices; only Android code paths create or change it.
 
+    Android input on this host has one owner and is scoped to the host, not to an ADB serial (one emulator is
+    reachable under several serials, e.g. 127.0.0.1:5555 and emulator-5554):
+
+    - owner: the first Android capture or touch takes an exclusive lock (config/android-input/owner.lock, held
+      until the agent process exits). Another agent process gets nothing, so capture, decision and dispatch, and
+      the focus epoch below, all belong to one process.
+    - touch marker: before every touch config/android-input/touch.json is created exclusively (outside the cache
+      the client can clear) and removed only after the touch is confirmed released. A marker already present
+      means an earlier touch was never confirmed: nothing is sent. MaaNikki clears the directory when it starts
+      (phase B5), which is the recovery boundary. Any storage error refuses the touch.
     - epoch: advanced by every observed loss of device focus (AndroidTarget records its own negative readings,
       under this lock); a frame captured before it is stale.
     - marks: (focus generation, epoch) per captured frame, recorded only if the epoch the capture started with is
-      still current (compared and recorded under the lock).
-    - touches: before every touch a per-device marker (config/android-input/<serial>.json, outside the cache the
-      client can clear) is written and verified, and removed only after the touch is confirmed released. A marker
-      already present means an earlier touch on that device was never confirmed (this agent, a previous agent
-      process, or another agent driving the same device): nothing is sent. MaaNikki clears the markers when it
-      starts (phase B5), which is the recovery boundary.
+      still current.
     - halted: this process saw an unconfirmed touch; nothing more is sent by it at all.
-    - lock: one touch at a time; halt, focus and marks are checked inside it right before dispatch.
+    - lock: one touch at a time; reservation, halt, focus and marks are checked inside it right before dispatch.
     """
 
     def __init__(self, root=None):
@@ -121,41 +126,78 @@ class DeviceInputState:
         self.halted = False
         self.epoch = 0
         self._marks = {}
+        self._owner = None
 
-    def marker(self, serial):
-        import re as _re
-        if self.root is None:
-            return None
-        return self.root / "config" / "android-input" / (_re.sub(r"[^A-Za-z0-9._-]", "_", serial) + ".json")
+    def directory(self):
+        return None if self.root is None else self.root / "config" / "android-input"
 
-    def begin_touch(self, serial):
-        """Record that a touch on ``serial`` is about to be sent; raises unless that record is on disk."""
+    def marker(self):
+        directory = self.directory()
+        return None if directory is None else directory / "touch.json"
+
+    def claim(self):
+        """Make this process the only one using Android input on this host; raises UnsupportedInput otherwise."""
         with self.lock:
-            path = self.marker(serial)
-            if path is None:
-                raise UnsupportedInput("没有可写的数据目录，无法记录安卓模拟器上的触摸，这一步暂不发送。")
-            if path.exists():
+            if self._owner is not None:
+                return
+            directory = self.directory()
+            if directory is None:
+                raise UnsupportedInput("没有 MaaNikki 的数据目录，无法记录安卓模拟器上的输入，暂不操作模拟器。")
+            try:
+                import fcntl
+            except ImportError:
+                raise UnsupportedInput("这台电脑上无法独占安卓模拟器的输入，暂不操作模拟器。") from None
+            handle = None
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                handle = open(directory / "owner.lock", "a+b")
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                handle.close()
+                raise UnsupportedInput("另一个 MaaNikki 任务正在操作安卓模拟器，这里不再操作。") from None
+            except OSError:
+                if handle is not None:
+                    handle.close()
+                raise UnsupportedInput("无法在数据目录里独占安卓模拟器的输入，暂不操作模拟器。") from None
+            self._owner = handle  # kept open: the lock lasts as long as this process
+
+    def begin_touch(self):
+        """Reserve the next touch on disk; raises unless the reservation is there and this process owns it."""
+        with self.lock:
+            self.claim()
+            path = self.marker()
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            except FileExistsError:
                 self.halted = True
-                raise InputUnconfirmed("这台模拟器上一次的触摸没有确认抬起，已停止所有输入；请检查模拟器后重新启动 MaaNikki。")
-            import datetime as _dt
-            try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps({"pid": os.getpid(), "serial": serial,
-                                            "since": _dt.datetime.now().astimezone().isoformat()}), encoding="utf-8")
-                recorded = path.is_file()
+                raise InputUnconfirmed("安卓模拟器上一次的触摸没有确认抬起，已停止所有输入；请检查模拟器后重新启动 MaaNikki。")
             except OSError:
-                recorded = False
-            if not recorded:
-                raise UnsupportedInput("无法记录安卓模拟器上的触摸（数据目录不可写），这一步暂不发送。")
+                raise UnsupportedInput("无法记录安卓模拟器上的触摸（数据目录不可写），这一步暂不发送。") from None
+            try:
+                import datetime as _dt
+                os.write(fd, json.dumps({"pid": os.getpid(),
+                                         "since": _dt.datetime.now().astimezone().isoformat()}).encode())
+                os.fsync(fd)
+                os.close(fd)
+            except OSError:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                self.release_touch()  # nothing was sent: the half-written reservation is ours to remove
+                raise UnsupportedInput("无法记录安卓模拟器上的触摸（数据目录不可写），这一步暂不发送。") from None
 
-    def end_touch(self, serial):
-        """The touch on ``serial`` was confirmed released."""
+    def release_touch(self):
+        """Remove this process's reservation: the touch was confirmed, or never sent. A reservation that cannot be
+        removed halts this process (the next one will see it and refuse as well)."""
         with self.lock:
-            path = self.marker(serial)
             try:
-                path.unlink()
+                self.marker().unlink()
+            except FileNotFoundError:
+                pass
             except OSError:
-                pass  # left in place it halts the next touch: safe, never silent input
+                self.halted = True
+                raise UnsupportedInput("无法清除安卓模拟器的触摸记录，已停止所有输入；请重新启动 MaaNikki。") from None
 
     def halt(self):
         with self.lock:
@@ -191,8 +233,9 @@ def device_input() -> DeviceInputState:
     global _DEVICE_INPUT
     with _DEVICE_INPUT_INIT:
         if _DEVICE_INPUT is None:
-            from app_paths import DATA_ROOT
-            _DEVICE_INPUT = DeviceInputState(DATA_ROOT)
+            # Only a data directory MaaNikki chose: never the install directory a bare run would fall back to.
+            from app_paths import DATA_ROOT, DATA_ROOT_ENV
+            _DEVICE_INPUT = DeviceInputState(DATA_ROOT if os.environ.get(DATA_ROOT_ENV, "").strip() else None)
         return _DEVICE_INPUT
 
 
