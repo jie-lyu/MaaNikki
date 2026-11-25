@@ -107,12 +107,15 @@ class WindowsResolutionUnchangedTests(unittest.TestCase):
                 for name in names:
                     self.assertEqual(resolve_resource_image(name, BASE), (root / name).resolve(), name)
 
-    def test_direct_loaders_outside_the_catalog_resolve_as_before(self):
-        root = (BASE / "image").resolve()
-        with target("win32", WINDOWS_CONTROLLER):
-            for name in ("nikki/common/crystal_edge_ring.png",):  # daily/starsea.py
-                self.assertTrue((root / name).is_file(), name)
-                self.assertEqual(resolve_resource_image(name, BASE), (root / name).resolve())
+    def test_starlight_crystals_loads_its_edge_ring_as_before(self):
+        from daily.starsea import Starsea
+        loaded = []
+        starsea = Starsea.__new__(Starsea)
+        starsea.resource = BASE
+        with target("win32", WINDOWS_CONTROLLER), \
+                patch("daily.starsea.prepared_template", side_effect=lambda path, **kw: loaded.append(path)):
+            starsea.crystal_markers(None, [])
+        self.assertEqual(loaded, [(BASE / "image/nikki/common/crystal_edge_ring.png").resolve()])
 
     def test_escaping_paths_are_still_refused(self):
         with target("win32", WINDOWS_CONTROLLER):
@@ -173,9 +176,16 @@ class AndroidOverlayTests(unittest.TestCase):
         shared = self.tmp / "shared-sprites"
         shutil.move(str(self.base / "image"), str(shared))
         symlink_or_skip(self, self.base / "image", shared, directory=True)
+        from recognition.ui_template import UITemplateRecognition
+        frame = np.zeros((40, 40, 3), np.uint8)
+        frame[10:26, 10:26] = 60  # b.png's brightness
         with target("macos", MACOS_CONTROLLER):
             self.assertEqual(GameUI(None, self.base).asset_path("game/b.png"), (shared / "game/b.png").resolve())
-            self.assertEqual(resolve_resource_image("game/b.png", self.base), (shared / "game/b.png").resolve())
+            box, detail = UITemplateRecognition._match_spec(
+                frame, {"roi": [0, 0, 40, 40], "template": "game/b.png", "gray_limit": [40, 255], "threshold": .9},
+                self.base)
+        self.assertIsNotNone(box, detail)
+        self.assertEqual(detail["template"], "game/b.png")
 
     def test_catalog_entries_merge_with_the_top_layer_winning(self):
         from daily.ui import catalog
@@ -252,10 +262,10 @@ try:
     outcome = {"base": recognize(["base"]), "layered": recognize(["base", "android"])}
     (tmp / "android/image/mark.png").unlink()  # control: same layered nodes, no overriding image
     outcome["layered_without_image"] = recognize(["base", "android"])
-    # The repository's own layer loads on top of the real resources.
+    # The repository's own layer loads on top of the real resources (a source archive without it: base only).
     real = Resource()
-    outcome["real_layers"] = [real.post_bundle(repo / "resource").wait().succeeded,
-                              real.post_bundle(repo / "resource_android").wait().succeeded]
+    layers = [repo / "resource"] + ([repo / "resource_android"] if (repo / "resource_android").is_dir() else [])
+    outcome["real_layers"] = [real.post_bundle(layer).wait().succeeded for layer in layers]
     print(json.dumps(outcome))
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
@@ -278,7 +288,8 @@ class FrameworkLayeringTests(unittest.TestCase):
         self.assertEqual(outcome["layered"], [[0, 0, 120, 120], True])  # the later bundle's node and image
         # Without the overriding image the same nodes miss: the hit came from the image, not the region.
         self.assertEqual(outcome["layered_without_image"], [[0, 0, 120, 120], False])
-        self.assertEqual(outcome["real_layers"], [True, True])
+        expected = [True, True] if (ROOT / "resource_android").is_dir() else [True]
+        self.assertEqual(outcome["real_layers"], expected)
 
 
 if __name__ == "__main__":

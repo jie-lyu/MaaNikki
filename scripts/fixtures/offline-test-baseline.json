@@ -681,9 +681,9 @@
     "FrameworkLayeringTests.test_the_later_bundle_overrides_nodes_and_same_name_images_when_loaded_before_recognition",
     "LayerSelectionTests.test_desktop_targets_load_only_the_main_resource",
     "LayerSelectionTests.test_the_android_target_adds_resource_android_on_top",
-    "WindowsResolutionUnchangedTests.test_direct_loaders_outside_the_catalog_resolve_as_before",
     "WindowsResolutionUnchangedTests.test_escaping_paths_are_still_refused",
     "WindowsResolutionUnchangedTests.test_every_shipped_image_resolves_exactly_as_before",
+    "WindowsResolutionUnchangedTests.test_starlight_crystals_loads_its_edge_ring_as_before",
     "WindowsResolutionUnchangedTests.test_the_catalog_is_the_main_one"
    ],
    "known_failures": [],
