@@ -374,6 +374,39 @@ class ProbeTests(unittest.TestCase):
         self.assertNotIn("stop", sample)
         self.assertEqual(sample["window_after"], "after")
 
+    def test_quit_dismissal_needs_the_hud_on_the_fresh_frame(self):
+        for after in ({"hud": False, "quit_dialog": False},  # capture failed or 取消 still visible: HUD not confirmed
+                      {"hud": False, "quit_dialog": False, "guard_error": "x"}):
+            sample, _ = self._sample_with_states([self.QUIT, after])
+            self.assertFalse(sample["quit_dismissed"])
+            self.assertTrue(sample["stop"])
+
+    def test_error_after_an_input_keeps_the_sample(self):
+        device_states = [self.HUD]
+        sample, controller = None, None
+        device, controller = self.device()
+        frames = iter([np.zeros((720, 1280, 3), np.uint8), np.full((720, 1280, 3), 3, np.uint8)])
+        device.capture = lambda: next(frames)
+        recognizer = mock.Mock()
+        recognizer.run.return_value = {"hit": True}
+        original_tap = device.tap
+
+        def tap_then_lose_focus(*args):
+            ok = original_tap(*args)
+            controller.focus = FOCUS_LAUNCHER
+            return ok
+        device.tap = tap_then_lose_focus
+        windows = iter(["before", "after"])
+        with mock.patch.object(probe, "hud_state", side_effect=device_states), \
+                mock.patch.object(probe, "mac_window_state", side_effect=lambda: next(windows)), \
+                mock.patch.object(probe.time, "sleep"):
+            sample = probe.background_sample(device, recognizer)
+        self.assertTrue(sample["tap_ok"])
+        self.assertIn("not the game", sample["error"])
+        self.assertTrue(sample["stop"])
+        self.assertEqual((sample["window"], sample["window_after"]), ("before", "after"))
+        self.assertNotIn(("key", 4), controller.events)
+
     def test_window_is_recorded_again_after_a_tap_that_did_not_open_the_calendar(self):
         sample, controller = self._sample_with_states([self.HUD], opened=False)
         self.assertEqual(controller.events, [("click", 940, 47, 0)])

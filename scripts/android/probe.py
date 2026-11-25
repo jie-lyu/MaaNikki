@@ -904,6 +904,8 @@ def background_sample(device: Device, recognizer) -> dict:
     sample["change_1s"] = round(frame_change(first, second), 2)
     try:
         _sample_input(device, recognizer, sample)
+    except ProbeError as error:  # e.g. focus left the game after an input: keep what was done, stop sending
+        sample.update(error=str(error), stop=True)
     finally:
         if any(key in sample for key in ("tap_ok", "quit_cancelled")):
             sample["window_after"] = mac_window_state()
@@ -954,7 +956,9 @@ def _cancel_quit(device: Device, recognizer, state: dict) -> dict:
         return {**result, "stop": True}
     time.sleep(1.5)
     after = hud_state(recognizer)
-    result["quit_dismissed"] = not after["quit_dialog"] and "guard_error" not in after
+    # Dismissed only on a fresh frame that shows the HUD with both quit checks clear (a failed capture or a still
+    # visible 取消 leaves hud False).
+    result["quit_dismissed"] = bool(after["hud"])
     if not result["quit_dismissed"]:
         result["stop"] = True
     return result
