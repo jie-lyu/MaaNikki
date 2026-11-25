@@ -193,6 +193,18 @@ class ProbeTests(unittest.TestCase):
         self.assertTrue(all(" " not in c or c.split()[0] in {"dumpsys", "getevent", "wm", "ps", "cmd"}
                             for c in probe.DIAGNOSTICS.values()))
 
+    def test_screen_reports_the_action_table_without_input(self):
+        from types import SimpleNamespace
+        hits = {"MaaNikki_Android_BackArrow": SimpleNamespace(hit=True, box=[37, 22, 40, 40], best_result=None)}
+        miss = SimpleNamespace(hit=False, box=None, best_result=None)
+        result = probe.android_screen(lambda node, override=None: hits.get(node, miss))
+        self.assertEqual(result["screen"], "page")
+        self.assertEqual(result["plans"]["menu"], {"tap": [37, 22, 40, 40], "completes": True})
+        self.assertIn("refused", result["plans"]["shop"])
+        args = probe.build_parser().parse_args(["screen", "--frame", "a.png", "b.png"])
+        self.assertEqual((args.func, args.frame), (probe.cmd_screen, ["a.png", "b.png"]))
+        self.assertFalse(hasattr(args, "purpose"))  # read-only: nothing to log as input
+
     def test_input_step_allows_one_key_event_or_axis(self):
         for ok in ("gamepad keyevent KEYCODE_BUTTON_A", "dpad keyevent KEYCODE_DPAD_UP", "joystick motionevent MOVE 0 -1"):
             self.assertTrue(probe.INPUT_STEP.fullmatch(ok), ok)

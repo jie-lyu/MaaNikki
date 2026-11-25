@@ -67,6 +67,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 AGENT = ROOT / "agent"
 RESOURCE = ROOT / "resource"
+ANDROID_RESOURCE = ROOT / "resource_android"
 DEFAULT_LOG = ROOT / ".build" / "android" / "input-log.jsonl"
 DEFAULT_ADB = "/opt/homebrew/bin/adb"
 DEFAULT_SERIAL = "127.0.0.1:5555"
@@ -369,14 +370,16 @@ class Recognizer:
     ENTRY = "AndroidProbe_Recognize"
     ACTION = "android_probe.recognize"
 
-    def __init__(self, controller):
+    def __init__(self, controller, *, android_layer: bool = False):
         from maa.custom_action import CustomAction
         from maa.resource import Resource
         from maa.tasker import Tasker
 
         self.resource = Resource()
-        if not self.resource.post_bundle(RESOURCE).wait().succeeded:
-            raise ProbeError(f"could not load {RESOURCE}")
+        # Both layers are loaded before the first recognition, as the client does for nikki_android.
+        for bundle in (RESOURCE, ANDROID_RESOURCE) if android_layer else (RESOURCE,):
+            if not self.resource.post_bundle(bundle).wait().succeeded:
+                raise ProbeError(f"could not load {bundle}")
         for name, recognition in agent_recognitions().items():
             if not self.resource.register_custom_recognition(name, recognition):
                 raise ProbeError(f"could not register {name}")
@@ -405,6 +408,13 @@ class Recognizer:
         return data
 
     def _judge(self, context) -> list[dict]:
+        if callable(self._request):  # a function of one frame: it gets recognize(node, override=None) on it
+            job = context.tasker.controller.post_screencap().wait()
+            if not job.succeeded:
+                raise ProbeError("capture failed")
+            image = self.last_frame = job.get()
+            return self._request(lambda name, override=None: context.run_recognition(
+                name, image, {name: override} if override else None))
         names, any_roi, adhoc = self._request
         job = context.tasker.controller.post_screencap().wait()
         if not job.succeeded:
@@ -434,6 +444,16 @@ class Recognizer:
             if name not in adhoc:
                 self.node(name)
         self._request, self._results = (list(names), any_roi, adhoc), None
+        override = {self.ENTRY: {"recognition": "DirectHit", "action": "Custom", "custom_action": self.ACTION,
+                                 "next": [], "pre_delay": 0, "post_delay": 0}}
+        self.tasker.post_task(self.ENTRY, override).wait()
+        if self._results is None:
+            raise ProbeError("the probe action did not run")
+        return self._results
+
+    def on_one_frame(self, function):
+        """``function(recognize)`` evaluated on one capture, inside the probe action."""
+        self._request, self._results = function, None
         override = {self.ENTRY: {"recognition": "DirectHit", "action": "Custom", "custom_action": self.ACTION,
                                  "next": [], "pre_delay": 0, "post_delay": 0}}
         self.tasker.post_task(self.ENTRY, override).wait()
@@ -1140,6 +1160,36 @@ def cmd_reco_all(args) -> int:
     return 0
 
 
+def android_screen(recognize) -> dict:
+    """What the Android action table would do on this frame: the screen and, per named action, the tap or the
+    refusal. Read-only."""
+    if str(AGENT) not in sys.path:
+        sys.path.insert(0, str(AGENT))
+    from host.android import actions
+
+    screen = actions.read_screen(recognize)
+    plans = {}
+    for action in sorted(actions.ACTIONS):
+        try:
+            target, completes = actions.plan_tap(action, screen, recognize)
+            plans[action] = {"tap": target, "completes": completes}
+        except actions.ScreenUnrecognised as error:
+            plans[action] = {"refused": str(error)}
+    return {"screen": screen.kind, "targets": screen.targets, "reason": screen.reason, "plans": plans}
+
+
+def cmd_screen(args) -> int:
+    """Classify frames with the Android action table (resource/ plus resource_android/). Sends no input."""
+    if args.live:
+        frames = [("live", connect(args).controller)]
+    else:
+        frames = [(path, frame_controller(Path(path))) for path in args.frame]
+    for name, controller in frames:
+        result = Recognizer(controller, android_layer=True).on_one_frame(android_screen)
+        print(json.dumps({"frame": str(name), **result}, ensure_ascii=False, default=_jsonable), flush=True)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--adb", default=os.environ.get("MAANIKKI_ADB", DEFAULT_ADB))
@@ -1205,6 +1255,11 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--live", action="store_true")
     p.add_argument("--any-roi", action="store_true")
     p.set_defaults(func=cmd_reco)
+    p = sub.add_parser("screen", help="what the Android action table would tap on a frame (no input)")
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument("--frame", nargs="+")
+    group.add_argument("--live", action="store_true")
+    p.set_defaults(func=cmd_screen)
     p = sub.add_parser("reco-all")
     p.add_argument("--frame", required=True)
     p.add_argument("--filter")

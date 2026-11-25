@@ -1,1 +1,40 @@
-{}
+{
+  "MaaNikki_Android_QuitDialog": {
+    "recognition": "OCR",
+    "roi": [440, 160, 400, 80],
+    "expected": "退出游戏",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_QuitCancel": {
+    "recognition": "OCR",
+    "roi": [380, 440, 240, 80],
+    "expected": "^取消$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_RedeemModal": {
+    "recognition": "OCR",
+    "roi": [540, 160, 200, 70],
+    "expected": "^兑换奖励$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_HudDuck": {
+    "recognition": "TemplateMatch",
+    "template": "android/menu_duck.png",
+    "roi": [0, 0, 160, 120],
+    "threshold": 0.8,
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_BackArrow": {
+    "recognition": "TemplateMatch",
+    "template": "android/back_arrow.png",
+    "roi": [0, 0, 160, 120],
+    "threshold": 0.8,
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_HudLabel": {
+    "recognition": "OCR",
+    "roi": [600, 55, 680, 40],
+    "expected": "换装",
+    "action": "DoNothing"
+  }
+}

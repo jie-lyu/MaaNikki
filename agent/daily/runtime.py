@@ -561,6 +561,46 @@ class Runtime:
             return self.pause(.1) and self.ui.unhover()
         return True
 
+    TOUCH_KEY_ATTEMPTS = 3
+
+    def _touch_key(self, name, delay):
+        """Android: a named game action as one tap chosen on one recognised, focus-confirmed frame
+        (host.android.actions). The quit confirmation is cancelled first if it is showing."""
+        from host import UnsupportedInput
+        from host.android import actions
+        from navigation.models import NavigationError
+        if name not in actions.ACTIONS:
+            raise UnsupportedInput(f"安卓模拟器上还不支持「{name}」这个游戏动作，任务已停止。")
+        for _attempt in range(self.TOUCH_KEY_ATTEMPTS):
+            if self.stopped:
+                return False
+            self.invalidate_frame()
+            frame = self.capture()
+            if frame is None:
+                return False
+
+            def recognize(node, override=None, frame=frame):
+                return self.recognize(node, override, image=frame)
+            try:
+                screen = actions.read_screen(recognize)
+                target, completes = actions.plan_tap(name, screen, recognize)
+            except actions.ScreenUnrecognised as error:
+                if not self._frame_still_valid(frame):
+                    continue  # focus changed while recognising: decide again on a new frame
+                raise NavigationError(f"{error}，没有发送任何输入。") from error
+            if not self._frame_still_valid(frame):
+                continue
+            if not self.action("Click", target=target, source_frame=frame):
+                return False
+            if completes:
+                return self.pause(delay)
+            self.pause(delay)  # the quit confirmation was cancelled: look again before the asked action
+        raise NavigationError(f"「{actions.ACTION_NAMES[name]}」连续 {self.TOUCH_KEY_ATTEMPTS} 次没能在稳定的画面上完成判断，"
+                              "已停止。")
+
+    def _frame_still_valid(self, frame):
+        return device_input().marks_of(frame) == (self._focus_generation, device_input().epoch)
+
     def _release_touch(self, state):
         try:
             state.release_touch()
@@ -586,6 +626,8 @@ class Runtime:
         # Never remap Ctrl+A to the configured left-movement key.
         if self.stopped:
             return False
+        if isinstance(value, str) and capabilities(game_backend()).touch_actions_only:
+            return self._touch_key(value, delay)
         if isinstance(value, str):
             try:
                 binding = self.game_keys.get(value)
@@ -604,6 +646,9 @@ class Runtime:
     def hold(self, key, seconds):
         if type(seconds) not in (int, float) or not math.isfinite(seconds) or not 0 <= seconds <= 8 or self.stopped:
             return False
+        if capabilities(game_backend()).touch_actions_only:
+            from host import UnsupportedInput
+            raise UnsupportedInput("安卓模拟器上还不能按住按键（移动和摇杆在导航阶段实现），任务已停止。")
         self.invalidate_frame()
         binding = self.game_keys.get(key) if isinstance(key, str) else None
         is_mouse = binding is not None and binding.kind == "mouse"
