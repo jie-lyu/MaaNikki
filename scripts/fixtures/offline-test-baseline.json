@@ -166,6 +166,8 @@
   },
   "test_android_mailbox.py": {
    "tests": [
+    "FrameworkTests.test_the_mail_page_is_one_page_whatever_spacing_ocr_reads_in_its_title",
+    "MailboxTests.test_a_back_arrow_that_cannot_be_confirmed_stops_cleanly_with_the_frame",
     "MailboxTests.test_a_disabled_button_means_nothing_to_claim",
     "MailboxTests.test_a_fatal_device_error_sends_nothing_more",
     "MailboxTests.test_a_guard_refusal_ends_all_input",
@@ -173,6 +175,7 @@
     "MailboxTests.test_an_unclear_button_stops_without_a_claim_or_navigation",
     "MailboxTests.test_another_page_after_claiming_is_not_success_and_sends_nothing_more",
     "MailboxTests.test_button_states",
+    "MailboxTests.test_starting_on_the_mail_page_leaves_it_through_its_back_arrow",
     "MailboxTests.test_the_way_back_only_leaves_mail_and_menu_pages",
     "MailboxTests.test_the_way_to_the_hud_at_the_start_is_guarded_too",
     "PageTapTests.test_a_point_next_to_a_forbidden_word_is_not_tapped",

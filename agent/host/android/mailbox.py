@@ -62,7 +62,10 @@ def run(rt) -> bool:
     from navigation.models import NavigationError
     claimed = None
     try:
-        if not to_hud(rt):
+        start = []
+        if not to_hud(rt, rejected=lambda frame, reason: start.append((frame, reason))):
+            for frame, reason in start:  # the screen the task would not start from (e.g. a popup)
+                rt.diagnostic("android_mailbox_start", f"开始时不在大世界，也没法安全地回去：{reason}", image=frame)
             return fail(rt, "没能回到大世界")
         if not rt.key("menu"):
             return False
@@ -74,6 +77,8 @@ def run(rt) -> bool:
             return fail(rt, "没能打开邮件页面")
         claimed = claim(rt)
     except (pages.GuardRefusal, Stop, actions.ScreenUnrecognised, NavigationError) as error:
+        if getattr(error, "frame", None) is not None:  # the frame a guard refusal was read on
+            rt.diagnostic("android_mailbox_stop", str(error), image=error.frame)
         fail(rt, str(error))
     # The way back only after a successful result: after a stop, a guard refusal or a fatal error (raised past this
     # point, e.g. the device stopped answering) nothing more is sent.

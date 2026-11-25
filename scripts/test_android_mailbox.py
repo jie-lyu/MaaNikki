@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import os
+import subprocess
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -201,6 +204,46 @@ class MailboxTests(unittest.TestCase):
             with self.assertRaises(pages.GuardRefusal):
                 mailbox.to_hud(rt)
 
+    def test_starting_on_the_mail_page_leaves_it_through_its_back_arrow(self):
+        # One live mail page read 「邮件 7/300 i」, 「邮件7/300 i」 and 「邮件7/300i」 on consecutive frames; the first
+        # read used to be the title the next frame had to start with, so the task failed before any tap and the
+        # failure message quoted that read.
+        arrow = {actions.BACK_ARROW: hit([37, 22, 40, 40])}
+        hud = Screen("hud", {"duck": [30, 18, 54, 54]})
+        self.rt = Rt([(page("邮件 7/300 i"), arrow), (page("邮件7/300 i"), arrow), (page("邮件7/300i"), arrow),
+                      (page("美鸭梨"), arrow), (page("美鸭梨"), arrow), (page("美鸭梨"), arrow), (hud, {})])
+        with patch.object(pages.actions, "read_screen", side_effect=lambda recognize: self.rt.current[1]):
+            self.assertTrue(mailbox.to_hud(self.rt))
+        self.assertEqual(self.rt.clicks, [("Click", [37, 22, 40, 40])] * 2)  # the mail page, then the menu
+        self.assertEqual((pages.page_name("邮件 7/300 i"), pages.page_name("美鸭梨"), pages.page_name("7/300")),
+                         ("邮件", "美鸭梨", ""))
+
+    def test_a_back_arrow_that_cannot_be_confirmed_stops_cleanly_with_the_frame(self):
+        frame = np.zeros((720, 1280, 3), np.uint8)
+        mail = (page("邮件 7/300 i"), frame, lambda *a: MISS)
+        rt = SimpleNamespace(stopped=False, logs=[], key=Mock(), diagnostic=Mock(),
+                             _frame_still_valid=Mock(return_value=True))
+        rt.log = rt.logs.append
+        with patch.object(pages, "screen_now", return_value=mail), \
+                patch.object(pages, "tap_on_page", side_effect=pages.PageMismatch("当前画面不是「邮件」页面")) as tap, \
+                patch("host.android_user_stop", return_value=False):
+            self.assertFalse(mailbox.run(rt))
+        tap.assert_called_once_with(rt, "邮件", actions.BACK_ARROW)  # expected by its name, not the OCR'd title
+        rt.key.assert_not_called()
+        self.assertEqual(rt.logs, ["邮箱领取：没能回到大世界，本项未完成。"])
+        stage, reason = rt.diagnostic.call_args.args
+        self.assertEqual(stage, "android_mailbox_start")
+        self.assertIs(rt.diagnostic.call_args.kwargs["image"], frame)
+        self.assertNotIn("7/300", reason)
+        # A title that does not start with a page name is not tapped at all.
+        odd = (page("i 邮件"), frame, lambda *a: MISS)
+        rejected = []
+        with patch.object(pages, "screen_now", return_value=odd), patch.object(pages, "tap_on_page") as tap:
+            self.assertFalse(pages.to_hud(rt, rejected=lambda f, r: rejected.append((f, r))))
+        tap.assert_not_called()
+        self.assertEqual(len(rejected), 1)
+        self.assertIs(rejected[0][0], frame)
+
     def test_the_way_back_only_leaves_mail_and_menu_pages(self):
         rt = SimpleNamespace(stopped=False, _frame_still_valid=Mock(return_value=True))
         shop = (page("商城"), np.zeros((720, 1280, 3), np.uint8), lambda *a: MISS)
@@ -214,6 +257,82 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(taps, [])
         rt.leave_page.assert_not_called()
         self.assertTrue(any("删除" in text for text in rt.logs))
+
+
+FRAMEWORK_CHECK = r"""
+import json, sys
+from pathlib import Path
+import cv2
+import numpy as np
+from maa.controller import CustomController
+from maa.custom_action import CustomAction
+from maa.resource import Resource
+from maa.tasker import Tasker
+
+repo = Path(sys.argv[1])
+sys.path.insert(0, str(repo / "agent"))
+from host.android import actions
+
+fixtures = repo / "scripts/fixtures/android"
+frames = {}
+for name in ("mail_title_spaced", "mail_title_joined"):  # the top-left 400x80 of two live mail page frames
+    crop = cv2.imread(str(fixtures / f"{name}.png"))
+    frame = np.full((720, 1280, 3), 90, np.uint8)
+    frame[:crop.shape[0], :crop.shape[1]] = crop
+    frames[name] = frame
+current, results = {}, {}
+
+class Frame(CustomController):
+    def connect(self): return True
+    def request_uuid(self): return "android-mailbox-test"
+    def screencap(self): return current["frame"]
+    def refuse(self, *args): return False
+    start_app = stop_app = click = swipe = touch_down = touch_move = touch_up = refuse
+    click_key = input_text = key_down = key_up = refuse
+
+class Classify(CustomAction):
+    def run(self, context, argv):
+        image = context.tasker.controller.post_screencap().wait().get()
+        screen = actions.read_screen(lambda node, override=None: context.run_recognition(
+            node, image, {node: override} if override else None))
+        results[current["name"]] = [screen.kind, screen.title]
+        return CustomAction.RunResult(success=True)
+
+resource = Resource()
+for bundle in (repo / "resource", repo / "resource_android"):
+    assert resource.post_bundle(bundle).wait().succeeded, bundle
+action = Classify()
+assert resource.register_custom_action("classify", action)
+controller = Frame()
+assert controller.post_connection().wait().succeeded
+tasker = Tasker()
+assert tasker.bind(resource, controller)
+entry = {"Classify": {"recognition": "DirectHit", "action": "Custom", "custom_action": "classify", "next": []}}
+for name, frame in frames.items():
+    current.update(name=name, frame=frame)
+    tasker.post_task("Classify", entry).wait()
+print(json.dumps(results, ensure_ascii=True))
+"""
+
+
+@unittest.skipUnless((ROOT / "maafw").exists(), "needs the MaaFramework runtime in ./maafw")
+class FrameworkTests(unittest.TestCase):
+    """The real nodes and OCR, both layers loaded, on UID-free crops of the live mail page (fresh interpreter)."""
+
+    def test_the_mail_page_is_one_page_whatever_spacing_ocr_reads_in_its_title(self):
+        if not (ROOT / "resource_android").is_dir():  # the release source archive does not list it (plan risk 13)
+            self.assertFalse((ROOT / ".git").exists(), "resource_android/ is missing from the checkout")
+            return
+        env = {**os.environ, "MAAFW_BINARY_PATH": str(ROOT / "maafw")}
+        result = subprocess.run([sys.executable, "-I", "-X", "utf8", "-B", "-c", FRAMEWORK_CHECK, str(ROOT)],
+                                capture_output=True, text=True, encoding="utf-8", timeout=300, env=env,
+                                cwd=tempfile.gettempdir())
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        outcome = json.loads(result.stdout.strip().splitlines()[-1])
+        (kind_a, spaced), (kind_b, joined) = outcome["mail_title_spaced"], outcome["mail_title_joined"]
+        self.assertEqual((kind_a, kind_b), ("page", "page"))
+        self.assertEqual((pages.page_name(spaced), pages.page_name(joined)), ("邮件", "邮件"))
+        self.assertTrue(pages.same_title(spaced, joined), (spaced, joined))
 
 
 class ResourceTests(unittest.TestCase):

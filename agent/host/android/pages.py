@@ -57,6 +57,20 @@ def is_page(screen, title: str) -> bool:
     return screen is not None and screen.kind == "page" and screen.title.startswith(title)
 
 
+def page_name(title: str) -> str:
+    """The page's name in an OCR'd title: its leading run of CJK characters (「邮件」 in 「邮件 7/300 i」). What
+    follows it (a count, the info icon, the spaces OCR puts in or leaves out from one frame to the next) is no part
+    of which page this is; "" when the title does not start with CJK characters."""
+    found = re.match(r"[\u3400-\u9fff]+", title.strip())
+    return found.group(0) if found else ""
+
+
+def same_title(first: str, second: str) -> bool:
+    """Two OCR'd titles of the same page: equal but for whitespace (one live mail page read 「邮件 7/300 i」,
+    「邮件7/300 i」 and 「邮件7/300i」 on consecutive frames)."""
+    return re.sub(r"\s", "", first) == re.sub(r"\s", "", second)
+
+
 def wait_for(rt, accept, seconds: float, step: float = .4):
     """The first screen within ``seconds`` that ``accept(screen)`` takes, else None (polls fresh frames)."""
     import time
@@ -240,7 +254,7 @@ def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, 
         except PageMismatch as error:
             mismatch(f"确认时{error}", fresh, confirming, recognize_b)
             continue
-        if fresh.title != screen.title or not actions._near(confirmed, target):
+        if not same_title(fresh.title, screen.title) or not actions._near(confirmed, target):
             mismatch(f"确认时「{title}」{SCREEN_WORDS[kind]}上要点的东西不在原处", fresh, confirming, recognize_b)
             continue
         word = _forbidden_near(recognize_b, confirmed)
@@ -326,8 +340,9 @@ LEAVE_PAGE_WAIT = 5  # seconds a page may stay on screen after its back arrow wa
 
 def to_hud(rt, attempts: int = 4, *, rejected=None, single: bool = False) -> bool:
     """Back to the open-world HUD before a task: the back arrow, tapped through tap_on_page on the page that is
-    showing (both tap frames, with the forbidden-label check); a modal, the quit dialog or an unrecognised screen
-    stops the task without a tap. ``rejected(frame, reason)``, when given, receives the frame it stopped on.
+    showing (both tap frames, with the forbidden-label check; the page is expected by its name, page_name), and a
+    modal, the quit dialog, an unrecognised screen or a back arrow tap_on_page will not confirm (PageMismatch,
+    nothing sent) stops the task. ``rejected(frame, reason)``, when given, receives the frame it stopped on.
 
     ``single``: each back arrow is one attempt on the page with exactly the title it was decided for (tap_on_page
     with retry=False, both tap frames that exact page; a tap frame that is not stops, with that frame), and no other
@@ -344,9 +359,20 @@ def to_hud(rt, attempts: int = 4, *, rejected=None, single: bool = False) -> boo
         elif screen.kind == "hud":
             return True
         elif screen.kind == "page" and not single:
-            if tap_on_page(rt, screen.title, actions.BACK_ARROW):
-                continue
-            return False
+            # Expected by its name, not by the whole OCR'd title, which changes from frame to frame (spaces, the
+            # info icon): the next frame of the same mail page failed a title it was expected to start with.
+            name = page_name(screen.title)
+            if len(name) < 2:
+                reason = "看到了返回箭头，但页面标题读不出页面名"
+            else:
+                try:
+                    if tap_on_page(rt, name, actions.BACK_ARROW):
+                        continue
+                    return False
+                except GuardRefusal:
+                    raise
+                except PageMismatch as error:  # nothing sent; the frame this back arrow was decided on is kept
+                    reason = str(error)
         elif screen.kind == "page":
             title = screen.title
             try:
