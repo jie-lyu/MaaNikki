@@ -346,6 +346,8 @@ def connect(args):
     width, height = controller.resolution
     if width <= 0 or height <= 0:
         raise ProbeError(f"the device resolution is unknown ({width}x{height}); no input is sent")
+    if width <= height or abs(width * 9 - height * 16) > 16:  # the resources and coordinates assume 16:9 landscape
+        raise ProbeError(f"the device reports {width}x{height}, not 16:9 landscape; no input is sent")
     log = InputLog(Path(args.log), getattr(args, "purpose", None))
     device = Device(controller, log)
     device.connect_ms = connect_ms
