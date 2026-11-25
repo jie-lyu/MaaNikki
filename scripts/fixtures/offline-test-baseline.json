@@ -147,7 +147,13 @@
     "StopIsNotAnAdbFaultTests.test_the_android_flows_report_no_failure_after_a_stop",
     "StopIsNotAnAdbFaultTests.test_the_desktop_ignores_a_stray_stop_request",
     "NoKeyboardOrMouseTests.test_a_stop_requested_while_a_touch_on_an_unreadable_frame_is_reserved_cancels_it_without_halting",
-    "NoKeyboardOrMouseTests.test_a_sent_touch_whose_lift_is_unreadable_halts_and_keeps_the_marker_even_after_a_stop"
+    "NoKeyboardOrMouseTests.test_a_sent_touch_whose_lift_is_unreadable_halts_and_keeps_the_marker_even_after_a_stop",
+    "StopIsNotAnAdbFaultTests.test_an_unconfirmed_touch_raised_after_a_stop_is_saved_and_reported",
+    "StopIsNotAnAdbFaultTests.test_a_request_published_during_the_tasker_query_counts",
+    "StopIsNotAnAdbFaultTests.test_a_stop_published_while_the_failure_scene_is_saved_posts_no_notice",
+    "StopIsNotAnAdbFaultTests.test_a_stop_published_while_a_pause_begins_gives_no_pause_notice",
+    "NoKeyboardOrMouseTests.test_a_contact_seen_held_on_the_source_frame_is_reported_even_with_a_stop",
+    "NoKeyboardOrMouseTests.test_a_sent_touch_that_raises_an_ordinary_error_after_a_stop_is_still_unconfirmed"
    ],
    "known_failures": [],
    "skips": [

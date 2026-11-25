@@ -469,6 +469,8 @@ class ForegroundSession:
         try:
             for inputs in list(self.inputs):
                 inputs.release()
+            if android_user_stop(ask_tasker=False):  # Android: the stop may have been published meanwhile
+                raise TaskStopped("任务已停止。")
             self.notify(pause_message)
             stable_since = None
             refocused_at = None

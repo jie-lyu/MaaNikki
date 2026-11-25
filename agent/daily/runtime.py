@@ -544,10 +544,13 @@ class Runtime:
                     from host import UnsupportedInput
                     raise UnsupportedInput("无法写入安卓模拟器的输入记录，这一步暂不发送。")
                 intent = True
-                # A user stop seen here (e.g. requested during the intent write) cancels the unsent touch before the
-                # source frame's reading is judged: an unsent touch after a stop is a stop, not an unconfirmed one.
+                if state.halted or self.stopped:
+                    return False
+                # A source frame whose touch reading was unreadable, with the user's stop seen here (e.g. requested
+                # during the intent write): the unsent touch is cancelled as a stop. A contact seen held is reported
+                # below, stop or not.
                 from host import android_user_stop
-                if state.halted or self.stopped or android_user_stop(ask_tasker=False):
+                if before is None and android_user_stop(ask_tasker=False):
                     return False
                 # Nothing may have been held when the source frame was captured (a contact left by anything earlier
                 # stops all input), and the dispatcher's latest event then is the baseline this touch's own lift
@@ -590,7 +593,13 @@ class Runtime:
                 except BaseException as error:
                     state.record_touch(action, fields, f"raised {type(error).__name__}")
                     self._halt_unconfirmed()
-                    raise
+                    if not isinstance(error, Exception):
+                        raise
+                    # Always reported as an unconfirmed touch, whatever was raised: no handler that turns an ordinary
+                    # error into a failure result or a quiet stop may hide a touch that may be held.
+                    from host import InputUnconfirmed
+                    raise InputUnconfirmed(f"安卓模拟器上的「{action}」发出后没能确认完成（{type(error).__name__}: {error}），"
+                                           "可能留下按住的触点，已停止所有输入；请检查模拟器后重新启动 MaaNikki。") from error
                 state.record_touch(action, fields, outcome)
             finally:
                 if not sent:

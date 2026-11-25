@@ -309,8 +309,8 @@ def android_user_stop(*, ask_tasker: bool = True) -> bool:
     """Whether the user stopped this Android run (host.android.target.user_stop): shared code consults it to end such
     a run quietly as stopped, without a failure scene, an error message or a pause notice. Always False off the
     Android backend, where nothing is read, so Windows and native Mac never see it."""
-    if not capabilities(game_backend()).touch_actions_only:
-        return False
+    if game_backend() != "android":
+        return False  # no backend module is imported or state read here
     from host.android.target import user_stop
     return user_stop(ask_tasker=ask_tasker)
 

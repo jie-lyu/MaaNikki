@@ -224,21 +224,28 @@ def user_stop(*, ask_tasker: bool = True) -> bool:
     tasker reports stopping. Unlike DeviceInputState.stop_requested an unknown answer counts as no: this decides only
     how a run that is ending reports itself (quietly as stopped instead of as a fault), never whether anything is
     sent. Reached from shared code only through host.android_user_stop()."""
-    from host import device_input
-    path = device_input().stop_request()
-    try:
-        if path is not None and os.stat(path):
-            return True
-    except OSError:
-        pass
+    if _stop_request_on_disk():
+        return True
     if not ask_tasker:
         return False
     try:
         from task_control import active_session
         session = active_session()
         tasker = getattr(getattr(session, "context", None), "tasker", None)
-        return tasker is not None and bool(tasker.stopping)
+        if tasker is not None and bool(tasker.stopping):
+            return True
     except Exception:  # the tasker query crosses into the client; a failed query is no stop
+        pass
+    # The stopper may have published its request during the tasker query and still be answered "not stopping".
+    return _stop_request_on_disk()
+
+
+def _stop_request_on_disk() -> bool:
+    from host import device_input
+    path = device_input().stop_request()
+    try:
+        return path is not None and bool(os.stat(path))
+    except OSError:
         return False
 
 

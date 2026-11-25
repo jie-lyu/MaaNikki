@@ -78,8 +78,8 @@ def _write_start_notice(context, task_id, entry):
 
 
 def _android_stopped(error=None):
-    """Android only: the user stopped this run, so the action ends as stopped (no failure scene, no 未完成), whatever
-    it returned or raised; except while this process holds an unconfirmed touch, which is always reported."""
+    """Android only: the user stopped this run, so a failed or raising action ends as stopped (no failure scene, no
+    未完成); except while this process holds an unconfirmed touch, which is always reported."""
     if not android_user_stop():
         return False  # always on Windows and native Mac
     from host import InputUnconfirmed, device_input
@@ -126,11 +126,12 @@ def agent_action(name, *, stop_on_failure=False):
                                     "traceback": traceback.format_exc()[-3000:]},
                                     generation=session.generation)
                             raise
-                        if _android_stopped():
-                            raise TaskStopped("任务已停止。")
+                        # A completed result stands; after an Android user stop a failed one is no failure scene
+                        # (checked last, right before the save).
                         if (session and not result and not session.stopped()
                                 and session.evidence.saved == saved
-                                and name not in {"nikki.daily_config", "nikki.feature_settings"}):
+                                and name not in {"nikki.daily_config", "nikki.feature_settings"}
+                                and not _android_stopped()):
                             session.evidence.save("action_failed", "动作返回失败", details={
                                 "node": argv.node_name, "action": name,
                                 "phase": "after_action_return"}, generation=session.generation)
@@ -146,6 +147,8 @@ def agent_action(name, *, stop_on_failure=False):
                     if profile is not None:
                         profile.succeeded = False
                     traceback.print_exc()
+                    if _android_stopped(error):
+                        return False  # Android: published during the action's own handling (never an unconfirmed touch)
                     try:
                         context.run_task("MaaNikki_Daily_Message", message_override({
                             "Node.Action.Starting": f"{argv.node_name} 未完成：{error}。"}))

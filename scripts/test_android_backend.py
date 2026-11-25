@@ -550,8 +550,17 @@ class StopIsNotAnAdbFaultTests(FreshAndroidState):
         self.assert_quiet_stop(*self.run_check(stop="post_stop", expire_cache=True))
 
     def test_an_action_that_ends_between_the_stop_request_and_the_framework_stop_ends_quietly(self):
-        self.assert_quiet_stop(*self.run_check(stop="request"))               # it even succeeded
         self.assert_quiet_stop(*self.run_check(stop="request", refuse=True))  # the guard refused the tap
+        result, saved, notices = self.run_check(stop="request")              # it completed: the result stands
+        self.assertIs(result, True)
+        self.assertEqual(saved, [])
+        self.assertFalse([n for n in notices if any(word in n for word in self.QUIET)], notices)
+
+    def test_an_unconfirmed_touch_raised_after_a_stop_is_saved_and_reported(self):
+        result, saved, notices = self.run_check(stop="request", error=host.InputUnconfirmed("触摸没有确认"))
+        self.assertFalse(result)
+        self.assertEqual([stage for stage, _reason in saved], ["action_exception"])
+        self.assertTrue(any("未完成：触摸没有确认" in n for n in notices), notices)
 
     def test_an_error_after_a_stop_ends_the_action_quietly(self):
         for error in (RuntimeError("截图失败"), host.UnsupportedInput("这一步暂不支持"), host.DeviceUnreachable("ADB")):
@@ -579,6 +588,62 @@ class StopIsNotAnAdbFaultTests(FreshAndroidState):
             self.state.halted = True  # this process holds an unconfirmed touch
             self.assertFalse(registration._android_stopped(RuntimeError("x")))
             self.assertFalse(registration._android_stopped())
+
+    def test_a_request_published_during_the_tasker_query_counts(self):
+        from daily.runtime import Runtime
+        request = self
+
+        class Tasker:
+            @property
+            def stopping(self):
+                request.request_stop()  # published while the client answers, which still says "not stopping"
+                return False
+        session = SimpleNamespace(context=SimpleNamespace(tasker=Tasker()))
+        with android_run(), patch("task_control.active_session", return_value=session):
+            self.assertTrue(host.android_user_stop())
+            self.state.stop_request().unlink()
+            rt = self.monthly_runtime()
+            self.assertIsNone(rt.diagnostic("android_monthly_start", "x"))
+            rt._evidence.save.assert_not_called()
+
+    def test_a_stop_published_while_the_failure_scene_is_saved_posts_no_notice(self):
+        import registration
+        token = registration._LOCAL_REGISTRATION.set(True)
+        try:
+            @registration.agent_action("test.android_backend.stop_during_scene_save")
+            class Probe:
+                def run(self, context, argv):
+                    raise RuntimeError("截图失败")
+        finally:
+            registration._LOCAL_REGISTRATION.reset(token)
+        session = SimpleNamespace(evidence=SimpleNamespace(saved=0, save=Mock(side_effect=lambda *a, **k: self.request_stop())),
+                                  stopped=lambda: False, generation=0)
+        context = SimpleNamespace(run_task=Mock(), tasker=SimpleNamespace(stopping=False))
+        try:
+            with android_run(), patch("registration.task_session", return_value=nullcontext(session)), \
+                    patch("registration.traceback.print_exc"):
+                self.assertFalse(Probe().run(context, SimpleNamespace(node_name="n")))
+        finally:
+            registration._ACTION_TYPES.pop("test.android_backend.stop_during_scene_save", None)
+        session.evidence.save.assert_called_once()  # no stop when it was taken
+        context.run_task.assert_not_called()         # the stop came before the notice
+
+    def test_a_stop_published_while_a_pause_begins_gives_no_pause_notice(self):
+        from task_control import ForegroundSession, TaskStopped
+        with android_run():
+            session = ForegroundSession(SimpleNamespace(tasker=SimpleNamespace(stopping=False)))
+            session.notify = Mock()
+            class Held:
+                def release(inner):
+                    self.request_stop()  # the stop is published while held inputs are released
+            held = Held()
+            session.inputs.add(held)
+            adapter = SimpleNamespace(stopped=lambda: False, target=SimpleNamespace(exists=lambda: True),
+                                      hung=lambda: False)
+            with patch("task_control.wall_time.sleep", side_effect=AssertionError), self.assertRaises(TaskStopped):
+                session._wait_until(adapter, lambda: False, "游戏已离开前台，任务暂停", "继续", check_hung=False,
+                                    bring_back=False)
+            session.notify.assert_not_called()
 
     def test_a_stop_during_a_focus_pause_ends_it_as_stopped(self):
         from navigation.controller import ForegroundInput
@@ -666,9 +731,12 @@ class StopIsNotAnAdbFaultTests(FreshAndroidState):
                     return False
         finally:
             registration._LOCAL_REGISTRATION.reset(token)
+        desktop_modules = [m for m in sys.modules if m.startswith(("host.win32", "host.macos"))]
         for name in ("win32", "macos"):
             environment, backend = self.desktop_run(name)
-            with self.subTest(desktop=name), environment, backend:
+            with self.subTest(desktop=name), environment, backend, patch.dict(sys.modules):
+                for module in desktop_modules:
+                    del sys.modules[module]  # imported again only if something below asks for a desktop backend
                 self.assertFalse(host.android_user_stop())
                 session = SimpleNamespace(evidence=SimpleNamespace(saved=0, save=Mock()), stopped=lambda: False,
                                           generation=0)
@@ -677,18 +745,21 @@ class StopIsNotAnAdbFaultTests(FreshAndroidState):
                     override["MaaNikki_Daily_Message"]["focus"]["Node.Action.Starting"])))
                 with patch("registration.task_session", return_value=nullcontext(session)), \
                         patch("registration.traceback.print_exc"):
-                    self.assertFalse(Probe().run(context, SimpleNamespace(node_name="raises")))
                     self.assertFalse(Probe().run(context, SimpleNamespace(node_name="returns")))
+                    rt = self.monthly_runtime()
+                    rt.diagnostic("desktop_stage", "reason")
+                    rt._evidence.save.assert_called_once()
+                    with self.assertRaises(NavigationError) as caught:
+                        ForegroundInput.check(SimpleNamespace(stopped=lambda: True))
+                    self.assertNotIsInstance(caught.exception, TaskStopped)
+                    self.assertEqual(str(caught.exception), "已停止导航。")
+                    # None of the stop checks above asked for a desktop backend module.
+                    self.assertEqual([m for m in sys.modules if m.startswith(("host.win32", "host.macos"))], [])
+                    # The 未完成 notice itself (message_override, unchanged) consults the desktop's capabilities.
+                    self.assertFalse(Probe().run(context, SimpleNamespace(node_name="raises")))
                 self.assertEqual([c.args[0] for c in session.evidence.save.call_args_list],
-                                 ["action_exception", "action_failed"])
+                                 ["action_failed", "action_exception"])
                 self.assertEqual(notices, ["raises 未完成：desktop failure。"])
-                rt = self.monthly_runtime()
-                rt.diagnostic("desktop_stage", "reason")
-                rt._evidence.save.assert_called_once()
-                with self.assertRaises(NavigationError) as caught:
-                    ForegroundInput.check(SimpleNamespace(stopped=lambda: True))
-                self.assertNotIsInstance(caught.exception, TaskStopped)
-                self.assertEqual(str(caught.exception), "已停止导航。")
         registration._ACTION_TYPES.pop("test.android_backend.desktop_stray_stop_request", None)
 
 
@@ -1039,6 +1110,29 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
         log = (self.data_root / "logs" / "android-input.jsonl").read_text(encoding="utf-8").splitlines()
         self.assertEqual(json.loads(log[-1])["outcome"], "cancelled")
 
+    def test_a_contact_seen_held_on_the_source_frame_is_reported_even_with_a_stop(self):
+        for index, before in enumerate((TouchSnapshot("injected", 500, 400), TouchSnapshot("other", 500, 400))):
+            with self.subTest(before=before.state), \
+                    patch.object(host, "_DEVICE_INPUT", self.fresh_state(self.data_root / f"held{index}")) as state:
+                self.state = state
+                rt = self.tap_runtime()
+                state.mark(self.frame, 0, before)
+                original = state.record_touch
+
+                def record(action, fields, outcome, state=state, original=original):
+                    if outcome == "sending":
+                        state.stop_request().parent.mkdir(parents=True, exist_ok=True)
+                        state.stop_request().write_text("stop")
+                    return original(action, fields, outcome)
+                with patch.object(state, "record_touch", side_effect=record), android_run(), \
+                        patch("daily.runtime.active_session", return_value=None), \
+                        self.assertRaises(host.InputUnconfirmed):
+                    rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
+                rt.context.run_action_direct.assert_not_called()
+                self.assertTrue(state.halted)
+                self.assertFalse(state.marker().exists())  # nothing was sent: the reservation is released
+                state._owner.close()
+
     def test_a_sent_touch_whose_lift_is_unreadable_halts_and_keeps_the_marker_even_after_a_stop(self):
         rt = self.tap_runtime()
 
@@ -1070,13 +1164,37 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
     def test_a_touch_whose_lift_check_raises_halts_and_keeps_the_marker(self):
         with patch.object(host, "_DEVICE_INPUT", self.fresh_state(self.data_root / "raised")) as state, \
                 android_run(), patch("daily.runtime.active_session", return_value=None), \
-                self.assertRaises(host.DeviceUnreachable):
+                self.assertRaises(host.InputUnconfirmed) as caught:
             self.state = state
             rt = self.tap_runtime()
             rt._device_target.touch_snapshot.side_effect = host.DeviceUnreachable("gone")
             rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
+        self.assertIsInstance(caught.exception.__cause__, host.DeviceUnreachable)
         self.assertTrue(state.halted)
         self.assertTrue(state.marker().exists())
+
+    def test_a_sent_touch_that_raises_an_ordinary_error_after_a_stop_is_still_unconfirmed(self):
+        for where in ("dispatch", "lift"):
+            with self.subTest(where=where), \
+                    patch.object(host, "_DEVICE_INPUT", self.fresh_state(self.data_root / where)) as state:
+                self.state = state
+                rt = self.tap_runtime()
+
+                def stop_then_fail(*args, state=state):
+                    state.stop_request().parent.mkdir(parents=True, exist_ok=True)
+                    state.stop_request().write_text("stop")
+                    raise RuntimeError("cut off")
+                if where == "dispatch":
+                    rt.context.run_action_direct.side_effect = stop_then_fail
+                else:
+                    rt._device_target.touch_snapshot = Mock(side_effect=stop_then_fail)
+                with android_run(), patch("daily.runtime.active_session", return_value=None), \
+                        self.assertRaises(host.InputUnconfirmed) as caught:  # no RuntimeError a handler could swallow
+                    rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
+                self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+                self.assertTrue(state.halted)
+                self.assertTrue(state.marker().exists())
+                state._owner.close()
 
     def test_a_left_marker_halts_the_agent_even_on_a_settled_device(self):
         # The agent never clears a marker itself (only the runner, before it connects, or MaaNikki's start).
