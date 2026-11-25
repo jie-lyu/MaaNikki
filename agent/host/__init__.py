@@ -230,22 +230,29 @@ class DeviceInputState:
         with self.lock:
             self.epoch += 1
 
-    def mark_if_unchanged(self, frame, generation, epoch) -> bool:
+    def mark_if_unchanged(self, frame, generation, epoch, touch=None) -> bool:
+        """Record the frame's (focus generation, epoch) and the device's touch reading taken right before it was
+        captured (``touch``: a TouchSnapshot, or None), if ``epoch`` is still current."""
         import weakref
         with self.lock:
             if self.epoch != epoch:
                 return False
             self._marks = {key: value for key, value in self._marks.items() if value[0]() is not None}
-            self._marks[id(frame)] = (weakref.ref(frame), (generation, epoch))
+            self._marks[id(frame)] = (weakref.ref(frame), (generation, epoch), touch)
             return True
 
-    def mark(self, frame, generation):
+    def mark(self, frame, generation, touch=None):
         with self.lock:
-            return self.mark_if_unchanged(frame, generation, self.epoch)
+            return self.mark_if_unchanged(frame, generation, self.epoch, touch)
 
     def marks_of(self, frame):
         entry = self._marks.get(id(frame)) if frame is not None else None
         return entry[1] if entry is not None and entry[0]() is frame else None
+
+    def touch_of(self, frame):
+        """The device's touch reading taken right before ``frame`` was captured, or None."""
+        entry = self._marks.get(id(frame)) if frame is not None else None
+        return entry[2] if entry is not None and entry[0]() is frame else None
 
 
 def take_owner_lock(path):

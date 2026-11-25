@@ -1,5 +1,5 @@
 {
- "source": "Windows CI run 45159836136 (phase 1 at 1039b44, PR merge commit b6e98fc): every suite present then produced exactly these outcomes on Windows. Added after 1039b44 and so far recorded on macOS only: test_app_paths.py, test_host.py, test_host_imports.py, test_window_layout.py, test_file_io.py, test_launcher_discovery.py, test_game_target.cjs, test_mac_task_tiers.cjs, test_task_tiers.cjs and the selector test in test_windows_contract.cjs; HostImportTests.test_win32_overlay_backend_imports is skipped off Windows and recorded with its Windows outcome (pass in runs on 06c9c07 and 00d5531), so a Windows-only regression there cannot hide behind a skip. Refresh from the offline-test-results artifact when Windows outcomes change.",
+ "source": "Windows CI run 45159836136 (phase 1 at 1039b44, PR merge commit b6e98fc): every suite present then produced exactly these outcomes on Windows. Added after 1039b44 and so far recorded on macOS only: test_app_paths.py, test_host.py, test_host_imports.py, test_window_layout.py, test_file_io.py, test_launcher_discovery.py, test_game_target.cjs, test_mac_task_tiers.cjs and the selector test in test_windows_contract.cjs; HostImportTests.test_win32_overlay_backend_imports is skipped off Windows and recorded with its Windows outcome (pass in runs on 06c9c07 and 00d5531), so a Windows-only regression there cannot hide behind a skip. Refresh from the offline-test-results artifact when Windows outcomes change.",
  "suites": {
   "test_agent_pause.py": {
    "tests": [
@@ -50,6 +50,7 @@
     "CapabilityTests.test_no_desktop_window_services",
     "DeviceFocusCaptureTests.test_a_focus_loss_seen_elsewhere_during_the_capture_discards_the_frame",
     "DeviceFocusCaptureTests.test_a_frame_whose_focus_was_lost_by_the_end_is_discarded",
+    "DeviceFocusCaptureTests.test_the_touch_reading_is_taken_right_before_the_capture_and_kept_with_the_frame",
     "DeviceFocusCaptureTests.test_a_frame_with_focus_before_and_after_is_kept",
     "DeviceFocusCaptureTests.test_a_loss_before_validation_skips_the_validator",
     "DeviceFocusCaptureTests.test_a_loss_between_the_focus_check_and_the_capture_discards_the_frame",
@@ -81,10 +82,10 @@
     "NoKeyboardOrMouseTests.test_child_tasks_do_not_run",
     "NoKeyboardOrMouseTests.test_each_reservation_is_unique_and_written_whole",
     "NoKeyboardOrMouseTests.test_a_touch_counts_as_confirmed_only_once_the_device_shows_its_own_lift",
-    "NoKeyboardOrMouseTests.test_nothing_is_sent_while_the_device_reports_a_contact_held_or_cannot_be_read",
+    "NoKeyboardOrMouseTests.test_nothing_is_sent_on_a_frame_captured_while_a_contact_was_held_or_unreadable",
     "NoKeyboardOrMouseTests.test_a_touch_whose_lift_check_raises_halts_and_keeps_the_marker",
     "NoKeyboardOrMouseTests.test_a_left_marker_halts_the_agent_even_on_a_settled_device",
-    "NoKeyboardOrMouseTests.test_the_pre_send_reading_comes_before_the_last_focus_check_and_a_raise_halts",
+    "NoKeyboardOrMouseTests.test_no_device_reading_comes_between_the_decision_and_the_send_but_the_focus_check",
     "NoKeyboardOrMouseTests.test_each_touch_is_on_disk_before_it_is_sent_and_cleared_once_confirmed",
     "NoKeyboardOrMouseTests.test_edge_rectangles_tap_a_pixel_inside_them",
     "NoKeyboardOrMouseTests.test_every_key_is_refused",
@@ -976,20 +977,6 @@
     "stop in progress blocks; restart succeeds after framework stops",
     "unknown backend state blocks startup and releases lock"
    ],
-   "skips": []
-  },
-  "test_task_tiers.cjs": {
-   "tests": [
-    "the tier list follows the controller: Adb on macOS gets the Android tiers, everything else the Mac tiers",
-    "Mac marks, wording and start gate are exactly the macTaskTiers ones",
-    "Android marks use the Android manifest and wording",
-    "an Adb instance on macOS waits for and checks the Android tiers only",
-    "whenSettled resolves at once, on the change that settles it, or at the timeout",
-    "the Android loader reads its own command and route and words its errors for Android",
-    "the scheduler waits for the Android tiers only on macOS with an Adb instance",
-    "a controller attach_resource_path loads after the resource paths; none adds nothing"
-   ],
-   "known_failures": [],
    "skips": []
   },
   "test_window_layout.py": {

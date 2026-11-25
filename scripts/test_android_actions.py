@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import host  # noqa: E402
 from host.android import actions  # noqa: E402
+from host.android.target import TouchSnapshot  # noqa: E402
 from test_android_backend import FreshAndroidState, advancing_snapshots, android_run  # noqa: E402
 
 
@@ -297,7 +298,7 @@ class RuntimeKeyTests(FreshAndroidState):
 
         def capture():
             frame = np.zeros((720, 1280, 3), np.uint8)
-            self.state.mark(frame, rt._focus_generation)
+            self.state.mark(frame, rt._focus_generation, TouchSnapshot("none", 900, 900))
             self.frames.append((frame, screens.pop(0)))
             return frame
         rt.capture = Mock(side_effect=capture)

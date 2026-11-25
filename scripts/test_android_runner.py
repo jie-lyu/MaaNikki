@@ -344,9 +344,15 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(marker.exists(), not cleared)
                 self.assertEqual(read.call_count, int(eligible))  # one reading, only for a marker naming the serial
 
-    @unittest.skipIf(runner.os.name == "nt", "take_owner_lock needs fcntl")
     def test_a_recovery_that_cannot_be_logged_keeps_the_marker(self):
+        import contextlib
         import tempfile
+        from types import SimpleNamespace
+        sys.path.insert(0, str(Path(runner.__file__).resolve().parents[2] / "agent"))
+        import host
+        # Windows has no flock: inject the owner lock there (the real lock is exercised on macOS).
+        lock = patch.object(host, "take_owner_lock", return_value=SimpleNamespace(close=lambda: None)) \
+            if runner.os.name == "nt" else contextlib.nullcontext()
         device = {"serial": "127.0.0.1:5555", "boot_id": "992f1bef-d353-4a1b-b401-b9867f884164"}
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -355,7 +361,7 @@ class RunnerTests(unittest.TestCase):
             marker.write_text(json.dumps({"pid": 1, "device": device}))
             (root / "logs").write_text("")  # a file where the log directory goes
             reading = {"boot_id": device["boot_id"], "state": "none", "queued": False, "maatouch": False}
-            with self.assertRaises(runner.RunnerError):
+            with lock, self.assertRaises(runner.RunnerError):
                 runner.check_unconfirmed(root, None, lambda: reading, device["serial"])
             self.assertTrue(marker.exists())
 

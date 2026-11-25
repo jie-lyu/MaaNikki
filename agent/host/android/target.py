@@ -91,8 +91,7 @@ def touch_state(output: str | None) -> str | None:
 
 
 _EVENT = re.compile(r"^\s*MotionEvent\(deviceId=(-?\d+), eventTime=(\d+),.*\baction=([A-Z_]+)\b")
-_ENTRY = re.compile(r"^\s+\w+Event\(")
-_MAATOUCH = re.compile(r"^(sh -c .*)?app_process\b.*\bcom\.shxyke\.MaaTouch\.App\b")
+_ENTRY = re.compile(r"^\s+\w+Event\(.*\bage=\d+ms\s*$")  # a whole entry line, as on the device
 _BOOT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
@@ -157,27 +156,38 @@ def boot_id(output: str | None) -> str | None:
 # One shell invocation for the runner's recovery decision: the guest's boot id, the input dispatcher and the
 # processes are read together, so they describe the same guest at (nearly) the same moment. The separators are
 # quoted apart in the command, so the command's own line in the process list does not contain them.
-RECOVERY_READING = ("cat /proc/sys/kernel/random/boot_id; echo __in''put__; dumpsys input; echo __p''s__; "
-                    "ps -A -o ARGS")
+RECOVERY_READING = ("cat /proc/sys/kernel/random/boot_id; echo __p''s__; ps -A -o ARGS; echo __in''put__; "
+                    "dumpsys input; echo __p''s__; ps -A -o ARGS")
 
 
 def recovery_reading(output: str | None) -> dict | None:
     """From RECOVERY_READING's output: the boot id, the touch state, whether any input is still queued in the
-    dispatcher (a pending event or a non-empty inbound queue) and whether a MaaTouch helper is running (it could
-    still hold commands of an earlier sender). None when any part cannot be read."""
-    if not output or output.count("__input__") != 1 or output.count("__ps__") != 1:
+    dispatcher (a pending event or a non-empty inbound queue) and whether a MaaTouch helper was running before or
+    after the dispatcher was read (a helper that delivers a buffered DOWN and exits in between is caught by the
+    first listing). None when any part cannot be read, including a process listing that does not look whole."""
+    if not output or output.count("__input__") != 1 or output.count("__ps__") != 2:
         return None
-    booted, rest = output.split("__input__")
-    dump, processes = rest.split("__ps__")
+    booted, rest = output.split("__ps__", 1)
+    before, rest = rest.split("__input__")
+    dump, after = rest.split("__ps__")
     state = touch_state(dump)
     pending = [line.strip() for line in dump.splitlines() if line.strip().startswith("PendingEvent:")]
     inbound = [line.strip() for line in dump.splitlines() if line.strip().startswith("InboundQueue:")]
     if boot_id(booted) is None or state is None or len(pending) != 1 or len(inbound) != 1 \
-            or "ARGS" not in processes:
+            or not (process_listing(before) and process_listing(after)):
         return None
     return {"boot_id": boot_id(booted), "state": state,
             "queued": pending != ["PendingEvent: <none>"] or inbound != ["InboundQueue: <empty>"],
-            "maatouch": any(_MAATOUCH.match(line.strip()) for line in processes.splitlines())}
+            "maatouch": any(MAATOUCH_CLASS in line for line in (before + after).splitlines())}
+
+
+MAATOUCH_CLASS = "com.shxyke.MaaTouch"
+
+
+def process_listing(output: str) -> bool:
+    """`ps -A -o ARGS` output that looks whole: the header, init, and a plausible number of processes."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return len(lines) >= 20 and lines[0] == "ARGS" and any(line.split()[0].endswith("init") for line in lines[1:3])
 
 
 def check_controller_info(info) -> str:

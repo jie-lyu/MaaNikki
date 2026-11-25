@@ -539,14 +539,11 @@ class Runtime:
                 intent = True
                 if state.halted or self.stopped:
                     return False
-                # Nothing may be held before this touch (a contact left by anything earlier stops all input), and
-                # the dispatcher's latest event is the baseline this touch's own lift must come after. Read before
-                # the last focus and frame checks, which then come after all the I/O.
-                try:
-                    before = target.touch_snapshot()
-                except BaseException:
-                    self._halt_unconfirmed()
-                    raise
+                # Nothing may have been held when the source frame was captured (a contact left by anything earlier
+                # stops all input), and the dispatcher's latest event then is the baseline this touch's own lift
+                # must come after. The reading was taken with the frame, so no device I/O is added between the
+                # decision and the send.
+                before = state.touch_of(source_frame)
                 if before is None or before.state != "none":
                     self._halt_unconfirmed()
                     from host import InputUnconfirmed
@@ -925,6 +922,9 @@ class Runtime:
             epoch = device_input().epoch if device_focus else None
             if device_focus and not self._device_focus_ready():
                 continue
+            # Android: the device's touch state and latest input event right before this frame, kept with it; a tap
+            # decided on the frame is sent only if nothing was held then, and its lift must come after that event.
+            touch = self._sessionless_target().touch_snapshot() if device_focus else None
             obs_gen = self.observation_generation()
             with measure("capture"):
                 with measure("capture.post"):
@@ -984,7 +984,7 @@ class Runtime:
                         count("capture.discarded")
                         continue
                     self.validate_frame(image)
-                    marked = device_input().mark_if_unchanged(image, self._focus_generation, epoch)
+                    marked = device_input().mark_if_unchanged(image, self._focus_generation, epoch, touch)
                 if not marked:
                     count("capture.discarded")
                     continue
