@@ -77,7 +77,9 @@ class RunnerTests(unittest.TestCase):
             env = runner.agent_environment(controller, Path("/tmp/runner-data"))
         self.assertEqual(json.loads(env["PI_CONTROLLER"])["type"], "Adb")
         self.assertNotIn("pi_controller", env)
-        self.assertEqual((env["MAANIKKI_DATA_ROOT"], env["MAANIKKI_RESOURCE_ROOT"]), ("/tmp/runner-data", str(ROOT)))
+        # str(Path(...)): Windows spells the same path with backslashes.
+        self.assertEqual((env["MAANIKKI_DATA_ROOT"], env["MAANIKKI_RESOURCE_ROOT"]),
+                         (str(Path("/tmp/runner-data")), str(ROOT)))
 
     def test_the_log_summary_quotes_the_method_lines(self):
         prefix = "[2026-11-25 22:40:14.177][INF][Px1][Tx2][InputAgent.cpp][L37][MaaNS::X]"
