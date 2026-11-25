@@ -707,28 +707,42 @@ class StopIsNotAnAdbFaultTests(FreshAndroidState):
         rt._evidence, rt.log = Mock(), Mock()
         return rt
 
-    def run_monthly_from_a_screen_it_will_not_leave(self, rt):
+    def run_from_a_screen_it_will_not_leave(self, rt, flow):
         import numpy as np
-        from host.android import monthly
         frame = np.zeros((720, 1280, 3), np.uint8)
         with android_run(), patch("daily.runtime.active_session", return_value=None), \
-                patch("host.android.pages.to_hud", side_effect=lambda rt, rejected: (rejected(frame, "奖励层"), False)[1]):
-            self.assertFalse(monthly.run(rt))
+                patch("host.android.pages.to_hud",
+                      side_effect=lambda rt, rejected, **kw: (rejected(frame, "奖励层"), False)[1]):
+            self.assertFalse(flow.run(rt))
 
     def test_android_diagnostic_frames_are_not_saved_after_a_stop(self):
-        rt = self.monthly_runtime()
-        self.run_monthly_from_a_screen_it_will_not_leave(rt)  # no stop: the start frame is saved and reported
-        self.assertEqual(rt._evidence.save.call_args.args[0], "android_monthly_start")
-        self.assertIn("本项未完成", rt.log.call_args.args[0])
-        rt = self.monthly_runtime()
-        self.request_stop()
-        self.run_monthly_from_a_screen_it_will_not_leave(rt)
-        rt._evidence.save.assert_not_called()
-        rt.log.assert_not_called()
+        from host.android import monthly, shop
+        for flow, stage in ((monthly, "android_monthly_start"), (shop, "android_weekly_start")):
+            with self.subTest(flow=flow.__name__):
+                rt = self.monthly_runtime()
+                self.run_from_a_screen_it_will_not_leave(rt, flow)  # no stop: the start frame is saved and reported
+                self.assertEqual(rt._evidence.save.call_args.args[0], stage)
+                self.assertIn("本项未完成", rt.log.call_args.args[0])
+                rt = self.monthly_runtime()
+                self.request_stop()
+                self.run_from_a_screen_it_will_not_leave(rt, flow)
+                rt._evidence.save.assert_not_called()
+                rt.log.assert_not_called()
+                self.state.stop_request().unlink()
+
+    def test_the_weekly_frame_before_the_first_swipe_is_not_kept_after_a_stop(self):
+        import numpy as np
+        from host.android import shop
+        frame = np.zeros((720, 1280, 3), np.uint8)
+        with android_run(), patch("diagnostics.save_image", return_value="kept") as save:
+            self.assertEqual(shop.keep_frame("before_first_swipe", frame), "kept")
+            self.request_stop()
+            self.assertIsNone(shop.keep_frame("before_first_swipe", frame))
+        save.assert_called_once()
 
     def test_the_android_flows_report_no_failure_after_a_stop(self):
-        from host.android import mailbox, monthly
-        for flow in (mailbox, monthly):
+        from host.android import mailbox, monthly, shop
+        for flow in (mailbox, monthly, shop):
             with self.subTest(flow=flow.__name__):
                 rt = SimpleNamespace(stopped=False, log=Mock())
                 with android_run():

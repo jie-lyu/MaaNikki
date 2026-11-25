@@ -340,7 +340,10 @@ def on_gifts(frame, recognize) -> bool:
 
 def keep_frame(name, frame):
     """Keep ``frame`` for a later look (UID masked) under debug/android_weekly, with no message and outside the
-    failure evidence (on_error), as it is taken on runs that go well too. Never raises."""
+    failure evidence (on_error), as it is taken on runs that go well too; nothing after a user stop. Never raises."""
+    from host import android_user_stop
+    if android_user_stop():
+        return None
     try:
         from datetime import datetime
         from app_paths import DATA_ROOT
@@ -522,7 +525,9 @@ def scan(rt):
         try:
             frame, recognize = settled(rt, "滑动礼包列表")
         except Stop:
-            rt.log(f"{what}，之后列表没有停稳，没量出移动。")
+            from host import android_user_stop
+            if not android_user_stop():  # a user stop is no failure
+                rt.log(f"{what}，之后列表没有停稳，没量出移动。")
             raise
         if frame is None:
             return None
@@ -596,6 +601,7 @@ def stopped(rt, reason, frames) -> bool:
 
 
 def fail(rt, reason) -> bool:
-    if not rt.stopped:
+    from host import android_user_stop
+    if not rt.stopped and not android_user_stop():  # a user stop is no failure
         rt.log(f"每周免费礼包：{reason}，本项未完成。")
     return False

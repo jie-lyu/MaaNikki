@@ -156,7 +156,8 @@
     "NoKeyboardOrMouseTests.test_a_sent_touch_that_raises_an_ordinary_error_after_a_stop_is_still_unconfirmed",
     "StopIsNotAnAdbFaultTests.test_a_contact_read_as_held_stays_held_when_the_recent_queue_is_unreadable",
     "StopIsNotAnAdbFaultTests.test_a_stop_published_as_focus_returns_gives_no_resume_notice",
-    "NoKeyboardOrMouseTests.test_a_stop_published_during_the_intent_write_frees_the_reservation_before_any_device_query"
+    "NoKeyboardOrMouseTests.test_a_stop_published_during_the_intent_write_frees_the_reservation_before_any_device_query",
+    "StopIsNotAnAdbFaultTests.test_the_weekly_frame_before_the_first_swipe_is_not_kept_after_a_stop"
    ],
    "known_failures": [],
    "skips": [
