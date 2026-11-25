@@ -715,7 +715,7 @@ class SwipePointTests(unittest.TestCase):
         # empty background; the lift may then lie on a card's illustration (still clear of price zones and words).
         frame = list_frame(0)
         frame[60:720, 240:1240] = BACKGROUND
-        frame[60:560, 270:1180] = (250, 250, 250)
+        frame[60:600, 270:1180] = (250, 250, 250)
         recognize = lambda node, override=None: MISS  # noqa: E731
         begin, end = shop.choose_swipe(frame, recognize)
         self.assertEqual((begin, end), ((1060, 640), (1060, 390)))
@@ -731,6 +731,27 @@ class SwipePointTests(unittest.TestCase):
         self.assertTrue(shop.blank(frame, choice[0]))
         frame[60:720, 270:1180] = (250, 250, 250)  # no empty background for the press at all
         self.assertIsNone(shop.choose_swipe(frame, recognize))
+
+    def test_low_begins_are_tried_when_the_empty_strip_is_below_the_band_margin(self):
+        # The client run of 4a4be7cc: a row's price band margin reaches y ~645, empty background only below it.
+        frame = list_frame(0)
+        frame[60:720, 240:1240] = BACKGROUND
+        frame[60:615, 270:1180] = (250, 250, 250)
+        band = [row("¥198", [1010, 572, 120, 24])]
+        recognize = lambda node, override=None: result(band) if node == shop.PRICE_GUARD else MISS  # noqa: E731
+        begin, end = shop.choose_swipe(frame, recognize)
+        self.assertIn(begin[1], shop.SWIPE_LOW_BEGIN_YS)
+        self.assertTrue(shop.blank(frame, begin))
+        self.assertLessEqual(begin[1] + shop.BLANK_HALF, shop.LIST[1] + shop.LIST[3])  # its patch inside the list
+        self.assertTrue(shop.points_clear(frame, recognize, begin, end, end_blank=False))
+
+    def test_a_merged_price_box_keeps_its_full_extent(self):
+        # OCR reading four prices of a row as one box: the whole box is excluded, not only ~290 px around its centre.
+        zones = shop.price_zones(lambda node, override=None: result([row("¥3 ¥6 ¥12 ¥30", [300, 270, 860, 26])]))
+        for x in (300, 600, 1100, 1159):
+            self.assertTrue(any(shop._overlaps([x, 283, 1, 1], zone) for zone in zones), x)
+        single = shop.price_zones(lambda node, override=None: result([row("¥30", [1050, 270, 60, 26])]))
+        self.assertTrue(any(shop._overlaps([1080 - shop.BAND_HALF_WIDTH, 283, 1, 1], zone) for zone in single))
 
     def test_a_failed_check_offers_no_swipe(self):
         self.assertIsNone(shop.choose_swipe(list_frame(0), lambda node, override=None: None))
@@ -915,6 +936,9 @@ frames = {
     # x ~500-1230 below y ~575. No stroke with both ends blank fits; the lift falls back to a card.
     "two full rows": compose(selected, [(currency, x, y) for x in (270, 500, 733, 962) for y in (65, 320)]
                              + [(currency[:145], 270, 575)]),
+    # The client run's stop (4a4be7cc): the same layout ~40 px lower; empty background only below y ~615.
+    "two full rows lower": compose(selected, [(currency, x, y) for x in (270, 500, 733, 962) for y in (105, 365)]
+                                   + [(currency[:95], 270, 625)]),
 }
 frames["run 1 stop"][420:720, 250:1240] = 250  # below the crop: white card panels, not background
 current, results = {}, {}
@@ -993,11 +1017,12 @@ class FrameworkTests(unittest.TestCase):
                          "星实置业之礼": ["sold_out", "免费", True, [0, 1]]},
             "hongji row": {"虹迹赠礼": ["sold_out", "免费", True, [0, 1]]},
             "claimable": {"虹迹赠礼": ["claimable", "免费", False, [10, 10]]},
-            "tab unselected": {}, "run 1 stop": {}, "card row": {}, "two full rows": {}})
+            "tab unselected": {}, "run 1 stop": {}, "card row": {}, "two full rows": {},
+            "two full rows lower": {}})
         self.assertEqual({name: value["tab"] for name, value in outcome.items()},
                          {"list end": "selected", "hongji row": "selected", "claimable": "selected",
                           "tab unselected": "unselected", "run 1 stop": "selected", "card row": "selected",
-                          "two full rows": "selected"})
+                          "two full rows": "selected", "two full rows lower": "selected"})
         for value in outcome.values():
             x, y = value["tab_tap"]
             self.assertLessEqual(max(abs(x - 129), abs(y - 348)), 6)  # the survey tapped (130,350)
@@ -1030,6 +1055,10 @@ class FrameworkTests(unittest.TestCase):
         self.assertEqual(refused, [None, None])
         self.assertTrue(500 <= begin[0] <= 1230 and begin[1] >= 575 + shop.BLANK_HALF, begin)
         self.assertLess(end[1], 575)  # on a card: the fallback
+        begin, end, refused = outcome["two full rows lower"]["swipe"]
+        self.assertEqual(refused, [None, None])
+        self.assertTrue(500 <= begin[0] <= 1230 and begin[1] >= 615 + shop.BLANK_HALF, begin)
+        self.assertIn(begin[1], shop.SWIPE_LOW_BEGIN_YS)
 
 
 if __name__ == "__main__":

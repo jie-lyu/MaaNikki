@@ -23,7 +23,8 @@ scroll, swipes started on empty background always did. The survey's 400 px swipe
 keeps moving after the lift), more than a card's height plus the visible list allows without skipping a card; these
 swipes are at most 250 px over 1 s (device run 1, 2026-11-26: one such swipe moved the list ~315 px, estimated from
 the frames, and its lift was confirmed on the device), shorter at the same speed when that is the longest stroke
-with both ends on empty background, and the list's measured movement is logged after every swipe; the frame the first list swipe was decided on is kept (keep_frame).
+with both ends on empty background, and the list's measured movement is logged after every swipe; the frame the
+first list swipe was decided on is kept (keep_frame).
 
 The way to the HUD before the task taps each back arrow once and waits for that page to go before another
 (pages.to_hud with single=True).
@@ -87,10 +88,19 @@ LIMIT_TEXT = re.compile(r"本周限购\s*(\d+)\s*/\s*(\d+)")
 # with two full rows of paid cards above a row of one (empty background only at x ~500-1230, y ~575-720), and on
 # saved frame c3-shop-gifts-02 no fully blank stroke fits either. A full SWIPE_DISTANCE stroke with both ends blank
 # needs empty background ~310 px tall; shorter strokes keep the same speed (SWIPE_MS per SWIPE_DISTANCE).
+# Begin rows below y 640 (SWIPE_LOW_BEGIN_YS) are tried only in the fallback, after the others: the client run of
+# 4a4be7cc stopped on the same two-full-rows layout ~40 px lower, where the empty strip (x ~500-1230) starts below the
+# second row's price band margin (~y 645). The lowest begin, 670, keeps its 60 px blank patch inside the list
+# (y < 700) and 50 px above the screen's bottom edge (system gestures start at the edge); 回到顶部 is excluded by its
+# zone as everywhere. The fallback (end not blank) tries every stroke length from 250 down to 80 px in 10 px steps so
+# that some end clears the price bands between rows; strokes stay at most SWIPE_DISTANCE so the list does not skip
+# a card.
 SWIPE_XS = tuple(range(1150, 299, -30))
+SWIPE_LOW_BEGIN_YS = (650, 660, 670)
 SWIPE_BEGIN_YS = tuple(range(640, 79, -10))
 SWIPE_DISTANCE = 250
 SWIPE_DISTANCES = (250, 200, 150, 100, 80)
+FALLBACK_DISTANCES = tuple(range(SWIPE_DISTANCE, 79, -10))
 SWIPE_MS = 1000
 MAX_SWIPES = 20
 # Empty list background around a swipe point: a flat beige patch (saved frames: std of S and V <= 2, mean V ~235,
@@ -190,7 +200,10 @@ def price_zones(recognize):
     for _text, (x, y, w, h) in _rows(result):
         centre = x + w // 2
         if centre >= LIST[0]:
-            zones.append(_grow([centre - BAND_HALF_WIDTH, y - 8, 2 * BAND_HALF_WIDTH, h + 16], MARGIN))
+            # The card's whole band; a box wider than that (OCR merging the prices of several cards in a row) keeps
+            # its full extent.
+            left, right = min(x, centre - BAND_HALF_WIDTH), max(x + w, centre + BAND_HALF_WIDTH)
+            zones.append(_grow([left, y - 8, right - left, h + 16], MARGIN))
         else:
             zones.append(_grow([x, y, w, h], MARGIN))
     zones.append(_grow(list(TOP_BUTTON), MARGIN))
@@ -238,9 +251,10 @@ def choose_swipe(frame, recognize, avoid=None):
     prices, forbidden = price_zones(recognize), forbidden_zones(recognize)
     if prices is None or forbidden is None:
         return None
-    for end_blank in (True, False):
-        for distance in SWIPE_DISTANCES:
-            for y in SWIPE_BEGIN_YS:
+    for end_blank, distances, ys in ((True, SWIPE_DISTANCES, SWIPE_BEGIN_YS),
+                                     (False, FALLBACK_DISTANCES, SWIPE_BEGIN_YS + SWIPE_LOW_BEGIN_YS)):
+        for distance in distances:
+            for y in ys:
                 for x in SWIPE_XS:
                     begin, end = (x, y), (x, y - distance)
                     if not (in_list(begin) and in_list(end)):
