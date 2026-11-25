@@ -75,6 +75,11 @@ class ScheduleService {
   private androidWaits = new Set<string>();
   /** Bumped whenever decideAfterAndroidTiers saves a slot, so a check running meanwhile merges instead of overwriting. */
   private androidSlotSaves = 0;
+  /**
+   * The slots of the check in progress, including those it triggered but has not saved yet; null between checks.
+   * decideAfterAndroidTiers looks at it before triggering, so neither path triggers a slot the other already did.
+   */
+  private checkSlots: Set<string> | null = null;
 
   private getTriggeredSlots(): Set<string> {
     try {
@@ -227,8 +232,9 @@ class ScheduleService {
 
       this.cleanupOldSlots();
       const triggeredSlots = this.getTriggeredSlots();
-      const androidSavesAtRead = this.androidSlotSaves;
+      let androidSavesAtRead = this.androidSlotSaves;
       let slotsModified = false;
+      this.checkSlots = triggeredSlots;
 
       const { instances } = useAppStore.getState();
       // Android emulator (macOS only): due Adb instances whose Android task tiers are still loading, decided after
@@ -246,6 +252,13 @@ class ScheduleService {
           if (!policy.times?.includes(timeStr)) continue;
 
           const slotKey = buildTriggeredSlotKey(inst.id, slotStr);
+          // An Android tier wait saved a slot since the read above (while an earlier trigger was awaited, say): take
+          // it in before deciding, so a slot is triggered at most once per due minute. Nothing below awaits before
+          // the trigger. Never true unless an Adb instance waited, so native-only checks read nothing more.
+          if (this.androidSlotSaves !== androidSavesAtRead) {
+            androidSavesAtRead = this.androidSlotSaves;
+            for (const key of this.getTriggeredSlots()) triggeredSlots.add(key);
+          }
           if (triggeredSlots.has(slotKey)) break;
 
           const freshInst = useAppStore.getState().instances.find((i) => i.id === inst.id);
@@ -290,6 +303,7 @@ class ScheduleService {
         }
         this.setTriggeredSlots(triggeredSlots);
       }
+      this.checkSlots = null;
 
       // The deferred Adb instances wait for the Android tiers once, without holding `checking`: a check in the next
       // minute (a native Mac instance due then, say) runs meanwhile.
@@ -301,6 +315,7 @@ class ScheduleService {
         });
       }
     } finally {
+      this.checkSlots = null;
       this.checking = false;
     }
     if (deferredWait) await deferredWait;
@@ -322,7 +337,8 @@ class ScheduleService {
       if (!inst || !policy) continue;
       const slotKey = buildTriggeredSlotKey(inst.id, slotStr);
       const triggeredSlots = this.getTriggeredSlots();
-      if (triggeredSlots.has(slotKey)) continue;
+      // Saved, or triggered by a check still in progress (saved when it ends): already used for this minute.
+      if (triggeredSlots.has(slotKey) || this.checkSlots?.has(slotKey)) continue;
       triggeredSlots.add(slotKey);
       this.setTriggeredSlots(triggeredSlots);
       this.androidSlotSaves += 1;

@@ -6,6 +6,7 @@ in the ADB restart advice, the agent's environment and the framework-log summary
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -364,6 +365,39 @@ class RunnerTests(unittest.TestCase):
             notices = [call for call in stderr.write.call_args_list if "没有自己停下" in str(call)]
             self.assertGreaterEqual(len(notices), 2)  # a periodic notice while it waits
 
+    def test_a_broken_stderr_never_ends_the_wait_while_the_task_runs(self):
+        import tempfile
+        import threading
+        for error in (BrokenPipeError(32, "Broken pipe"), ValueError("I/O operation on closed file")):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                marker = root / "config" / "android-input" / "touch.json"
+                marker.parent.mkdir(parents=True)
+                marker.write_text("{}")
+                child = self.KillableChild()
+                tasker = self.StoppingTasker(child, ends=False)  # a click stalled between DOWN and UP
+                ended = []
+
+                def unwedge():
+                    time.sleep(0.5)
+                    ended.append(time.monotonic())
+                    tasker.ends = True
+                worker = threading.Thread(target=unwedge)
+                broken = Mock()
+                broken.write.side_effect = error  # the reader of piped stderr has gone
+                broken.flush.side_effect = error
+                record = {}
+                with patch.object(runner, "STOP_TOUCH_WAIT", 0.05), patch.object(runner, "STOP_TASKER_WAIT", 0.1), \
+                        patch.object(runner, "STOP_TASKER_POLL", 0.01), patch.object(runner, "STOP_NOTICE_INTERVAL", 0.1), \
+                        patch("sys.stderr", broken):
+                    worker.start()
+                    self.assertTrue(runner.stop_tasker(tasker, root, record, child, Mock()))
+                    returned = time.monotonic()
+                worker.join()
+                self.assertGreaterEqual(broken.write.call_count, 2)  # the notice kept failing, the wait went on
+                self.assertGreaterEqual(returned, ended[0])  # never returned while the tasker ran
+                self.assertEqual(record["stop_path"], "agent terminated; tasker stopped late")
+
     def test_a_stale_stop_request_is_removed_before_the_agent_starts(self):
         import tempfile
         modules, calls, children, Child = self.fake_framework()
@@ -463,6 +497,13 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual((records[0]["status"], records[0]["stop_path"]), ("interrupted", "post_stop"))
         self.assertEqual(calls["stop_request_at_post_stop"], [True])
         self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+
+    def test_the_device_lock_is_in_the_fixed_tmp_directory_whatever_tmpdir_says(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TMPDIR": tmp}), \
+                patch.object(tempfile, "tempdir", tmp):
+            self.assertEqual(runner.device_lock_path("127.0.0.1:5555"),
+                             Path("/tmp/maanikki-android-127.0.0.1_5555.lock"))  # android_input::DEVICE_LOCK_DIR
 
     def test_a_device_another_process_drives_is_refused_before_the_runner_touches_it(self):
         import tempfile

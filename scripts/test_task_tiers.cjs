@@ -387,6 +387,44 @@ test('a native Mac check in the next minute runs while an Adb instance of the mi
   assert.deepEqual(started2, ['M', 'A']);
 });
 
+test('a slot switched from Adb to native Mac during its Android wait is triggered once, even by an overlapping check', async () => {
+  const subscribers = new Set();
+  const subscribe = (listener) => { subscribers.add(listener); return () => subscribers.delete(listener); };
+  const store = {
+    backendOS: 'macos', macTaskTiers: macTiers, androidTaskTiers: null, selectedController: {}, selectedResource: {},
+    projectInterface: { controller: [{ name: 'mac', type: 'MacOS' }, { name: 'nikki_android', type: 'Adb' }], resource: [] },
+    instances: [{ id: 'B', name: 'B', controllerName: 'mac', isRunning: false },
+                { id: 'A', name: 'A', controllerName: 'nikki_android', isRunning: false }],
+  };
+  const service = loadSchedulerWith(store, subscribe);
+  store.instances[0].schedulePolicies = [{ ...store.instances[0].schedulePolicies[0], enabled: false }];
+  const started = [];
+  let releaseB = null;
+  service.setTriggerCallback((inst) => {
+    started.push(inst.id);
+    if (inst.id === 'B') return new Promise((resolve) => { releaseB = () => resolve(true); });
+    return Promise.resolve(true);
+  });
+  service.start();  // 21:30:10: A is due as Adb and waits for the Android tiers; B is disabled
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(started, []);
+  // During A's wait: A is switched to native Mac and B's Mac policy is enabled.
+  store.instances = [{ ...store.instances[0], schedulePolicies: [{ ...store.instances[0].schedulePolicies[0], enabled: true }] },
+                     { ...store.instances[1], controllerName: 'mac' }];
+  const overlapping = service.check();  // the same minute: B is due; its startup reply is held
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(started, ['B']);
+  store.androidTaskTiers = androidTiers;  // the Android tiers settle: the deferred decision starts A
+  for (const listener of [...subscribers]) listener();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(started, ['B', 'A']);
+  releaseB();  // B's reply arrives; the overlapping check goes on to A, whose slot is already used
+  await overlapping;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  service.stop();
+  assert.deepEqual(started, ['B', 'A']);
+});
+
 test('startup with only native controllers never requests the Android manifest; an Adb selection loads it once', async () => {
   for (const [os, controllers] of [
     ['macos', [{ name: 'mac', type: 'MacOS' }]],

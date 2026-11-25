@@ -261,7 +261,7 @@ pub struct AndroidRunSlot {
     inner: Arc<Mutex<SlotInner>>,
     /// `owner.lock` 所在目录；None 时用数据目录下的 config/android-input（测试里指向临时目录）。
     lock_dir: Option<PathBuf>,
-    /// Where the device lock lives; None: the system temporary directory (a test directory in the unit tests).
+    /// Where the device lock lives; None: the fixed android_input::DEVICE_LOCK_DIR (a test directory in the unit tests).
     device_lock_dir: Option<PathBuf>,
     timing: Timing,
     /// 取得槽时对实例连接的检查（单元测试没有原生的控制器句柄，换成只看配置的检查）。
@@ -762,7 +762,8 @@ fn claim(state: &Arc<MaaState>, instance_id: &str) -> Result<StartClaim, String>
     // The host-wide device lock: refused while another MaaNikki process (the developer runner, another client) drives
     // this emulator. Held until the slot is Idle again.
     let serial = adb_serial(state, instance_id).ok_or(NOT_CONNECTED)?;
-    let device_dir = slot.device_lock_dir.clone().unwrap_or_else(std::env::temp_dir);
+    let device_dir =
+        slot.device_lock_dir.clone().unwrap_or_else(|| PathBuf::from(super::android_input::DEVICE_LOCK_DIR));
     let device_lock = match super::android_input::take_device_lock(&device_dir, &serial) {
         Ok(Some(file)) => file,
         Ok(None) => return Err(DEVICE_BUSY.to_string()),

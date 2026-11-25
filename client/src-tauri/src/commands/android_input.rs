@@ -142,10 +142,15 @@ pub fn touch_reserved(dir: &Path) -> bool {
     !matches!(std::fs::symlink_metadata(dir.join("touch.json")), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
+/// Where the host-wide device locks live: a fixed directory, never TMPDIR or the data root, so the client and the
+/// developer runner lock the same file for one serial however each was launched (scripts/android/runner.py's
+/// DEVICE_LOCK_DIR is the same path).
+#[cfg(target_os = "macos")]
+pub const DEVICE_LOCK_DIR: &str = "/tmp";
+
 /// The host-wide lock file for one emulator: `<dir>/maanikki-android-<serial>.lock`, the serial with every character
 /// outside `[A-Za-z0-9._-]` replaced by `_` (scripts/android/runner.py's device_lock_path builds the same name; `dir` is
-/// the system temporary directory, `std::env::temp_dir()` there and `tempfile.gettempdir()` in the runner, both
-/// following TMPDIR).
+/// DEVICE_LOCK_DIR in production, a test directory in the unit tests).
 #[cfg(target_os = "macos")]
 pub fn device_lock_path(dir: &Path, serial: &str) -> std::path::PathBuf {
     let name: String = serial
@@ -276,7 +281,13 @@ mod tests {
     fn the_device_lock_is_exclusive_per_serial_and_its_file_is_kept() {
         let _serial = serial_fd_tests();
         let dir = temp_dir("device");
-        // The same name as scripts/android/runner.py's device_lock_path (scripts/test_android_runner.py checks it too).
+        // The same fixed directory and name as scripts/android/runner.py's device_lock_path (scripts/test_android_runner.py
+        // checks them too).
+        assert_eq!(DEVICE_LOCK_DIR, "/tmp");
+        assert_eq!(
+            device_lock_path(Path::new(DEVICE_LOCK_DIR), "127.0.0.1:5555"),
+            Path::new("/tmp/maanikki-android-127.0.0.1_5555.lock")
+        );
         assert_eq!(
             device_lock_path(&dir, "127.0.0.1:5555").file_name().unwrap(),
             "maanikki-android-127.0.0.1_5555.lock"

@@ -30,7 +30,6 @@ import re
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 
@@ -188,9 +187,14 @@ def agent_environment(controller: dict, data_root: Path) -> dict:
 DEVICE_BUSY = "另一个 MaaNikki 进程正在驱动这台模拟器（MaaNikki 客户端，或另一个运行器），请等它结束后再运行。"
 
 
+# The fixed directory of the host-wide device locks, the client's android_input::DEVICE_LOCK_DIR: never TMPDIR or the
+# data root, so the runner and the client lock the same file for one serial however each was launched.
+DEVICE_LOCK_DIR = Path("/tmp")
+
+
 def device_lock_dir() -> Path:
-    """The system temporary directory (follows TMPDIR, like the client's std::env::temp_dir())."""
-    return Path(tempfile.gettempdir())
+    """The fixed DEVICE_LOCK_DIR (never follows TMPDIR)."""
+    return DEVICE_LOCK_DIR
 
 
 def device_lock_path(serial: str, directory: Path | None = None) -> Path:
@@ -570,8 +574,7 @@ def stop_tasker(tasker, data_root: Path | None = None, record: dict | None = Non
 
 
 def _stop_by_terminating_agent(tasker, touch: str, record: dict | None, child, client) -> bool:
-    print(f"停止时触摸标记的状态：{touch}（可能还有一次触摸在进行）；不调用框架的停止，改为结束 agent 子进程，等任务自己结束",
-          file=sys.stderr)
+    _best_effort_notice(f"停止时触摸标记的状态：{touch}（可能还有一次触摸在进行）；不调用框架的停止，改为结束 agent 子进程，等任务自己结束")
     if child is not None:
         try:
             child.kill()
@@ -593,9 +596,9 @@ def _stop_by_terminating_agent(tasker, touch: str, record: dict | None, child, c
         # Never exit while the tasker runs: a click stalled between DOWN and UP (ADB wedged) finishes only in this
         # process; exiting would leave the contact held.
         if time.monotonic() >= next_notice:
-            print(f"结束 agent 之后任务已经 {time.monotonic() - started:.0f} 秒没有自己停下；运行器不调用框架的停止，也不在任务停下之前退出"
-                  "（正在进行的点击要在这个进程里做完，否则会留下按住的触点）。ADB 可能卡住了：检查模拟器和 ADB；一直停不下来才强制结束"
-                  "（kill -9），之后下一次运行在发送前读设备的触点状态。", file=sys.stderr)
+            _best_effort_notice(f"结束 agent 之后任务已经 {time.monotonic() - started:.0f} 秒没有自己停下；运行器不调用框架的停止，也不在任务停下之前退出"
+                                "（正在进行的点击要在这个进程里做完，否则会留下按住的触点）。ADB 可能卡住了：检查模拟器和 ADB；一直停不下来才强制结束"
+                                "（kill -9），之后下一次运行在发送前读设备的触点状态。")
             next_notice = time.monotonic() + STOP_NOTICE_INTERVAL
         time.sleep(STOP_TASKER_POLL)
     if record is not None:
@@ -603,6 +606,15 @@ def _stop_by_terminating_agent(tasker, touch: str, record: dict | None, child, c
         if late:
             record["tasker_stop_seconds"] = round(time.monotonic() - started, 1)
     return True
+
+
+def _best_effort_notice(text: str) -> None:
+    """Print to stderr, ignoring a closed or broken stream (its reader gone after the agent was killed, say): a failed
+    diagnostic must never end the wait while this process owns an unfinished gesture."""
+    try:
+        print(text, file=sys.stderr, flush=True)
+    except (OSError, ValueError):  # BrokenPipeError is an OSError; ValueError: write to a closed file
+        pass
 
 
 def _running(tasker) -> bool:

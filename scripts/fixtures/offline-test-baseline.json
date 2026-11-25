@@ -202,7 +202,9 @@
     "RunnerTests.test_a_task_that_keeps_running_after_the_agent_is_killed_is_waited_for_without_post_stop",
     "RunnerTests.test_a_second_signal_during_the_stop_handshake_does_not_end_the_runner",
     "RunnerTests.test_a_sigterm_while_the_task_runs_stops_it_through_the_handshake",
-    "RunnerTests.test_a_device_another_process_drives_is_refused_before_the_runner_touches_it"
+    "RunnerTests.test_a_device_another_process_drives_is_refused_before_the_runner_touches_it",
+    "RunnerTests.test_a_broken_stderr_never_ends_the_wait_while_the_task_runs",
+    "RunnerTests.test_the_device_lock_is_in_the_fixed_tmp_directory_whatever_tmpdir_says"
    ],
    "known_failures": [],
    "skips": []
@@ -1008,7 +1010,8 @@
     "the scheduler runs a due native Mac instance listed after an Adb one even if stopped during the Android wait",
     "an Adb schedule disabled during the Android tier wait is not started; the store is read again after it",
     "a native Mac check in the next minute runs while an Adb instance of the minute before waits for the Android tiers",
-    "startup with only native controllers never requests the Android manifest; an Adb selection loads it once"
+    "startup with only native controllers never requests the Android manifest; an Adb selection loads it once",
+    "a slot switched from Adb to native Mac during its Android wait is triggered once, even by an overlapping check"
    ],
    "known_failures": [],
    "skips": []
