@@ -152,9 +152,11 @@ def platform_backend() -> str | None:
 
 
 # interface.json controller types that decide the game target, and the backend that drives each. Adb (Android
-# emulators) has no backend yet. Other types (Gamepad, PlayCover, …) keep the desktop's rules, as before; the
-# client applies the same rule (client/src-tauri/src/commands/utils.rs, GameTarget).
-TARGET_TYPES = {"Win32": "win32", "MacOS": "macos", "Adb": "adb"}
+# emulators) is driven by host.android, on a macOS host only for now (the Windows package does not ship it until
+# phase F). Other types (Gamepad, PlayCover, …) keep the desktop's rules, as before; the client applies the same
+# rule (client/src-tauri/src/commands/utils.rs, GameTarget).
+TARGET_TYPES = {"Win32": "win32", "MacOS": "macos", "Adb": "android"}
+ANDROID_HOSTS = frozenset({"macos"})
 NO_SUBMITTED_CONTROLLER = object()
 
 
@@ -182,9 +184,9 @@ def game_backend() -> str | None:
     """Backend for the game target of this run, or None when nothing on this desktop can drive it.
 
     Follows the submitted controller: Win32 and MacOS controllers select their backend only on their own
-    desktop; an Adb controller has no backend yet; a malformed value selects none, so target-dependent work
-    is refused rather than run with the desktop's rules. Without a submitted controller, or with one of
-    another type, it is the desktop's backend, as before.
+    desktop; an Adb controller selects the Android backend on the desktops that ship it (macOS for now); a
+    malformed value selects none, so target-dependent work is refused rather than run with the desktop's
+    rules. Without a submitted controller, or with one of another type, it is the desktop's backend, as before.
     """
     kind = submitted_controller_type()
     if kind is NO_SUBMITTED_CONTROLLER:
@@ -196,6 +198,8 @@ def game_backend() -> str | None:
         return platform_backend()
     if target in ("win32", "macos"):
         return target if target == platform_backend() else None
+    if target == "android":
+        return target if platform_backend() in ANDROID_HOSTS else None
     return None
 
 
@@ -232,7 +236,7 @@ def connect_target(controller) -> Target:
     """
     from navigation.models import NavigationError
     backend = game_backend()
-    if backend not in ("win32", "macos"):
+    if backend not in ("win32", "macos", "android"):
         raise NavigationError("前台导航仅支持 Windows 游戏窗口。")
     try:
         info = controller.info
@@ -241,6 +245,9 @@ def connect_target(controller) -> Target:
     if backend == "macos":
         from host.macos.target import MacOSTarget
         return MacOSTarget(info, controller)
+    if backend == "android":
+        from host.android.target import AndroidTarget
+        return AndroidTarget(info, controller)
     from host.win32.target import Win32Target
     return Win32Target(info)
 
@@ -287,7 +294,8 @@ def task_entry_supported(entry) -> bool:
     """Whether this desktop's backend may run the task whose pipeline entry is ``entry``.
 
     Win32 runs every task, as before. macOS runs the preview's verified and experimental entries. A submitted
-    controller that nothing on this desktop can drive (an Adb controller, a malformed value) runs none.
+    controller that nothing on this desktop can drive (an Adb controller on Windows, a malformed value) runs none.
+    The Android backend runs the entries on its own list (host/android/tasks.json).
     """
     backend = game_backend()
     if backend == "macos":
@@ -298,13 +306,16 @@ def task_entry_supported(entry) -> bool:
             return task_tier(entry) is not None
         except (OSError, ValueError, KeyError, TypeError):
             return False  # no readable list: refuse, like the client
+    if backend == "android":
+        from host.android import task_allowed
+        return task_allowed(entry)
     if backend is None and _target_refused():
         return False
     return True
 
 
 def _target_refused() -> bool:
-    """Whether the submitted controller itself rules out running tasks here (Adb for now, a Win32 or MacOS
+    """Whether the submitted controller itself rules out running tasks here (Adb on Windows for now, a Win32 or MacOS
     controller on the other desktop, a malformed value); False without one or for other types."""
     kind = submitted_controller_type()
     if kind is NO_SUBMITTED_CONTROLLER:
@@ -318,9 +329,12 @@ def task_refusal_reason(entry) -> str:
     if backend == "macos":
         from host.macos import refusal_reason
         return refusal_reason(entry)
+    if backend == "android":
+        from host.android import refusal_reason as android_refusal
+        return android_refusal(entry)
     kind = submitted_controller_type()
     if backend is None and kind == "Adb":
-        return "安卓模拟器支持还在开发中，暂不运行任务，已跳过。"
+        return "当前系统的 MaaNikki 还不支持安卓模拟器，已跳过。"
     if backend is None and _target_refused():
         return f"所选的控制器（{kind or '无效'}）不能在当前系统上运行任务，已跳过。"
     return "当前系统不支持这个任务，已跳过。"
@@ -328,9 +342,13 @@ def task_refusal_reason(entry) -> str:
 
 def task_start_notice(entry) -> str | None:
     """A warning for the task's own log when ``entry`` starts: macOS experimental tasks only, None elsewhere."""
-    if game_backend() == "macos":
+    backend = game_backend()
+    if backend == "macos":
         from host.macos import start_notice
         return start_notice(entry)
+    if backend == "android":
+        from host.android import start_notice as android_notice
+        return android_notice(entry)
     return None
 
 
@@ -386,6 +404,9 @@ def capabilities(backend: str | None) -> Capabilities:
         return CAPABILITIES
     if backend == "macos":
         from host.macos import CAPABILITIES
+        return CAPABILITIES
+    if backend == "android":
+        from host.android import CAPABILITIES
         return CAPABILITIES
     return UNSUPPORTED
 

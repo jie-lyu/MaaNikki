@@ -107,11 +107,14 @@ class GameBackendSelectionTests(unittest.TestCase):
         with desktop(None, WINDOWS_CONTROLLER):  # Linux: as before only for types that are not targets
             self.assertFalse(host.task_entry_supported("MaaNikki_Mailbox"))
 
-    def test_adb_and_malformed_controllers_select_no_backend_yet(self):
-        for name in ("win32", "macos"):
+    def test_adb_selects_android_on_macos_only_and_malformed_selects_none(self):
+        with desktop("macos", ADB_CONTROLLER):
+            self.assertEqual(host.game_backend(), "android")
+        for name in ("win32", None):
             with desktop(name, ADB_CONTROLLER):
                 self.assertIsNone(host.game_backend())
                 self.assertEqual(host.capabilities(host.game_backend()), host.UNSUPPORTED)
+        for name in ("win32", "macos"):
             for raw in ("{", "[]", '{"type": 3}', '{"name": "x"}', ""):
                 with self.subTest(raw=raw), desktop(name, raw=raw):
                     self.assertIsNone(host.game_backend())
@@ -203,18 +206,21 @@ class MacOSUnchangedTests(unittest.TestCase):
         self.assertEqual(after[3], 46)  # still translated
 
 
-class AdbRefusedTests(unittest.TestCase):
+class AdbOnWindowsRefusedTests(unittest.TestCase):
+    """The Windows package does not ship the Android backend yet: an Adb controller runs nothing there."""
+
     def test_no_task_runs_and_the_reason_says_why(self):
         probe, ran = probe_action("test.target_backend.adb_refusal")
-        for name in ("win32", "macos"):
-            with desktop(name, ADB_CONTROLLER):
-                self.assertFalse(host.task_entry_supported("MaaNikki_Mailbox"))
-                self.assertIn("安卓", host.task_refusal_reason("MaaNikki_Mailbox"))
-                self.assertIsNone(host.task_start_notice("MaaNikki_Mailbox"))
-                result, context = run_probe(probe, "MaaNikki_Mailbox")
-                self.assertFalse(result)
-                message = context.run_task.call_args.args[1]["MaaNikki_Daily_Message"]["focus"]["Node.Action.Starting"]
-                self.assertIn("安卓", message)
+        with desktop("win32", ADB_CONTROLLER):
+            self.assertIsNone(host.game_backend())
+            for entry in ("MaaNikki_Mailbox", "MaaNikki_AndroidCheck"):
+                self.assertFalse(host.task_entry_supported(entry))
+                self.assertIn("安卓", host.task_refusal_reason(entry))
+                self.assertIsNone(host.task_start_notice(entry))
+            result, context = run_probe(probe, "MaaNikki_AndroidCheck")
+            self.assertFalse(result)
+            message = context.run_task.call_args.args[1]["MaaNikki_Daily_Message"]["focus"]["Node.Action.Starting"]
+            self.assertIn("安卓", message)
         self.assertEqual(ran, [])
 
     def test_no_window_services_for_a_controller_without_a_window(self):
@@ -226,7 +232,17 @@ class AdbRefusedTests(unittest.TestCase):
             with self.assertRaises(NavigationError):
                 host.background_input_class()
             with self.assertRaises(NavigationError):
-                host.connect_target(SimpleNamespace(info={"type": "adb"}))
+                host.connect_target(SimpleNamespace(info={"type": "adb", "adb_serial": "127.0.0.1:5555"}))
+
+    def test_the_windows_package_leaves_the_android_backend_out(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        try:
+            import release
+        finally:
+            sys.path.remove(str(ROOT / "scripts"))
+        host_dir = str(ROOT / "agent" / "host")
+        self.assertIn("android", release.runtime_ignored(host_dir, ["android", "macos", "win32", "__init__.py"]))
+        self.assertNotIn("win32", release.runtime_ignored(host_dir, ["android", "macos", "win32", "__init__.py"]))
 
 
 class CallSiteGuardTests(unittest.TestCase):

@@ -8,6 +8,23 @@
    "known_failures": [],
    "skips": []
   },
+  "test_android_backend.py": {
+   "tests": [
+    "CapabilityTests.test_no_desktop_window_services",
+    "TargetTests.test_a_dialog_or_launcher_in_front_is_not_the_game",
+    "TargetTests.test_connect_target_reads_the_device",
+    "TargetTests.test_focus_parsing_counts_only_the_current_focus",
+    "TargetTests.test_no_input_or_window_geometry_yet",
+    "TargetTests.test_only_an_adb_connection_is_accepted",
+    "TaskListTests.test_admission_notices_and_refusals_follow_the_android_list",
+    "TaskListTests.test_an_unreadable_list_runs_nothing",
+    "TaskListTests.test_the_admission_guard_refuses_unlisted_tasks_before_task_code",
+    "TaskListTests.test_the_mac_development_switch_does_not_open_android_tasks",
+    "TaskListTests.test_the_shipped_list_is_well_formed_and_holds_only_the_read_only_check"
+   ],
+   "known_failures": [],
+   "skips": []
+  },
   "test_app_paths.py": {
    "tests": [
     "DataPathTests.test_older_overlay_is_ignored",
@@ -702,12 +719,13 @@
   },
   "test_target_backend.py": {
    "tests": [
-    "AdbRefusedTests.test_no_task_runs_and_the_reason_says_why",
-    "AdbRefusedTests.test_no_window_services_for_a_controller_without_a_window",
+    "AdbOnWindowsRefusedTests.test_no_task_runs_and_the_reason_says_why",
+    "AdbOnWindowsRefusedTests.test_no_window_services_for_a_controller_without_a_window",
+    "AdbOnWindowsRefusedTests.test_the_windows_package_leaves_the_android_backend_out",
     "CallSiteGuardTests.test_host_uses_the_desktop_backend_only_for_desktop_services",
     "CallSiteGuardTests.test_only_desktop_modules_ask_for_the_desktop_backend",
     "GameBackendSelectionTests.test_a_desktop_controller_selects_its_backend_only_on_its_own_desktop",
-    "GameBackendSelectionTests.test_adb_and_malformed_controllers_select_no_backend_yet",
+    "GameBackendSelectionTests.test_adb_selects_android_on_macos_only_and_malformed_selects_none",
     "GameBackendSelectionTests.test_other_controller_types_keep_the_desktop_rules",
     "GameBackendSelectionTests.test_without_a_submitted_controller_it_is_the_desktop_backend",
     "MacOSUnchangedTests.test_tiers_notices_and_keys_match_the_unsubmitted_case",

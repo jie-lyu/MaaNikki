@@ -1,0 +1,11 @@
+{
+  "comment": "Pipeline entries the Android emulator backend runs, read by the agent (host.android) and, from phase B5, by the client before submitting tasks. Same format and rules as agent/host/macos/preview_tasks.json. Entries are added only after a device run; until input mapping exists only the read-only check is listed. docs/android-support-plan.md has the task order.",
+  "entries": [],
+  "experimental": [
+    "MaaNikki_AndroidCheck"
+  ],
+  "excluded": {},
+  "notes": {
+    "MaaNikki_AndroidCheck": "只截图和识别，不向游戏发送任何输入"
+  }
+}

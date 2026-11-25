@@ -61,7 +61,7 @@ def local_registration(resource):
 def _write_start_notice(context, task_id, entry):
     """Before the task's first action: macOS experimental tasks say so in their own instance's log, so a
     scheduled run or a background instance shows it as well. Never raises into the action."""
-    if game_backend() != "macos":
+    if game_backend() not in ("macos", "android"):
         return  # Win32: no tiers, nothing to record or lock
     key = (task_id, entry)
     with _START_NOTICES_LOCK:

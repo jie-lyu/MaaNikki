@@ -59,8 +59,9 @@ def is_local_helper(path: Path) -> bool:
             or (len(parts) >= 2 and parts[0] == ".github" and parts[1] in LOCAL_GITHUB_HELPERS))
 
 
-# Other platforms' host backends; the Windows package never loads them.
-NON_WINDOWS_RUNTIME = {("agent", "host", "macos")}
+# Other platforms' host backends; the Windows package never loads them. The Android backend stays out of the
+# Windows package until phase F decides how Android support reaches Windows (docs/android-support-plan.md).
+NON_WINDOWS_RUNTIME = {("agent", "host", "macos"), ("agent", "host", "android")}
 
 
 def runtime_ignored(directory: str, names: list[str]) -> list[str]:
