@@ -112,8 +112,10 @@ class Gate:
         self.roi = data["roi"]
         threshold = data.get("threshold", .8)
         self.threshold = float(threshold[0] if isinstance(threshold, list) else threshold)
-        self.prepared = prepared_template(RESOURCE / "image" / template,
-                                          gray=self.gray, color=self.color)
+        from app_paths import resolve_resource_image
+        # A path leaving image/ keeps its old meaning (this loader never checked it).
+        path = resolve_resource_image(template, RESOURCE) or RESOURCE / "image" / template
+        self.prepared = prepared_template(path, gray=self.gray, color=self.color)
 
     def hit(self, frame):
         x, y, width, height = self.roi

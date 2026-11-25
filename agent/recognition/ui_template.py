@@ -7,7 +7,7 @@ from client_config import parse_custom_param
 from registration import agent_recognition
 from maa.custom_recognition import CustomRecognition
 
-from app_paths import RESOURCE_ROOT
+from app_paths import RESOURCE_ROOT, resolve_resource_image
 from vision import prepared_template
 
 
@@ -55,8 +55,8 @@ class UITemplateRecognition(CustomRecognition):
         for name, threshold in zip(templates, thresholds):
             if not isinstance(name, str) or not isinstance(threshold, (int, float)) or not 0 <= threshold <= 1:
                 raise ValueError("页面模板或阈值无效。")
-            path = (image_root / name).resolve()
-            if not path.is_relative_to(image_root):
+            path = resolve_resource_image(name, image_root.parent)
+            if path is None:
                 raise ValueError("页面图像资源路径无效。")
             prepared = prepared_template(path, grayscale=not bool(color) and not masked,
                                          gray=None if color else gray, color=color)

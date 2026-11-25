@@ -671,6 +671,21 @@
    ],
    "skips": []
   },
+  "test_resource_layers.py": {
+   "tests": [
+    "AndroidOverlayTests.test_catalog_entries_merge_with_the_top_layer_winning",
+    "AndroidOverlayTests.test_game_ui_and_ui_template_load_the_top_layer_image",
+    "AndroidOverlayTests.test_the_top_layer_wins_and_the_base_is_the_fallback",
+    "FrameworkLayeringTests.test_the_later_bundle_overrides_nodes_and_same_name_images_when_loaded_before_recognition",
+    "LayerSelectionTests.test_desktop_targets_load_only_the_main_resource",
+    "LayerSelectionTests.test_the_android_target_adds_resource_android_on_top",
+    "WindowsResolutionUnchangedTests.test_escaping_paths_are_still_refused",
+    "WindowsResolutionUnchangedTests.test_every_shipped_image_resolves_exactly_as_before",
+    "WindowsResolutionUnchangedTests.test_the_catalog_is_the_main_one"
+   ],
+   "known_failures": [],
+   "skips": []
+  },
   "test_route_test.py": {
    "tests": [
     "RouteTestChecks.test_all_dropdown_routes_are_valid_movement_routes",

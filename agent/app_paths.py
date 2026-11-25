@@ -50,3 +50,36 @@ def root_from_env(name: str, default: Path = INSTALL_ROOT) -> Path:
 
 RESOURCE_ROOT = root_from_env(RESOURCE_ROOT_ENV)
 DATA_ROOT = root_from_env(DATA_ROOT_ENV)
+
+
+# Game resources in load order, the last overriding the earlier. Every target loads resource/; an Android emulator
+# target also loads resource_android/ on top of it (the controller's attach_resource_path in interface.json), which
+# holds only what differs on the phone layout. docs/android-support-plan.md, decisions 3 and 4.
+ANDROID_RESOURCE_DIR = "resource_android"
+
+
+def resource_layers(base: Path | None = None) -> tuple[Path, ...]:
+    """The resource directories this run's game target loads, base first. Only resource/ (``base``) unless the game
+    target is the Android backend."""
+    base = Path(base) if base is not None else RESOURCE_ROOT / "resource"
+    from host import game_backend
+    if game_backend() == "android":
+        return (base, base.parent / ANDROID_RESOURCE_DIR)
+    return (base,)
+
+
+def resolve_resource_image(relative, base: Path | None = None) -> Path | None:
+    """The image file for ``relative`` (a path under image/) in the topmost layer that has it; with no layer holding
+    it, the base layer's path, exactly as before (existing or not). None when the path leaves image/, so callers
+    keep their own error messages."""
+    chosen = base_path = None
+    for layer in resource_layers(base):
+        root = (layer / "image").resolve()
+        path = (root / relative).resolve()
+        if not path.is_relative_to(root):
+            return None
+        if base_path is None:
+            base_path = path
+        if path.is_file():
+            chosen = path
+    return chosen or base_path
