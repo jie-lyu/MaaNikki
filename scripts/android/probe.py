@@ -17,6 +17,7 @@ otherwise, so a tap never lands in the launcher or another app.
     python -I scripts/android/probe.py reco NODE [NODE ...] (--frame PNG | --live) [--any-roi]
     python -I scripts/android/probe.py reco-all --frame PNG [--filter REGEX] [--any-roi] [--json OUT]
     python -I scripts/android/probe.py steps FILE.json --purpose TEXT
+    python -I scripts/android/probe.py bgcheck --out FILE.jsonl --purpose TEXT [--samples N --interval S]
 
 Coordinates are in the agent's frame, whose short side is 720 (1280x720 on a 16:9 device; the controller scales
 them to the device) unless
@@ -390,7 +391,7 @@ class Recognizer:
         if not self.tasker.bind(self.resource, controller):
             raise ProbeError("could not bind the tasker")
         self.controller = controller
-        self._request: tuple[list[str], bool] = ([], False)
+        self._request: tuple[list[str], bool, dict] = ([], False, {})
         self._results: list[dict] | None = None
         self.last_frame = None
 
@@ -401,7 +402,7 @@ class Recognizer:
         return data
 
     def _judge(self, context) -> list[dict]:
-        names, any_roi = self._request
+        names, any_roi, adhoc = self._request
         job = context.tasker.controller.post_screencap().wait()
         if not job.succeeded:
             return [{"node": name, "hit": False, "error": "capture failed"} for name in names]
@@ -409,6 +410,9 @@ class Recognizer:
         self.last_frame = image
         results = []
         for name in names:
+            if name in adhoc:  # a probe-only node defined by its override, e.g. the mobile HUD check
+                results.append(judged(name, context.run_recognition(name, image, {name: adhoc[name]})))
+                continue
             result = judged(name, context.run_recognition(name, image))
             if any_roi and not result["hit"]:
                 override = full_roi_override(self.node(name), image.shape[1], image.shape[0])
@@ -421,10 +425,12 @@ class Recognizer:
             results.append(result)
         return results
 
-    def run_many(self, names: list[str], *, any_roi: bool = False) -> list[dict]:
+    def run_many(self, names: list[str], *, any_roi: bool = False, adhoc: dict | None = None) -> list[dict]:
+        adhoc = adhoc or {}
         for name in names:
-            self.node(name)
-        self._request, self._results = (list(names), any_roi), None
+            if name not in adhoc:
+                self.node(name)
+        self._request, self._results = (list(names), any_roi, adhoc), None
         override = {self.ENTRY: {"recognition": "DirectHit", "action": "Custom", "custom_action": self.ACTION,
                                  "next": [], "pre_delay": 0, "post_delay": 0}}
         self.tasker.post_task(self.ENTRY, override).wait()
@@ -729,6 +735,131 @@ def load_steps(path: Path) -> list:
     return steps
 
 
+# ---------------------------------------------------------------- background check
+
+# The mobile HUD's shortcut row carries text labels; 换装 sits at the right end of it.
+HUD_CHECK = {"AndroidProbe_HudLabels": {"recognition": {"type": "OCR", "param": {
+    "roi": [600, 55, 680, 40], "expected": ["换装"]}}}}
+EMULATOR_OWNERS = ("BlueStacks",)
+
+
+def _window_rows(option: int) -> list[dict]:
+    import ctypes
+
+    if str(AGENT) not in sys.path:
+        sys.path.insert(0, str(AGENT))
+    from host.macos import quartz as q
+
+    cf, cg = q._cf(), q._cg()
+    rows = []
+    array = cg.CGWindowListCopyWindowInfo(option, 0)
+    try:
+        for index in range(cf.CFArrayGetCount(array)):
+            entry = cf.CFArrayGetValueAtIndex(array, index)
+
+            def get(name, entry=entry):
+                return cf.CFDictionaryGetValue(entry, q._cg_key(name))
+            rect = q.CGRect()
+            bounds = get("kCGWindowBounds")
+            if not bounds or not cg.CGRectMakeWithDictionaryRepresentation(bounds, ctypes.byref(rect)):
+                continue
+            on_screen = get("kCGWindowIsOnscreen")
+            rows.append({"owner": q._string(get("kCGWindowOwnerName")), "layer": int(q._number(get("kCGWindowLayer")) or 0),
+                         "on_screen": bool(on_screen and cf.CFBooleanGetValue(on_screen)),
+                         "bounds": (rect.origin.x, rect.origin.y, rect.size.width, rect.size.height)})
+    finally:
+        cf.CFRelease(array)
+    return rows
+
+
+# Window layers that hide what is under them: normal (0), floating (3) and modal panels (8). The Dock (20), the menu
+# bar (24) and system overlays (cursor, screen-sharing tools) sit higher and are mostly transparent; they are
+# reported but not counted as covering.
+COVERING_LAYERS = range(0, 20)
+
+
+def _is_emulator_window(row) -> bool:
+    return row["owner"] in EMULATOR_OWNERS and row["layer"] == 0 and row["bounds"][2] > 300 and row["bounds"][3] > 200
+
+
+def mac_window_state() -> dict:
+    """Where the emulator's main window is, read from the window server (no permission needed): on screen or
+    not, its bounds, how much of it windows in front cover, and which application is active."""
+    if sys.platform != "darwin":
+        return {"available": False}
+    from host.macos import quartz as q  # noqa: F401  (sys.path is set by _window_rows)
+
+    on_screen = _window_rows(1 | 16)  # kCGWindowListOptionOnScreenOnly | ExcludeDesktopElements, front to back
+    front = q.front_pid() if "host.macos.quartz" in sys.modules else -1
+    state = {"available": True, "front_app": Path(q.process_path(front)).name if front > 0 else None}
+    index = next((i for i, row in enumerate(on_screen) if _is_emulator_window(row)), None)
+    if index is None:
+        # Not on screen: minimised, hidden, on another Space, or not running. The full list (not in z-order) tells
+        # whether the window still exists.
+        exists = any(_is_emulator_window(row) for row in _window_rows(0))
+        return {**state, "window": {"on_screen": False, "exists": exists}}
+    window = on_screen[index]
+    above = [row for row in on_screen[:index] if row["owner"] not in EMULATOR_OWNERS]
+    covering = [row for row in above if row["layer"] in COVERING_LAYERS]
+    state["window"] = {"on_screen": True, "bounds": [round(v) for v in window["bounds"]]}
+    state["covered"] = round(covered_fraction(window["bounds"], [row["bounds"] for row in covering]), 3)
+    state["covered_by"] = sorted({row["owner"] for row in covering
+                                  if covered_fraction(window["bounds"], [row["bounds"]]) > 0})
+    state["overlays_above"] = sorted({row["owner"] for row in above if row["layer"] not in COVERING_LAYERS})
+    return state
+
+
+def covered_fraction(target, others, cell=8) -> float:
+    """Fraction of the target rectangle covered by the union of the other rectangles (grid of `cell` points)."""
+    import numpy as np
+
+    x, y, w, h = target
+    cols, rows = max(1, int(w // cell)), max(1, int(h // cell))
+    grid = np.zeros((rows, cols), dtype=bool)
+    for ox, oy, ow, oh in others:
+        c0, c1 = int(max(0, (ox - x) // cell)), int(min(cols, -(-(ox + ow - x) // cell)))
+        r0, r1 = int(max(0, (oy - y) // cell)), int(min(rows, -(-(oy + oh - y) // cell)))
+        if c0 < c1 and r0 < r1:
+            grid[r0:r1, c0:c1] = True
+    return float(grid.mean())
+
+
+def frame_change(a, b) -> float:
+    """Mean absolute difference of two frames (0 means identical pixels)."""
+    import cv2
+
+    return float(cv2.absdiff(a, b).mean())
+
+
+CALENDAR_ICON = (938, 50)  # 奇想日历 on this account's HUD layout (the HUD is customisable)
+
+
+def background_sample(device: Device, recognizer) -> dict:
+    """One measurement: window state, frame freshness, and (from the HUD only) a harmless input with an unambiguous
+    result: open 奇想日历 by its icon, and close it with BACK only once the calendar page is recognised."""
+    sample = {"time": dt.datetime.now().astimezone().isoformat(timespec="seconds"), "window": mac_window_state()}
+    first = device.capture()
+    time.sleep(1)
+    second = device.capture()
+    if first is None or second is None:
+        return {**sample, "capture": "failed"}
+    # A stale frame repeats pixel for pixel; the live scene (water, foliage, idle animation) never does.
+    sample["change_1s"] = round(frame_change(first, second), 2)
+    if not recognizer.run_many(list(HUD_CHECK), adhoc=HUD_CHECK)[0]["hit"]:
+        return {**sample, "hud": False, "input": "skipped: the open-world HUD is not showing"}
+    sample["hud"] = True
+    sample["tap_ok"] = device.tap(*CALENDAR_ICON)
+    time.sleep(1.5)
+    opened = recognizer.run("MaaNikki_CalendarReady")
+    sample["calendar_opened"] = opened["hit"]
+    if not opened["hit"]:
+        return {**sample, "input": "the tap did not open the calendar; nothing else sent"}
+    sample["back_ok"] = device.key(4)
+    time.sleep(1.5)
+    sample["hud_after"] = recognizer.run_many(list(HUD_CHECK), adhoc=HUD_CHECK)[0]["hit"]
+    return sample
+
+
 # ---------------------------------------------------------------- commands
 
 
@@ -835,6 +966,26 @@ def cmd_steps(args) -> int:
     return 0
 
 
+def cmd_bgcheck(args) -> int:
+    """Sample the emulator window's state over time, with freshness and a harmless input each time (JSON lines)."""
+    device = connect(args)
+    recognizer = Recognizer(device.controller)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    for index in range(args.samples):
+        if index:
+            time.sleep(args.interval)
+        try:
+            sample = background_sample(device, recognizer)
+        except ProbeError as error:  # e.g. focus left the game: record it and keep sampling without input
+            sample = {"time": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                      "window": mac_window_state(), "error": str(error)}
+        with out.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(sample, ensure_ascii=False, default=_jsonable) + "\n")
+        print(json.dumps(sample, ensure_ascii=False, default=_jsonable), flush=True)
+    return 0
+
+
 def cmd_reco(args) -> int:
     if args.live:
         controller = connect(args).controller
@@ -912,6 +1063,12 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--out", help="directory for capture steps")
         p.add_argument("--report", help="write the step report as JSON")
         p.set_defaults(func=cmd_steps)
+    p = sub.add_parser("bgcheck")
+    p.add_argument("--purpose", required=True)
+    p.add_argument("--out", required=True, help="JSON lines file to append samples to")
+    p.add_argument("--samples", type=int, default=1)
+    p.add_argument("--interval", type=float, default=120)
+    p.set_defaults(func=cmd_bgcheck)
     p = sub.add_parser("reco")
     p.add_argument("nodes", nargs="+")
     group = p.add_mutually_exclusive_group(required=True)

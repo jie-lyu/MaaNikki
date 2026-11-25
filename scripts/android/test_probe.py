@@ -12,6 +12,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+import numpy as np
 
 HERE = Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location("android_probe", HERE / "probe.py")
@@ -240,6 +243,36 @@ class ProbeTests(unittest.TestCase):
         self.log_path.mkdir()  # every further log write fails
         self.assertEqual(device.release_all(), [])
         self.assertEqual(controller.events[-1], ("up", 0))
+
+    def test_covered_fraction(self):
+        self.assertEqual(probe.covered_fraction((0, 0, 80, 80), []), 0.0)
+        self.assertEqual(probe.covered_fraction((0, 0, 80, 80), [(-10, -10, 200, 200)]), 1.0)
+        self.assertAlmostEqual(probe.covered_fraction((0, 0, 80, 80), [(0, 0, 40, 80), (20, 0, 20, 80)]), 0.5)
+
+    def _background(self, *, hud=True, opened=True):
+        device, controller = self.device()
+        frames = iter([np.zeros((720, 1280, 3), np.uint8), np.full((720, 1280, 3), 3, np.uint8)])
+        device.capture = lambda: next(frames)
+
+        class Recognizer:
+            def run_many(self, names, adhoc=None):
+                return [{"node": names[0], "hit": hud}]
+
+            def run(self, name):
+                return {"node": name, "hit": opened}
+        with mock.patch.object(probe, "mac_window_state", return_value={"available": False}), \
+                mock.patch.object(probe.time, "sleep"):
+            return probe.background_sample(device, Recognizer()), controller
+
+    def test_background_sample_sends_back_only_after_the_calendar_is_recognised(self):
+        sample, controller = self._background()
+        self.assertEqual(controller.events, [("click", 938, 50, 0), ("key", 4)])
+        self.assertEqual(sample["change_1s"], 3.0)
+        sample, controller = self._background(opened=False)
+        self.assertEqual(controller.events, [("click", 938, 50, 0)])
+        self.assertFalse(sample["calendar_opened"])
+        sample, controller = self._background(hud=False)
+        self.assertEqual(controller.events, [])
 
     def test_custom_recognition_errors_are_kept(self):
         class Reco:
