@@ -635,8 +635,10 @@ class FrameworkTests(unittest.TestCase):
             self.assertFalse((ROOT / ".git").exists(), "resource_android/ is missing from the checkout")
             return
         env = {**os.environ, "MAAFW_BINARY_PATH": str(ROOT / "maafw")}
-        result = subprocess.run([sys.executable, "-I", "-B", "-c", FRAMEWORK_CHECK, str(ROOT)], capture_output=True,
-                                text=True, timeout=300, env=env, cwd=tempfile.gettempdir())
+        # -X utf8: the child prints Chinese text, and -I ignores PYTHONUTF8 (Windows consoles default to cp1252).
+        result = subprocess.run([sys.executable, "-I", "-X", "utf8", "-B", "-c", FRAMEWORK_CHECK, str(ROOT)],
+                                capture_output=True, text=True, encoding="utf-8", timeout=300, env=env,
+                                cwd=tempfile.gettempdir())
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
         outcome = json.loads(result.stdout.strip().splitlines()[-1])
         hud, covered = outcome.pop("hud"), outcome.pop("hud with paid label over the shortcut")
