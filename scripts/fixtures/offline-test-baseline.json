@@ -32,6 +32,7 @@
     "NoKeyboardOrMouseTests.test_a_focus_loss_observed_after_the_capture_cancels_a_tap_without_a_token",
     "NoKeyboardOrMouseTests.test_a_focus_loss_seen_by_another_runtime_makes_frames_stale",
     "NoKeyboardOrMouseTests.test_a_fresh_capture_does_not_authorise_a_target_from_an_older_frame",
+    "NoKeyboardOrMouseTests.test_a_process_that_does_not_own_android_input_reads_no_focus",
     "NoKeyboardOrMouseTests.test_a_swipe_is_sent_fully_specified",
     "NoKeyboardOrMouseTests.test_a_tap_is_dispatched_with_device_focus_confirmed_right_before",
     "NoKeyboardOrMouseTests.test_a_tap_needs_its_source_frame",
@@ -49,8 +50,10 @@
     "NoKeyboardOrMouseTests.test_only_one_agent_process_uses_android_input",
     "NoKeyboardOrMouseTests.test_only_plain_targets_inside_the_frame",
     "NoKeyboardOrMouseTests.test_only_taps_and_swipes_are_dispatched_in_any_spelling",
+    "NoKeyboardOrMouseTests.test_owner_lock_failures_are_refusals",
     "NoKeyboardOrMouseTests.test_relative_camera_moves_are_refused",
     "NoKeyboardOrMouseTests.test_shipped_pipelines_use_only_actions_a_child_task_may_run",
+    "NoKeyboardOrMouseTests.test_stop_pressed_during_the_final_focus_query_sends_nothing",
     "NoKeyboardOrMouseTests.test_swipe_rectangles_use_a_pixel_inside_them",
     "NoKeyboardOrMouseTests.test_text_input_and_camera_moves_are_refused_before_posting",
     "NoKeyboardOrMouseTests.test_the_last_checks_follow_the_reservation",
@@ -73,7 +76,9 @@
     "TaskListTests.test_the_shipped_list_is_well_formed_and_holds_only_the_read_only_check"
    ],
    "known_failures": [],
-   "skips": []
+   "skips": [
+    "NoKeyboardOrMouseTests.test_only_one_agent_process_uses_android_input"
+   ]
   },
   "test_app_paths.py": {
    "tests": [

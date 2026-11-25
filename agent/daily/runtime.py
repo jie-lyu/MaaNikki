@@ -89,6 +89,13 @@ class Runtime:
         session = active_session()
         return session.stopped() if session else self.context.tasker.stopping
 
+    def _stopped_now(self):
+        """Like ``stopped`` but asks the tasker afresh instead of reusing a recent answer."""
+        if self.navigation_halted or device_input().halted:
+            return True
+        session = active_session()
+        return session.stopped(fresh=True) if session else bool(self.context.tasker.stopping)
+
     def background_mode(self):
         session = active_session()
         if session is not None and session.context is self.context:
@@ -530,6 +537,8 @@ class Runtime:
                     raise ForegroundChanged("设备上游戏不在前台，已取消本次输入，等待重新核对")
                 if state.marks_of(source_frame) != (self._focus_generation, state.epoch):
                     raise ForegroundChanged("依据的截图已经过时（之后焦点变过），已取消本次输入，等待重新核对")
+                if self._stopped_now():  # Stop may have been pressed during the focus query
+                    return False
                 sent = True
                 try:
                     with measure("input.action"):

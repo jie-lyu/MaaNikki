@@ -143,23 +143,7 @@ class DeviceInputState:
             directory = self.directory()
             if directory is None:
                 raise UnsupportedInput("没有 MaaNikki 的数据目录，无法记录安卓模拟器上的输入，暂不操作模拟器。")
-            try:
-                import fcntl
-            except ImportError:
-                raise UnsupportedInput("这台电脑上无法独占安卓模拟器的输入，暂不操作模拟器。") from None
-            handle = None
-            try:
-                directory.mkdir(parents=True, exist_ok=True)
-                handle = open(directory / "owner.lock", "a+b")
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                handle.close()
-                raise UnsupportedInput("另一个 MaaNikki 任务正在操作安卓模拟器，这里不再操作。") from None
-            except OSError:
-                if handle is not None:
-                    handle.close()
-                raise UnsupportedInput("无法在数据目录里独占安卓模拟器的输入，暂不操作模拟器。") from None
-            self._owner = handle  # kept open: the lock lasts as long as this process
+            self._owner = take_owner_lock(directory / "owner.lock")  # kept open: held as long as this process
 
     def begin_touch(self):
         """Reserve the next touch on disk; raises unless the reservation is there and this process owns it."""
@@ -223,6 +207,30 @@ class DeviceInputState:
     def marks_of(self, frame):
         entry = self._marks.get(id(frame)) if frame is not None else None
         return entry[1] if entry is not None and entry[0]() is frame else None
+
+
+def take_owner_lock(path):
+    """An open handle holding an exclusive, non-blocking flock on ``path``; UnsupportedInput if another process
+    holds it or it cannot be taken. Released when the handle is closed or the process exits. The lock file itself
+    is never removed (MaaNikki's startup cleanup takes this same lock before clearing a touch marker)."""
+    try:
+        import fcntl
+    except ImportError:
+        raise UnsupportedInput("这台电脑上无法独占安卓模拟器的输入，暂不操作模拟器。") from None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path, "a+b")
+    except OSError:
+        raise UnsupportedInput("无法在数据目录里独占安卓模拟器的输入，暂不操作模拟器。") from None
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        raise UnsupportedInput("另一个 MaaNikki 任务正在操作安卓模拟器，这里不再操作。") from None
+    except OSError:
+        handle.close()
+        raise UnsupportedInput("无法在数据目录里独占安卓模拟器的输入，暂不操作模拟器。") from None
+    return handle
 
 
 _DEVICE_INPUT = None

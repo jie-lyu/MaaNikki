@@ -130,6 +130,9 @@ class AndroidTarget:
         from host import device_input
         state = device_input()
         with state.lock:
+            # Only the process that owns Android input reads focus: a reading elsewhere would advance an epoch
+            # that the owner never sees. Raises UnsupportedInput when another agent owns it.
+            state.claim()
             package = self.focus_package()
             if package != GAME_PACKAGE:
                 state.observed_loss()
@@ -142,7 +145,12 @@ class AndroidTarget:
         return False  # never start, resume or switch apps on the device
 
     def focus_details(self) -> dict:
-        return {"backend": "android", "serial": self.serial, "focused_package": self._read_focus()}
+        from host import UnsupportedInput
+        try:
+            package = self._read_focus()
+        except UnsupportedInput as error:
+            return {"backend": "android", "serial": self.serial, "focused_package": None, "unavailable": str(error)}
+        return {"backend": "android", "serial": self.serial, "focused_package": package}
 
     def input(self) -> NoInput:
         return NoInput()

@@ -48,6 +48,52 @@ class FakeShellController:
         return SimpleNamespace(wait=lambda: SimpleNamespace(succeeded=output is not None, get=lambda: output))
 
 
+try:
+    import fcntl  # noqa: F401
+    HAS_FLOCK = True
+except ImportError:
+    HAS_FLOCK = False
+
+
+REAL_TAKE_OWNER_LOCK = host.take_owner_lock
+
+
+def injected_owner_lock(path):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        raise host.UnsupportedInput("cannot create the lock directory") from None
+    return SimpleNamespace(close=lambda: None)
+
+
+def fake_fcntl(flock):
+    return SimpleNamespace(LOCK_EX=2, LOCK_NB=4, flock=flock)
+
+
+class FreshAndroidState(unittest.TestCase):
+    """Every test starts with fresh process-wide Android input state (halt flag, focus epoch, frame marks)."""
+
+    def setUp(self):
+        import tempfile
+        import daily.runtime as runtime_module
+        self.runtime_module = runtime_module
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.data_root = Path(tmp.name)
+        if not HAS_FLOCK:  # Windows CI: ownership is injected; the real lock is tested on macOS
+            owner = patch.object(host, "take_owner_lock", side_effect=injected_owner_lock)
+            owner.start()
+            self.addCleanup(owner.stop)
+        patcher = patch.object(host, "_DEVICE_INPUT", self.fresh_state())
+        self.state = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def fresh_state(self, root=...):
+        state = host.DeviceInputState(self.data_root if root is ... else root)
+        self.addCleanup(lambda: state._owner.close() if state._owner is not None else None)
+        return state
+
+
 class TaskListTests(unittest.TestCase):
     def test_the_shipped_list_is_well_formed_and_holds_only_the_read_only_check(self):
         verified, experimental, excluded = android.task_tiers()
@@ -119,7 +165,7 @@ class CapabilityTests(unittest.TestCase):
                 host.native_key(77)  # no keyboard on an emulator
 
 
-class TargetTests(unittest.TestCase):
+class TargetTests(FreshAndroidState):
     def test_focus_parsing_counts_only_the_current_focus(self):
         self.assertEqual(focused_package(FOCUS_GAME), "com.papegames.infinitynikki")
         self.assertEqual(focused_package(FOCUS_LAUNCHER), "com.bluestacks.launcher")
@@ -212,7 +258,7 @@ class TargetTests(unittest.TestCase):
             target.geometry()
 
 
-class SessionTests(unittest.TestCase):
+class SessionTests(FreshAndroidState):
     """The real task session with an Android target: waits for device focus and sends no key on its own."""
 
     def test_first_wait_with_the_launcher_in_front_sends_nothing_and_pauses_until_the_game_has_focus(self):
@@ -253,26 +299,6 @@ class SessionTests(unittest.TestCase):
                        controller.post_click_key):
             method.assert_not_called()
         self.assertTrue(all(c.startswith(("dumpsys window", "pidof")) for c in controller.commands))
-
-
-class FreshAndroidState(unittest.TestCase):
-    """Every test starts with fresh process-wide Android input state (halt flag, focus epoch, frame marks)."""
-
-    def setUp(self):
-        import tempfile
-        import daily.runtime as runtime_module
-        self.runtime_module = runtime_module
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.data_root = Path(tmp.name)
-        patcher = patch.object(host, "_DEVICE_INPUT", self.fresh_state())
-        self.state = patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def fresh_state(self, root=...):
-        state = host.DeviceInputState(self.data_root if root is ... else root)
-        self.addCleanup(lambda: state._owner.close() if state._owner is not None else None)
-        return state
 
 
 class NoKeyboardOrMouseTests(FreshAndroidState):
@@ -393,6 +419,7 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
                 self.assertTrue(state.marker().is_file())  # still there for the next one
                 state._owner.close()
 
+    @unittest.skipUnless(HAS_FLOCK, "flock is macOS/POSIX only; Android hosts are macOS for now")
     def test_only_one_agent_process_uses_android_input(self):
         import subprocess
         import textwrap
@@ -425,6 +452,8 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
         blocker.write_text("")
         locked = self.data_root / "locked"
         for case in ("no data root", "data root is a file", "directory not writable", "write fails"):
+            if case == "directory not writable" and os.name == "nt":
+                continue  # a read-only attribute does not stop file creation in a Windows directory
             with self.subTest(case=case):
                 root = {"no data root": None, "data root is a file": blocker}.get(case, self.data_root)
                 if case == "directory not writable":
@@ -450,6 +479,48 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
                             self.assertTrue(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
                 if state._owner is not None:
                     state._owner.close()
+
+    def test_owner_lock_failures_are_refusals(self):
+        def contended(fd, flags):
+            raise BlockingIOError(35, "Resource temporarily unavailable")
+        lock = self.data_root / "elsewhere" / "owner.lock"
+        cases = (("no fcntl", None, nullcontext()),
+                 ("held elsewhere", fake_fcntl(contended), nullcontext()),
+                 ("open fails", fake_fcntl(Mock()), patch("builtins.open", side_effect=BlockingIOError(35, "busy"))),
+                 ("flock fails", fake_fcntl(Mock(side_effect=OSError(5, "I/O error"))), nullcontext()))
+        for case, module, opening in cases:
+            with self.subTest(case=case), patch.dict(sys.modules, {"fcntl": module}), opening, \
+                    self.assertRaises(host.UnsupportedInput):
+                REAL_TAKE_OWNER_LOCK(lock)
+
+    def test_a_process_that_does_not_own_android_input_reads_no_focus(self):
+        controller = FakeShellController({"mCurrentFocus": FOCUS_LAUNCHER})
+        target = AndroidTarget(INFO, controller)
+        with patch.object(host, "take_owner_lock", side_effect=host.UnsupportedInput("owned elsewhere")), \
+                patch.object(host, "_DEVICE_INPUT", self.fresh_state()) as state:
+            with self.assertRaises(host.UnsupportedInput):
+                target.foreground()
+            details = target.focus_details()
+            self.assertIsNone(details["focused_package"])
+            self.assertEqual(state.epoch, 0)  # no reading, so no loss recorded where the owner cannot see it
+        self.assertFalse(any("mCurrentFocus" in command for command in controller.commands))
+
+    def test_stop_pressed_during_the_final_focus_query_sends_nothing(self):
+        rt = self.tap_runtime()
+
+        def focus_while_stop_is_pressed():
+            rt.context.tasker.stopping = True
+            return True
+        rt._device_target.foreground = focus_while_stop_is_pressed
+        with android_run(), patch("daily.runtime.active_session", return_value=None):
+            self.assertFalse(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
+        rt.context.run_action_direct.assert_not_called()
+        self.assertFalse(self.state.marker().exists())
+        session = Mock()
+        session.stopped.side_effect = lambda fresh=False: fresh  # the cached answer is stale
+        with android_run(), patch("daily.runtime.active_session", return_value=session):
+            self.assertTrue(self.tap_runtime()._stopped_now())
+        session.stopped.assert_called_with(fresh=True)
 
     def test_the_last_checks_follow_the_reservation(self):
         from task_control import ForegroundChanged
