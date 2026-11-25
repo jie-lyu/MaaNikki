@@ -34,15 +34,24 @@ class UIClickAction(CustomAction):
             return False
 
 
+ANDROID_CHECK_ENTRY = "MaaNikki_AndroidCheck"
+
+
 @agent_action("nikki.gameplay")
 class GameplayAction(CustomAction):
     def run(self, context, argv):
         runtime = Executors(context)
         kind = None
+        # The read-only Android check is bound to its task entry, not to a parameter: whatever the parameter says,
+        # that task runs the check or nothing, and never the recovery below (which can tap).
+        read_only = getattr(getattr(argv, "task_detail", None), "entry", None) == ANDROID_CHECK_ENTRY
         try:
             options = parse_custom_param(argv.custom_action_param)
             kind = options["kind"]
-            if kind == "android_check":
+            if read_only or kind == "android_check":
+                if not (read_only and kind == "android_check"):
+                    runtime.log("安卓检查的任务入口和参数不一致，没有执行。")
+                    return False
                 # Android only (its entry node is in resource_android/): one frame, no input, no recovery.
                 from host.android.check import check
                 return check(runtime)
@@ -77,6 +86,6 @@ class GameplayAction(CustomAction):
             raise
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, cv2.error) as error:
             runtime.log(f"任务未完成：{error}。")
-            if not runtime.stopped and kind != "android_check":  # the read-only check never sends input
+            if not runtime.stopped and not read_only and kind != "android_check":  # the check never sends input
                 runtime.main()
             return False

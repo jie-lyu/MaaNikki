@@ -23,19 +23,27 @@ def describe(screen, plans) -> str:
     return "\n".join(lines)
 
 
+ATTEMPTS = 3
+
+
 def check(runtime) -> bool:
-    """One frame, no input. True when a frame was classified (whatever the screen is)."""
+    """No input. True when a frame was classified (whatever the screen is) with device focus held throughout:
+    a focus loss observed while deciding voids the decision and it is made again on a new frame (decision 7)."""
     from host.android import actions
-    frame = runtime.capture()
-    if frame is None:
-        return False
-    recognize = runtime._recognizer_on(frame)
-    screen = actions.read_screen(recognize)
-    plans = {}
-    for action in actions.ACTIONS:
-        try:
-            plans[action] = actions.plan_tap(action, screen, recognize)
-        except actions.ScreenUnrecognised as error:
-            plans[action] = str(error)
-    runtime.log(describe(screen, plans))
-    return True
+    for _attempt in range(ATTEMPTS):
+        frame = runtime.capture()
+        if frame is None:
+            return False
+        recognize = runtime._recognizer_on(frame)
+        screen = actions.read_screen(recognize)
+        plans = {}
+        for action in actions.ACTIONS:
+            try:
+                plans[action] = actions.plan_tap(action, screen, recognize)
+            except actions.ScreenUnrecognised as error:
+                plans[action] = str(error)
+        if runtime._device_focus_now() and runtime._frame_still_valid(frame):
+            runtime.log(describe(screen, plans))
+            return True
+    runtime.log(f"安卓检查：连续 {ATTEMPTS} 次判断期间游戏焦点都变过，没有得出结论。")
+    return False

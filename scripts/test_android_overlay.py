@@ -76,17 +76,37 @@ class DevHomeTests(unittest.TestCase):
             runtime.mkdir()
             for name in ("libMaaFramework.dylib", "libMaaAdbControlUnit.dylib"):
                 (runtime / name).write_text("")
-            with patch("builtins.print"):
-                self.assertEqual(android_dev_home.main(["--home", str(home), "--python", str(venv),
-                                                        "--runtime", str(runtime)]), 0)
+            helper = venv / "lib/python3.12/site-packages/MaaAgentBinary" / android_dev_home.MAATOUCH
+            helper.parent.mkdir(parents=True)
+            helper.write_text("")
+            for _ in range(2):  # building again over its own home is fine
+                with patch("builtins.print"):
+                    self.assertEqual(android_dev_home.main(["--home", str(home), "--python", str(venv),
+                                                            "--runtime", str(runtime)]), 0)
             self.assertEqual((home / "resource_android").resolve(), (ROOT / "resource_android").resolve())
-            self.assertEqual((home / "maafw").resolve(), runtime.resolve())
+            self.assertEqual((home / "maafw/libMaaFramework.dylib").resolve(), (runtime / "libMaaFramework.dylib").resolve())
+            # Where the client points MaaFramework for the Maatouch helper (maa_core.rs: <maafw>/MaaAgentBinary).
+            self.assertTrue((home / "maafw/MaaAgentBinary" / android_dev_home.MAATOUCH).is_file())
             written = json.loads((home / "interface.json").read_text(encoding="utf-8"))
             self.assertEqual(written, android_interface.android_interface())
             (tmp / "other").mkdir()
             (tmp / "other" / "file").write_text("")
             with self.assertRaises(SystemExit):  # never writes into a directory it did not create
                 android_dev_home.main(["--home", str(tmp / "other"), "--python", str(venv), "--runtime", str(runtime)])
+
+    def test_a_home_without_the_maatouch_helper_is_refused(self):
+        import android_dev_home
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "venv/bin").mkdir(parents=True)
+            (tmp / "venv/bin/python3").write_text("")
+            (tmp / "runtime").mkdir()
+            for name in ("libMaaFramework.dylib", "libMaaAdbControlUnit.dylib"):
+                (tmp / "runtime" / name).write_text("")
+            with self.assertRaises(SystemExit):
+                android_dev_home.main(["--home", str(tmp / "home"), "--python", str(tmp / "venv"),
+                                       "--runtime", str(tmp / "runtime")])
+            self.assertFalse((tmp / "home").exists())
 
     def test_a_runtime_without_the_adb_unit_is_refused(self):
         import android_dev_home
@@ -114,7 +134,9 @@ class CheckTaskTests(unittest.TestCase):
             with self.subTest(name=name):
                 frame = np.zeros((720, 1280, 3), np.uint8)
                 runtime = SimpleNamespace(capture=Mock(return_value=frame), log=Mock(),
-                                          _recognizer_on=Mock(return_value=recognize), action=Mock(), key=Mock())
+                                          _recognizer_on=Mock(return_value=recognize), action=Mock(), key=Mock(),
+                                          _device_focus_now=Mock(return_value=True),
+                                          _frame_still_valid=Mock(return_value=True))
                 self.assertTrue(check.check(runtime))
                 text = runtime.log.call_args.args[0]
                 self.assertEqual(text.splitlines()[0].split("——")[0], first_line)
@@ -136,6 +158,28 @@ class CheckTaskTests(unittest.TestCase):
                 plans[action] = str(error)
         return screen, plans
 
+    def test_a_focus_loss_while_deciding_is_never_reported(self):
+        import numpy as np
+        from host.android import check
+        from test_android_actions import Scripted
+        frames = [np.zeros((720, 1280, 3), np.uint8) for _ in range(3)]
+        for valid, expected in (([False, True], True), ([False, False, False], False)):
+            with self.subTest(valid=valid):
+                runtime = SimpleNamespace(capture=Mock(side_effect=list(frames)), log=Mock(),
+                                          _recognizer_on=Mock(return_value=Scripted(duck=True)),
+                                          _device_focus_now=Mock(return_value=True),
+                                          _frame_still_valid=Mock(side_effect=valid))
+                self.assertIs(check.check(runtime), expected)
+                self.assertEqual(runtime.capture.call_count, len(valid))
+                text = runtime.log.call_args.args[0]
+                self.assertEqual(text.startswith("当前画面：大世界"), expected)  # only a decision that held
+        runtime = SimpleNamespace(capture=Mock(side_effect=list(frames)), log=Mock(),
+                                  _recognizer_on=Mock(return_value=Scripted(duck=True)),
+                                  _device_focus_now=Mock(side_effect=[False, True]),
+                                  _frame_still_valid=Mock(return_value=True))
+        self.assertTrue(check.check(runtime))
+        self.assertEqual(runtime.capture.call_count, 2)
+
     def test_no_frame_means_no_report(self):
         from host.android import check
         runtime = SimpleNamespace(capture=Mock(return_value=None), log=Mock(), _recognizer_on=Mock())
@@ -145,15 +189,25 @@ class CheckTaskTests(unittest.TestCase):
     def test_the_check_runs_through_the_gameplay_action_without_recovery(self):
         from action import gameplay
         runtime = SimpleNamespace(stopped=False, log=Mock(), main=Mock())
-        argv = SimpleNamespace(custom_action_param=json.dumps({"kind": "android_check"}))
-        with patch.object(gameplay, "Executors", return_value=runtime), \
-                patch("host.android.check.check", return_value=True) as check:
-            self.assertTrue(gameplay.GameplayAction.run.__wrapped__(None, None, argv))
+
+        def run(entry, param, **check_behaviour):
+            argv = SimpleNamespace(custom_action_param=param, task_detail=SimpleNamespace(entry=entry))
+            with patch.object(gameplay, "Executors", return_value=runtime), \
+                    patch("host.android.check.check", **check_behaviour) as check:
+                return gameplay.GameplayAction.run.__wrapped__(None, None, argv), check
+        entry, param = "MaaNikki_AndroidCheck", json.dumps({"kind": "android_check"})
+        result, check = run(entry, param, return_value=True)
+        self.assertTrue(result)
         check.assert_called_once_with(runtime)
-        with patch.object(gameplay, "Executors", return_value=runtime), \
-                patch("host.android.check.check", side_effect=RuntimeError("capture failed")):
-            self.assertFalse(gameplay.GameplayAction.run.__wrapped__(None, None, argv))
-        runtime.main.assert_not_called()  # a failed read-only check does not "recover" by sending input
+        result, _ = run(entry, param, side_effect=RuntimeError("capture failed"))
+        self.assertFalse(result)  # a failed read-only check does not "recover" by sending input
+        for bad_entry, bad_param in ((entry, ""), (entry, "{}"), (entry, json.dumps({"kind": "main"})),
+                                     (entry, json.dumps({"kind": "mailbox"})), ("MaaNikki_Mailbox", param)):
+            with self.subTest(entry=bad_entry, param=bad_param):
+                result, check = run(bad_entry, bad_param, return_value=True)
+                self.assertFalse(result)
+                check.assert_not_called()
+        runtime.main.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()
