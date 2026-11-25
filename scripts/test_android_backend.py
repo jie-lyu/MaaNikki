@@ -128,19 +128,19 @@ class TaskListTests(unittest.TestCase):
         self.assertEqual(verified, frozenset())
         self.assertEqual(experimental, frozenset({"MaaNikki_AndroidCheck", "MaaNikki_Mailbox", "MaaNikki_MonthlyPass",
                                                  "MaaNikki_WeeklyFreeGifts", "MaaNikki_RedeemCodes", "MaaNikki_Zhaoxi",
-                                                 "MaaNikki_Xinghai"}))
+                                                 "MaaNikki_Xinghai", "MaaNikki_Dig"}))
         self.assertEqual(excluded, {})
 
     def test_admission_notices_and_refusals_follow_the_android_list(self):
         with android_run():
             self.assertEqual(host.game_backend(), "android")
             self.assertTrue(host.task_entry_supported("MaaNikki_AndroidCheck"))
-            for entry in ("MaaNikki_Dig", "MaaNikki_Fishing", None, ""):
+            for entry in ("MaaNikki_Crown", "MaaNikki_Fishing", None, ""):
                 self.assertFalse(host.task_entry_supported(entry))
-            self.assertEqual(host.task_refusal_reason("MaaNikki_Dig"), "安卓模拟器暂不开放这个任务，已跳过。")
+            self.assertEqual(host.task_refusal_reason("MaaNikki_Crown"), "安卓模拟器暂不开放这个任务，已跳过。")
             self.assertEqual(host.task_start_notice("MaaNikki_AndroidCheck"),
                              "本任务尚未在安卓模拟器上验证（试用）：只截图和识别，不向游戏发送任何输入。")
-            self.assertIsNone(host.task_start_notice("MaaNikki_Dig"))
+            self.assertIsNone(host.task_start_notice("MaaNikki_Crown"))
 
     def test_an_unreadable_list_runs_nothing(self):
         with android_run(), patch.object(android, "_task_list", side_effect=OSError("missing")):
@@ -149,8 +149,8 @@ class TaskListTests(unittest.TestCase):
             self.assertIsNone(host.task_start_notice("MaaNikki_AndroidCheck"))
 
     def test_the_mac_development_switch_does_not_open_android_tasks(self):
-        with android_run(), patch.dict(os.environ, {"MAANIKKI_MACOS_EXTRA_TASKS": "MaaNikki_Dig"}):
-            self.assertFalse(host.task_entry_supported("MaaNikki_Dig"))
+        with android_run(), patch.dict(os.environ, {"MAANIKKI_MACOS_EXTRA_TASKS": "MaaNikki_Crown"}):
+            self.assertFalse(host.task_entry_supported("MaaNikki_Crown"))
 
     def test_the_admission_guard_refuses_unlisted_tasks_before_task_code(self):
         import registration
@@ -170,7 +170,7 @@ class TaskListTests(unittest.TestCase):
             override["MaaNikki_Daily_Message"]["focus"]["Node.Action.Starting"])
         with android_run(), patch("registration.task_session", return_value=nullcontext(None)), \
                 patch.object(registration, "_START_NOTICES", registration.deque(maxlen=256)):
-            for entry in ("MaaNikki_Dig", "MaaNikki_AndroidCheck"):
+            for entry in ("MaaNikki_Crown", "MaaNikki_AndroidCheck"):
                 argv = SimpleNamespace(task_detail=SimpleNamespace(task_id=21, entry=entry), node_name=entry)
                 Probe().run(context, argv)
         self.assertEqual(ran, ["MaaNikki_AndroidCheck"])

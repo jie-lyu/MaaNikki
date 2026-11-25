@@ -148,6 +148,13 @@ class Gameplay:
         return True
 
     def dig(self):
+        from host import capabilities, game_backend
+        if capabilities(game_backend()).touch_actions_only:
+            # The phone layout has its own flow (Windows does not ship it): it opens the page and reads the queue
+            # only, never harvests, never re-digs and sends no statistics.
+            from host.android import dig
+            return dig.run(self.rt) and not self.rt.stopped
+
         def steps():
             if not self.ui.find_menu_entry(node="MaaNikki_Dig_Open"):
                 self.rt.log("未找到美鸭梨挖掘入口。")

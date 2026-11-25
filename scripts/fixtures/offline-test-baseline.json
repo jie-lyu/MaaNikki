@@ -200,6 +200,30 @@
    "known_failures": [],
    "skips": []
   },
+  "test_android_dig.py": {
+   "tests": [
+    "EntryTests.test_android_never_reads_targets_or_sends_statistics",
+    "EntryTests.test_the_module_imports_no_statistics_and_names_no_spending_node",
+    "EntryTests.test_the_shared_task_branches_to_the_android_flow_on_a_touch_target_only",
+    "FlowTests.test_a_dig_page_that_never_settles_stops_without_the_way_back",
+    "FlowTests.test_a_dig_word_near_a_target_refuses_it_on_either_tap_frame",
+    "FlowTests.test_a_non_empty_queue_sends_no_harvest_tap_and_reports_after_the_way_back",
+    "FlowTests.test_a_page_that_does_not_go_after_its_back_arrow_stops",
+    "FlowTests.test_a_user_stop_sends_nothing_more_and_reports_no_failure",
+    "FlowTests.test_an_empty_first_read_needs_a_second_empty_read",
+    "FlowTests.test_an_empty_queue_succeeds_with_its_message_after_the_way_back",
+    "FlowTests.test_frames_with_nothing_recognised_yet_are_forgiven_briefly",
+    "FlowTests.test_recognised_unexpected_screens_stop_with_the_frame_and_send_nothing_more",
+    "FlowTests.test_the_dig_words_check_that_cannot_run_refuses",
+    "FlowTests.test_the_start_goes_back_from_any_page_first",
+    "FrameworkTests.test_the_menu_entry_dig_page_queue_and_guard",
+    "ResourceTests.test_tier_note_nodes_and_words",
+    "ViewTests.test_counter_text",
+    "ViewTests.test_the_title_must_be_exact"
+   ],
+   "known_failures": [],
+   "skips": []
+  },
   "test_android_mailbox.py": {
    "tests": [
     "FrameworkTests.test_the_mail_page_is_one_page_whatever_spacing_ocr_reads_in_its_title",

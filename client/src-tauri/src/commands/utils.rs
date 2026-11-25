@@ -1323,7 +1323,7 @@ mod preview_task_tests {
                                  host_rules, android_rules).is_err());
         let manifest = include_str!("../../../../agent/host/android/tasks.json");
         assert_eq!(preview_task_allowed(manifest, "MaaNikki_AndroidCheck"), Ok(true));
-        assert_eq!(preview_task_allowed(manifest, "MaaNikki_Dig"), Ok(false));
+        assert_eq!(preview_task_allowed(manifest, "MaaNikki_Crown"), Ok(false));
     }
 
     #[test]
