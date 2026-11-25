@@ -158,6 +158,22 @@ def agent_action(name, *, stop_on_failure=False):
     return register
 
 
+def _frame_with_device_focus(session, attempts=3):
+    """A frame captured while the game had focus on the device both before and after the capture, or None.
+
+    MaaFramework captured argv.image before this callback; on a device another app may have been in front then
+    even if the game has focus now."""
+    adapter = session.ensure_adapter()
+    for _ in range(attempts):
+        session.wait(adapter, require_foreground=True)
+        captured = session.controller.post_screencap().wait()
+        if not captured.succeeded:
+            return None
+        if adapter.foreground():
+            return captured.get()
+    return None
+
+
 def agent_recognition(name):
     def register(cls):
         analyze = cls.analyze
@@ -177,6 +193,12 @@ def agent_recognition(name):
                                 return None
                             argv = copy(argv)
                             argv.image = captured.get()
+                        if session and capabilities(game_backend()).frames_follow_device_focus:
+                            image = _frame_with_device_focus(session)
+                            if image is None:
+                                return None
+                            argv = copy(argv)
+                            argv.image = image
                         pause_generation = session.pause_generation if session else 0
                         generation = session.generation if session else 0
                         if session and argv.image is not None and argv.image.size and not session.stopped():

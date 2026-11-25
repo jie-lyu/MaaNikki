@@ -193,6 +193,17 @@ class Win32UnchangedTests(unittest.TestCase):
             host.connect_target(SimpleNamespace(info={"type": "adb", "adb_serial": "127.0.0.1:5555"}))
 
 
+class Win32FocusLostModeTests(unittest.TestCase):
+    def test_saved_choices_are_unchanged_on_windows_and_macos(self):
+        from task_control import focus_lost_mode
+        for name, controller in (("win32", None), ("win32", WINDOWS_CONTROLLER), ("macos", None), ("macos", MACOS_CONTROLLER)):
+            with self.subTest(name=name, submitted=bool(controller)), desktop(name, controller):
+                self.assertEqual(focus_lost_mode("return"), "return")
+                self.assertEqual(focus_lost_mode("pause"), "pause")
+                self.assertEqual(focus_lost_mode("background"), "background" if name == "win32" else "pause")
+                self.assertFalse(host.capabilities(host.game_backend()).frames_follow_device_focus)
+
+
 class Win32SessionStartupTests(unittest.TestCase):
     def test_the_first_foreground_wait_still_nudges_focus_with_alt_up(self):
         from navigation.controller import ForegroundInput

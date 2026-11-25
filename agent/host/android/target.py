@@ -108,8 +108,8 @@ class AndroidTarget:
         return focused_package(self._shell("dumpsys window | grep mCurrentFocus"))
 
     def exists(self) -> bool:
-        # Only a confirmed absence ends the task as "game closed"; an unreadable answer is not one (focus checks
-        # then keep the task paused instead).
+        # Only a confirmed absence ends the task as "game closed"; an unreadable answer is not one. Whether the
+        # task then runs or pauses is the focus check's decision: positive game focus is enough to continue.
         return process_state(self._shell(f"pidof {GAME_PACKAGE}; echo __exit=$?")) is not False
 
     def minimized(self) -> bool:

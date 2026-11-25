@@ -32,6 +32,10 @@ def focus_lost_mode(mode) -> str:
         from host import capabilities, game_backend
         if not capabilities(game_backend()).background_input:
             return "pause"
+    if mode == "return":
+        from host import capabilities, game_backend
+        if not capabilities(game_backend()).refocus_game:
+            return "pause"  # nothing here can bring the game back; never tell the player it will
     return mode
 
 class TaskStopped(NavigationError):

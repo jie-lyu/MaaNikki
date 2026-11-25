@@ -11,6 +11,10 @@
   "test_android_backend.py": {
    "tests": [
     "CapabilityTests.test_no_desktop_window_services",
+    "FocusLostModeTests.test_return_to_the_game_behaves_like_pause",
+    "FrameFocusTests.test_a_capture_that_lost_focus_is_taken_again",
+    "FrameFocusTests.test_no_frame_with_focus_means_no_result",
+    "FrameFocusTests.test_the_frame_maa_took_is_replaced_by_one_with_focus_confirmed",
     "SessionTests.test_first_wait_with_the_launcher_in_front_sends_nothing_and_pauses_until_the_game_has_focus",
     "TargetTests.test_a_dialog_or_launcher_in_front_is_not_the_game",
     "TargetTests.test_a_shell_result_that_raises_is_unreadable",
@@ -733,6 +737,7 @@
     "GameBackendSelectionTests.test_other_controller_types_keep_the_desktop_rules",
     "GameBackendSelectionTests.test_without_a_submitted_controller_it_is_the_desktop_backend",
     "MacOSUnchangedTests.test_tiers_notices_and_keys_match_the_unsubmitted_case",
+    "Win32FocusLostModeTests.test_saved_choices_are_unchanged_on_windows_and_macos",
     "Win32SessionStartupTests.test_the_first_foreground_wait_still_nudges_focus_with_alt_up",
     "Win32UnchangedTests.test_assets_resolve_in_the_main_resource_only",
     "Win32UnchangedTests.test_capabilities_and_window_services_are_the_win32_ones",

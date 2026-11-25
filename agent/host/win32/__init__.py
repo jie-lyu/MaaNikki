@@ -18,6 +18,7 @@ CAPABILITIES = Capabilities(
     credential_store=True,
     text_input=True,
     startup_focus_key=True,
+    refocus_game=True,
 )
 
 

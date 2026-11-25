@@ -107,7 +107,8 @@ class CapabilityTests(unittest.TestCase):
         with android_run():
             caps = host.capabilities(host.game_backend())
             self.assertEqual(caps.backend, "android")
-            self.assertFalse(any(getattr(caps, name) for name in caps.__dataclass_fields__ if name != "backend"))
+            enabled = {name for name in caps.__dataclass_fields__ if name != "backend" and getattr(caps, name)}
+            self.assertEqual(enabled, {"frames_follow_device_focus"})
             self.assertIsNone(host.overlay_backend())
             self.assertIsNone(host.launch_window_probes())
             with self.assertRaises(RuntimeError):
@@ -248,6 +249,76 @@ class SessionTests(unittest.TestCase):
                        controller.post_click_key):
             method.assert_not_called()
         self.assertTrue(all(c.startswith(("dumpsys window", "pidof")) for c in controller.commands))
+
+
+class FrameFocusTests(unittest.TestCase):
+    """Custom recognitions on Android judge a frame captured while the game had focus, not MaaFramework's."""
+
+    def recognition(self):
+        import registration
+        seen = []
+        token = registration._LOCAL_REGISTRATION.set(True)
+        try:
+            @registration.agent_recognition("test.android_backend.frame_focus")
+            class Probe:
+                def analyze(self, context, argv):
+                    seen.append(int(argv.image[0, 0, 0]))
+                    return "hit"
+        finally:
+            registration._LOCAL_REGISTRATION.reset(token)
+        return Probe, seen
+
+    def session(self, focus_sequence, frames):
+        focus = iter(focus_sequence)
+        adapter = SimpleNamespace(foreground=lambda: next(focus))
+        captures = iter(frames)
+        session = SimpleNamespace(
+            pause_generation=0, generation=0, wait=Mock(), stopped=lambda: False, ensure_adapter=lambda: adapter,
+            controller=SimpleNamespace(post_screencap=lambda: SimpleNamespace(wait=lambda: next(captures))),
+            evidence=SimpleNamespace(remember_frame=Mock()), validate_frame=Mock())
+        return session
+
+    @staticmethod
+    def frame(value):
+        import numpy as np
+        image = np.full((720, 1280, 3), value, np.uint8)
+        return SimpleNamespace(succeeded=True, get=lambda: image)
+
+    def run_probe(self, session):
+        import numpy as np
+        probe, seen = self.recognition()
+        argv = SimpleNamespace(task_detail=SimpleNamespace(task_id=51), node_name="X",
+                               image=np.full((720, 1280, 3), 99, np.uint8))  # the frame Maa took (launcher)
+        with android_run(), patch("registration.task_session") as task_session:
+            task_session.return_value.__enter__.return_value = session
+            task_session.return_value.__exit__.return_value = False
+            result = probe().analyze(SimpleNamespace(), argv)
+        return result, seen
+
+    def test_the_frame_maa_took_is_replaced_by_one_with_focus_confirmed(self):
+        session = self.session([True], [self.frame(7)])
+        result, seen = self.run_probe(session)
+        self.assertEqual((result, seen), ("hit", [7]))
+        session.wait.assert_any_call(session.ensure_adapter(), require_foreground=True)
+
+    def test_a_capture_that_lost_focus_is_taken_again(self):
+        session = self.session([False, True], [self.frame(5), self.frame(6)])
+        self.assertEqual(self.run_probe(session)[1], [6])
+
+    def test_no_frame_with_focus_means_no_result(self):
+        session = self.session([False, False, False], [self.frame(1), self.frame(2), self.frame(3)])
+        result, seen = self.run_probe(session)
+        self.assertIsNone(result)
+        self.assertEqual(seen, [])
+
+
+class FocusLostModeTests(unittest.TestCase):
+    def test_return_to_the_game_behaves_like_pause(self):
+        from task_control import focus_lost_mode as normalize
+        with android_run():
+            self.assertEqual(normalize("return"), "pause")
+            self.assertEqual(normalize("background"), "pause")
+            self.assertEqual(normalize("pause"), "pause")
 
 
 if __name__ == "__main__":

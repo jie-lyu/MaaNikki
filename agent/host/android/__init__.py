@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from host import Capabilities
 
-CAPABILITIES = Capabilities("android")
+CAPABILITIES = Capabilities("android", frames_follow_device_focus=True)
 
 
 # The Android task list, same format as the macOS preview list (host/macos/__init__.py parse_task_tiers) and read
