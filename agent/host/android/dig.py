@@ -21,12 +21,15 @@ anywhere on the frame and every slot looks plain (dark, or the grey lock: no ico
 finished dig, never seen on the device yet) is reported without any tap: harvesting is not implemented on Android, the
 slots must be collected by hand, and the frame is saved for the later survey.
 
-Every tap goes through pages.tap_on_page / tap_on_layer (decided and confirmed on fresh focus-checked frames, the shared
-forbidden words) and also this task's own words (DIG_WORDS: 再次挖掘, 选择物资, 消耗, the button's 「挖掘」 matched as a
-whole row so the title and 「挖掘队列」 do not trip it, 小时, ...): one of them within pages.FORBIDDEN_MARGIN of the target
-on either tap frame refuses the tap and stops all input. A positively recognised unexpected screen (the quit dialog, an
-unknown popup, another page) stops with that frame saved; waits forgive only frames on which nothing is recognised yet
-(briefly) and frames of the state being left. No BACK key.
+Every tap goes through the shared strict helpers (pages.tap_duck for the duck, pages.tap_on_page with retry=False for
+the menu entry and the back arrows: decided and confirmed on fresh focus-checked frames, the shared forbidden words)
+and also this task's own words (DIG_WORDS: 再次挖掘, 选择物资, 消耗, the button's 「挖掘」 matched as a whole row so the
+title and 「挖掘队列」 do not trip it, 小时, ...): one of them within pages.FORBIDDEN_MARGIN of the target (the whole duck
+for the duck) on either tap frame refuses the tap and stops all input. A positively recognised unexpected screen (the
+quit dialog, an unknown popup, another page) stops with that frame saved; waits forgive only frames on which nothing
+is recognised yet (briefly) and frames of the state being left. Pages are compared by their whole title, whitespace
+aside (pages.is_exactly). User messages are fixed texts: what OCR read (a refusing label, a page title, harvest-like
+words) goes to the saved diagnostics only. No BACK key.
 """
 from __future__ import annotations
 
@@ -92,8 +95,8 @@ def guarded(node, check=None):
         if not actions._hit(result):
             return False
         word = dig_word_near(recognize, actions._box(result))
-        if word:
-            raise pages.GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止", frame)
+        if word:  # the label read goes to the diagnostic only (pages.diagnostic_reason)
+            raise pages.GuardRefusal(pages.GUARD_TAP, frame, word)
         return check is None or bool(check(frame, recognize))
     return accept
 
@@ -121,6 +124,7 @@ class View:
         return self.count == 0 and not self.harvest and not self.busy_slots
 
     def describe(self) -> str:
+        """For the diagnostic: with the harvest-like texts as OCR read them."""
         parts = [f"队列 {self.count}/{self.total}"]
         if self.harvest:
             parts.append("读到「" + "」「".join(self.harvest) + "」")
@@ -128,9 +132,18 @@ class View:
             parts.append("第 " + "、".join(map(str, self.busy_slots)) + " 格不是空的")
         return "，".join(parts)
 
+    def summary(self) -> str:
+        """For the user: the counter and the slots, never the OCR'd texts."""
+        parts = [f"队列 {self.count}/{self.total}"]
+        if self.harvest:
+            parts.append("读到像收获的文字")
+        if self.busy_slots:
+            parts.append("第 " + "、".join(map(str, self.busy_slots)) + " 格不是空的")
+        return "，".join(parts)
+
 
 def dig_page(screen) -> bool:
-    return screen is not None and screen.kind == "page" and screen.title == DIG
+    return pages.is_exactly(screen, DIG)
 
 
 def read_count(recognize):
@@ -172,7 +185,8 @@ def wait_until(rt, what, done, source=lambda s, f, r: False, transitional=lambda
     ``(value, screen, frame, recognize)``. Frames for which ``source`` holds (the state being left) are waited through
     up to ``seconds``; a frame on which nothing at all is recognised (pages.nothing_recognised), or that
     ``transitional`` takes, only within TRANSITION_ALLOWANCE; any other frame, or the time running out, saves that
-    frame and stops. None when the run stopped."""
+    frame and stops. None when the run stopped. Stricter than pages.wait_screen (kept for that): a transition is
+    forgiven only briefly, not for the whole wait, and ``transitional`` names the unsettled dig page."""
     start = time.monotonic()
     while not rt.stopped:
         screen, frame, recognize = pages.screen_now(rt)
@@ -194,7 +208,7 @@ def wait_until(rt, what, done, source=lambda s, f, r: False, transitional=lambda
 
 
 def _titled(title):
-    return lambda s, f, r: s is not None and s.kind == "page" and s.title == title
+    return lambda s, f, r: pages.is_exactly(s, title)
 
 
 def _unsettled_dig(screen, frame, recognize) -> bool:
@@ -204,36 +218,22 @@ def _unsettled_dig(screen, frame, recognize) -> bool:
 # ---- the way in and out ----
 
 def tap_duck(rt) -> bool:
-    """The 美鸭梨 menu from the HUD by one strict tap on the duck (pages.tap_on_layer: the HUD with the duck in the same
-    place on both tap frames, no forbidden label and no DIG_WORDS label near it). A quit dialog or any other screen
-    on either frame stops the task with that frame; there is no second attempt."""
-    from host.android import touch_point
-    screen, frame, _recognize = pages.screen_now(rt)
-    if frame is None:
-        return False
-    if screen.kind != "hud":
-        raise Stop("要打开美鸭梨菜单时画面不是大世界", [frame])
-    point = touch_point(screen.targets["duck"])
-
-    def accept(screen_, recognize_):
-        if screen_.kind != "hud" or not actions._near(screen_.targets.get("duck"), point):
-            return False
-        word = dig_word_near(recognize_, [*point, 1, 1])
-        if word:
-            raise pages.GuardRefusal(f"鸭子图标旁边有「{word}」，没有点，任务停止")
-        return True
-    try:
-        return pages.tap_on_layer(rt, "鸭子图标在原处的大世界", accept, point)
-    except pages.LayerMismatch as error:
-        raise Stop(str(error), [error.frame]) from error
+    """The 美鸭梨 menu from the HUD by the shared strict duck tap (pages.tap_duck: the duck in the same place on both
+    tap frames, no forbidden label near the whole duck, a quit dialog or any other screen on any frame stops with
+    that frame, no second attempt), with this task's words checked around the whole duck on both frames too."""
+    return pages.tap_duck(rt, words=dig_word_near)
 
 
 def to_hud(rt, what, *, any_page=False) -> bool:
     """Back to the HUD one strict step at a time: the back arrow of 美鸭梨挖掘 (only with its queue header and counter
-    on both tap frames) or 美鸭梨 (with ``any_page``, the start of a run: of any page), tapped once (exact title,
-    no second attempt, this task's words checked), each step waited out before the next. The quit dialog, a modal,
-    an unknown screen or a page that does not go stops with that frame. Reaching the HUD after the last allowed step
-    succeeds."""
+    on both tap frames) or 美鸭梨 (with ``any_page``, the start of a run: of any page), tapped once (the whole
+    observed title, whitespace aside, on both tap frames; no second attempt; this task's words checked), each step
+    waited out before the next. The quit dialog, a modal, an unknown screen, a tap frame that is not that page or a
+    page that does not go stops with that frame. Reaching the HUD after the last allowed step succeeds.
+
+    Kept instead of pages.to_hud(single=True), which is looser here: it backs out of any page at every step, takes
+    no task words or page check on the back arrow, forgives a transition for the whole wait and does not look once
+    more after its last back arrow (plan risk 83)."""
     frame = None
     for step in range(BACK_STEPS + 1):
         screen, frame, recognize = pages.screen_now(rt)
@@ -246,15 +246,18 @@ def to_hud(rt, what, *, any_page=False) -> bool:
             return True
         if step == BACK_STEPS:
             break
-        if screen.kind != "page" or not (screen.title in (DIG, MENU) or any_page):
-            raise Stop(f"{what}时画面不是能安全退回的页面（{screen.reason or screen.title or screen.kind}）", [frame])
-        title = screen.title
-        check = dig_ready if title == DIG else None
-        if not pages.tap_on_page(rt, title, actions.BACK_ARROW, retry=False, exact=True,
-                                 accept=guarded(actions.BACK_ARROW, check)):
+        known = next((name for name in (DIG, MENU) if pages.is_exactly(screen, name)), None)
+        if screen.kind != "page" or not (known or any_page):
+            kind = "另一个页面" if screen.kind == "page" else pages.SCREEN_KINDS.get(screen.kind, screen.kind)
+            raise Stop(f"{what}时画面不是能安全退回的页面（{screen.reason or kind}）", [frame])
+        title = screen.title  # as observed: the page is left by its whole title, which messages never quote
+        place = f"「{known}」页面" if known else pages.LEAVING
+        if not pages.tap_on_page(rt, title, actions.BACK_ARROW, retry=False, exact=True, place=place,
+                                 accept=guarded(actions.BACK_ARROW, dig_ready if known == DIG else None)):
             return False
-        left = wait_until(rt, f"{what}：离开「{title}」",
-                          lambda s, f, r, t=title: s.kind == "hud" or (s.kind == "page" and s.title != t),
+        left = wait_until(rt, f"{what}：点了返回箭头之后等{place}离开",
+                          lambda s, f, r, t=title: s.kind == "hud" or (
+                              s.kind == "page" and not pages.same_title(s.title, t)),
                           _titled(title))
         if left is None:
             return False
@@ -286,22 +289,17 @@ def inspect(rt, first):
 
 
 def attempt(rt, step):
-    """``step()`` with this task's stops: a Stop or a tap frame that did not agree saves its frame, a guard refusal
-    or an unrecognised screen is reported (with its frame when it carries one); None after any of them, and nothing
-    more is sent."""
+    """``step()`` with this task's stops: a Stop (its frames), a tap frame that did not agree, a guard refusal or an
+    unrecognised screen (the refusing frame when it carries one) is saved and reported; None after any of them, and
+    nothing more is sent. The user message is the error's fixed text; a guard refusal's OCR'd label goes to the
+    diagnostic only (pages.diagnostic_reason)."""
     from navigation.models import NavigationError
     try:
         return step()
-    except Stop as error:
-        for index, frame in enumerate(error.frames):
-            rt.diagnostic(f"android_dig_stop_{index}", str(error), image=frame)
-        fail(rt, str(error))
-    except pages.FrameMismatch as error:  # a tap frame that was not the expected page: no retry
-        rt.diagnostic("android_dig_stop_0", str(error), image=error.frame)
-        fail(rt, str(error))
-    except (pages.GuardRefusal, actions.ScreenUnrecognised, NavigationError) as error:
-        if getattr(error, "frame", None) is not None:
-            rt.diagnostic("android_dig_stop_0", str(error), image=error.frame)
+    except (Stop, actions.ScreenUnrecognised, NavigationError) as error:  # PageMismatch, FrameMismatch, guard too
+        frames = error.frames if isinstance(error, Stop) else [getattr(error, "frame", None)]
+        for index, frame in enumerate(frame for frame in frames if frame is not None):
+            rt.diagnostic(f"android_dig_stop_{index}", pages.diagnostic_reason(error), image=frame)
         fail(rt, str(error))
     return None
 
@@ -328,7 +326,7 @@ def run(rt) -> bool:
     if view.empty:
         rt.log("美鸭梨挖掘：没有可收获的挖掘。")
         return True
-    rt.log(f"美鸭梨挖掘：挖掘队列不是空的（{view.describe()}）。安卓上还没在设备上见过收获的画面，这一版不收获，"
+    rt.log(f"美鸭梨挖掘：挖掘队列不是空的（{view.summary()}）。安卓上还没在设备上见过收获的画面，这一版不收获，"
            "请先在游戏里手动收获；画面已保存。本项未完成。")
     return False
 

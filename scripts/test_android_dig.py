@@ -59,12 +59,14 @@ class Game:
     """A scripted game: HUD -> 美鸭梨 (page 1, or ``menu2`` without the entry) -> 美鸭梨挖掘. ``count``: what the queue
     counter reads (None: nothing), ``harvest``: harvest-like texts read on the dig page, ``busy_slots``: slots
     (1-based) that show something bright, ``words``: extra DIG_WORDS rows per place, ``screens``: frames shown instead,
-    keyed by the number of touches sent, ``stop_on``: the touch after which the run is stopped."""
+    keyed by the number of touches sent, ``stop_on``: the touch after which the run is stopped, ``titles``: page
+    titles read instead of TITLES's."""
 
     def __init__(self, *, start="hud", count="(0/4)", harvest=(), busy_slots=(), words=None, screens=None,
-                 menu="menu", stop_on=None):
+                 menu="menu", stop_on=None, titles=None):
         self.where, self.count, self.harvest, self.busy_slots = start, count, tuple(harvest), tuple(busy_slots)
         self.words, self.screens, self.menu, self.stop_on = dict(words or {}), dict(screens or {}), menu, stop_on
+        self.titles = {**TITLES, **(titles or {})}
         self.touches, self.rt = [], None
 
     def snapshot(self, where, **changes):
@@ -78,7 +80,7 @@ class Game:
         if where == "hud":
             screen = HUD
         elif where in TITLES:
-            screen = Screen("page", {"back": BACK}, title=TITLES[where])
+            screen = Screen("page", {"back": BACK}, title=self.titles[where])
         else:
             screen = UNKNOWN
         return screen, frame, lambda node, override=None: self.recognize(where, state, node)
@@ -279,6 +281,88 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(game.touches, ["duck", "entry"])
         self.assertEqual(game.screens[2], [])  # refused on the fifth frame, the confirming one
         self.assertIs(stops(rt)[0].kwargs["image"], dirty[1])
+
+    def test_a_dig_word_near_the_whole_duck_refuses_it(self):
+        # Within the margin of the duck's box, not of the tap point: the duck is checked as the shared tap reads it.
+        game = Game(words={"hud": [("加速", [40, 100, 60, 26])]})
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.touches, [])
+        self.assertEqual(len(stops(rt)), 1)
+        self.assertEqual(rt.logs, [f"美鸭梨挖掘：{pages.GUARD_TAP}，本项未完成。"])
+
+    def test_a_quit_dialog_on_a_duck_tap_frame_stops_with_that_frame(self):
+        for name, before in (("deciding", 1), ("confirming", 2)):
+            with self.subTest(name):
+                game = Game()
+                quit_ = game.snapshot("quit")
+                # The start's look, the duck's own look, then its deciding and confirming frames.
+                game.screens = {0: [game.snapshot("hud")] * before + [quit_]}
+                outcome, rt = play(game)
+                self.assertFalse(outcome)
+                self.assertEqual(game.touches, [])
+                self.assertEqual(len(stops(rt)), 1)
+                self.assertIs(stops(rt)[0].kwargs["image"], quit_[1])
+                self.assertTrue(rt.logs[-1].endswith("本项未完成。"), rt.logs)
+
+    def test_titles_are_compared_whole_with_whitespace_aside(self):
+        game = Game(titles={"dig": "美鸭梨 挖掘", "menu": "美 鸭梨"})
+        outcome, rt = play(game)
+        self.assertTrue(outcome, rt.logs)
+        self.assertEqual(game.touches, WAY)
+        # The page that is still there with other spacing after its back arrow has not gone: it stops, no second tap.
+        game = Game(titles={"stuck": "美鸭梨 挖掘"})
+        original = game.action
+
+        def action(name, target=None, source_frame=None, **fields):
+            if game.where == "dig" and list(target) == BACK:
+                game.where = "stuck"
+                game.touches.append("back")
+                return True
+            return original(name, target=target, source_frame=source_frame, **fields)
+        game.action = action
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.touches, ["duck", "entry", "back"])
+        self.assertEqual(len(stops(rt)), 1)
+
+    def test_no_user_message_carries_ocr_text(self):
+        # A refusing label: the fixed text for the user, the label in the saved diagnostic.
+        game = Game(words={"dig": [("再次挖掘吧", [80, 50, 90, 30])]})
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(rt.logs, [f"美鸭梨挖掘：{pages.GUARD_TAP}，本项未完成。"])
+        self.assertIn("再次挖掘吧", stops(rt)[0].args[1])
+        # Harvest-like words: named in the diagnostic, not in the report.
+        game = Game(harvest=("一键收获",))
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertNotIn("一键收获", " ".join(rt.logs))
+        self.assertIn("读到像收获的文字", rt.logs[0])
+        queue = [c for c in rt.diagnostic.call_args_list if c.args[0] == "android_dig_queue"]
+        self.assertIn("一键收获", queue[0].args[1])
+        # A page observed at the start, by its title: neither when it does not go nor when it is not safe to leave.
+        game = Game(start="mail")
+        original = game.action
+
+        def stay(name, target=None, source_frame=None, **fields):
+            if game.where == "mail" and list(target) == BACK:
+                game.touches.append("back")
+                return True
+            return original(name, target=target, source_frame=source_frame, **fields)
+        game.action = stay
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.touches, ["back"])
+        self.assertEqual(len(stops(rt)), 1)
+        game_after = Game()
+        game_after.screens = {2: [game_after.snapshot("mail")] * 3}
+        outcome, rt_after = play(game_after)
+        self.assertFalse(outcome)
+        for logs in (rt.logs, rt_after.logs):
+            self.assertTrue(logs and logs[-1].endswith("本项未完成。"), logs)
+            self.assertNotIn("邮件", " ".join(logs))
+            self.assertNotIn("8/300", " ".join(logs))
 
     def test_the_dig_words_check_that_cannot_run_refuses(self):
         game = Game()
