@@ -16,10 +16,11 @@ the counter 「(0/4)」 ~[1162,107,62,23], two empty slots and two locked ones (
 centre holds 「！选择物资」 [780,406,109,32], 「消耗」 [809,533,52,26], hour pills (OCR reads 「小时」 under two of them) and
 the 「挖掘」 button, its label read as a row of its own at [797,639,73,39]. That frame's queue was empty.
 
-The queue counts as empty only when, on both frames, the counter reads 0, no harvest-like word (收获, 领取, ...) is read
-anywhere on the frame and every slot looks plain (dark, or the grey lock: no icon). Anything else (a running or
-finished dig, never seen on the device yet) is reported without any tap: harvesting is not implemented on Android, the
-slots must be collected by hand, and the frame is saved for the later survey.
+The queue counts as empty only when, on both frames, the counter reads 0 of 4 (the surveyed four-slot layout), no
+harvest-like word (收获, 领取, 再次挖掘, ...) is read anywhere on the frame and every slot looks plain (dark, or the grey
+lock: no icon); a dig-page frame on the way back with a counter above 0 or harvest-like text overturns that (Later).
+Anything else (a running or finished dig, never seen on the device yet) is reported without any tap: harvesting is
+not implemented on Android, the slots must be collected by hand, and the frame is saved for the later survey.
 
 Every tap goes through the shared strict helpers (pages.tap_duck for the duck, pages.tap_on_page with retry=False for
 the menu entry and the back arrows: decided and confirmed on fresh focus-checked frames, the shared forbidden words)
@@ -48,6 +49,8 @@ QUEUE_COUNT = "MaaNikki_Android_DigQueueCount"
 DIG_WORDS = "MaaNikki_Android_DigWords"
 HARVEST_LIKE = "MaaNikki_Android_DigHarvestLike"
 NODES = (MENU_DIG, QUEUE_HEADER, QUEUE_COUNT, DIG_WORDS, HARVEST_LIKE)
+# The shared 「恭喜获得」 layer's texts (android_monthly.json): positive evidence that a frame is no mere transition.
+LAYER_TITLE, LAYER_HINT = "MaaNikki_Android_RewardLayerTitle", "MaaNikki_Android_RewardLayerHint"
 
 COUNT_TEXT = re.compile(r"^[(（]?\s*(\d+)\s*[/／]\s*(\d+)\s*[)）]?$")
 # The queue slots (centres on the saved frame) and how much of a SLOT_HALF*2 square around each may be bright for the
@@ -112,20 +115,24 @@ def _bright(frame, centre) -> float:
 
 @dataclass(frozen=True)
 class View:
-    """The dig page on one frame: the queue counter, the harvest-like texts read anywhere, the slots (1-based) that
-    do not look plain."""
-    count: int
-    total: int
+    """The dig page on one frame: the queue counter (None: not read, only on the way back), the harvest-like texts
+    read anywhere, the slots (1-based) that do not look plain."""
+    count: int | None
+    total: int | None
     harvest: tuple
     busy_slots: tuple
 
     @property
     def empty(self) -> bool:
-        return self.count == 0 and not self.harvest and not self.busy_slots
+        # Only the surveyed layout counts as empty: four slots (SLOTS), so a total other than 4 is never empty.
+        return self.count == 0 and self.total == len(SLOTS) and not self.harvest and not self.busy_slots
+
+    def _counter(self) -> list:
+        return [] if self.count is None else [f"队列 {self.count}/{self.total}"]
 
     def describe(self) -> str:
         """For the diagnostic: with the harvest-like texts as OCR read them."""
-        parts = [f"队列 {self.count}/{self.total}"]
+        parts = self._counter()
         if self.harvest:
             parts.append("读到「" + "」「".join(self.harvest) + "」")
         if self.busy_slots:
@@ -134,7 +141,7 @@ class View:
 
     def summary(self) -> str:
         """For the user: the counter and the slots, never the OCR'd texts."""
-        parts = [f"队列 {self.count}/{self.total}"]
+        parts = self._counter()
         if self.harvest:
             parts.append("读到像收获的文字")
         if self.busy_slots:
@@ -166,10 +173,32 @@ def read_view(screen, frame, recognize) -> View | None:
     harvest = recognize(HARVEST_LIKE)
     if counted is None or harvest is None:
         return None
-    texts = tuple(str(getattr(row, "text", "") or "") for row in pages._rows(harvest)) \
-        if getattr(harvest, "hit", False) else ()
+    texts = _texts(harvest)
     busy = tuple(index + 1 for index, centre in enumerate(SLOTS) if _bright(frame, centre) > SLOT_PLAIN)
     return View(*counted, texts, busy)
+
+
+def _texts(result) -> tuple:
+    return tuple(str(getattr(row, "text", "") or "") for row in pages._rows(result)) \
+        if getattr(result, "hit", False) else ()
+
+
+class Later:
+    """Queue evidence on dig-page frames seen on the way back, after the queue was read empty: the first frame whose
+    counter reads above 0 or on which harvest-like text is read (``view``, ``frame``). Called with ``(frame,
+    recognize)`` of frames already known to be the dig page."""
+
+    def __init__(self):
+        self.view = self.frame = None
+
+    def __call__(self, frame, recognize):
+        if self.frame is not None:
+            return
+        counted = read_count(recognize)
+        texts = _texts(recognize(HARVEST_LIKE))
+        if (counted is not None and counted[0] > 0) or texts:
+            self.view = View(*(counted or (None, None)), texts, ())
+            self.frame = frame
 
 
 def dig_ready(frame, recognize) -> bool:
@@ -179,16 +208,33 @@ def dig_ready(frame, recognize) -> bool:
 
 # ---- waiting ----
 
+def stopped(rt) -> bool:
+    """The run was stopped, also between the client publishing stop.request and the tasker stopping (rt.stopped
+    reads only the tasker): nothing more is reported then, neither success nor failure."""
+    from host import android_user_stop
+    return rt.stopped or android_user_stop()
+
+
+def evidence(recognize) -> bool:
+    """Something positive on a frame that is therefore no mere transition: the 「恭喜获得」 layer's title or hint, or
+    harvest-like text (确认收获, 再次挖掘, ...); a check that could not run counts as evidence."""
+    for node in (LAYER_TITLE, LAYER_HINT, HARVEST_LIKE):
+        result = recognize(node)
+        if result is None or actions._hit(result):
+            return True
+    return False
+
+
 def wait_until(rt, what, done, source=lambda s, f, r: False, transitional=lambda s, f, r: False,
                seconds=OPEN_WAIT):
     """Poll fresh frames until ``done(screen, frame, recognize)`` returns something other than None/False and return
     ``(value, screen, frame, recognize)``. Frames for which ``source`` holds (the state being left) are waited through
     up to ``seconds``; a frame on which nothing at all is recognised (pages.nothing_recognised), or that
-    ``transitional`` takes, only within TRANSITION_ALLOWANCE; any other frame, or the time running out, saves that
-    frame and stops. None when the run stopped. Stricter than pages.wait_screen (kept for that): a transition is
+    ``transitional`` takes, only within TRANSITION_ALLOWANCE and only without positive evidence on it (``evidence``:
+    a reward layer, harvest-like text); any other frame, or the time running out, saves that frame and stops. None when the run stopped. Stricter than pages.wait_screen (kept for that): a transition is
     forgiven only briefly, not for the whole wait, and ``transitional`` names the unsettled dig page."""
     start = time.monotonic()
-    while not rt.stopped:
+    while not stopped(rt):
         screen, frame, recognize = pages.screen_now(rt)
         if frame is None:
             return None
@@ -198,7 +244,8 @@ def wait_until(rt, what, done, source=lambda s, f, r: False, transitional=lambda
                 return value, screen, frame, recognize
             elapsed = time.monotonic() - start
             transition = elapsed <= TRANSITION_ALLOWANCE and (
-                pages.nothing_recognised(screen, recognize) or transitional(screen, frame, recognize))
+                pages.nothing_recognised(screen, recognize) or transitional(screen, frame, recognize)) \
+                and not evidence(recognize)
             if not (transition or source(screen, frame, recognize)):
                 raise Stop(f"{what}时出现了不该出现的画面", [frame])
             if elapsed >= seconds:
@@ -224,43 +271,70 @@ def tap_duck(rt) -> bool:
     return pages.tap_duck(rt, words=dig_word_near)
 
 
-def to_hud(rt, what, *, any_page=False) -> bool:
+# Where a known page's back arrow may lead: the dig page back to the menu (or straight to the HUD), the menu to the HUD.
+LEADS_TO = {DIG: (MENU,), MENU: ()}
+
+
+def to_hud(rt, what, *, any_page=False, watch=None) -> bool:
     """Back to the HUD one strict step at a time: the back arrow of 美鸭梨挖掘 (only with its queue header and counter
     on both tap frames) or 美鸭梨 (with ``any_page``, the start of a run: of any page), tapped once (the whole
     observed title, whitespace aside, on both tap frames; no second attempt; this task's words checked), each step
     waited out before the next. The quit dialog, a modal, an unknown screen, a tap frame that is not that page or a
-    page that does not go stops with that frame. Reaching the HUD after the last allowed step succeeds.
+    page that does not go stops with that frame. The very frame that shows a page gone decides the next step: after
+    美鸭梨挖掘 it must be 美鸭梨 or the HUD, after 美鸭梨 the HUD (LEADS_TO), else it stops with that frame. Reaching
+    the HUD after the last allowed step succeeds. ``watch(frame, recognize)``, when given, sees every dig-page frame
+    on the way (the frame deciding the step, both tap frames, the frames waited through: Later).
 
     Kept instead of pages.to_hud(single=True), which is looser here: it backs out of any page at every step, takes
     no task words or page check on the back arrow, forgives a transition for the whole wait and does not look once
     more after its last back arrow (plan risk 83)."""
-    frame = None
+    def on_dig(frame_, recognize_):  # the tap frames: tap_on_page has checked the title
+        if watch is not None:
+            watch(frame_, recognize_)
+        return dig_ready(frame_, recognize_)
+
+    frame, carried, left_known = None, None, None
     for step in range(BACK_STEPS + 1):
-        screen, frame, recognize = pages.screen_now(rt)
-        if frame is None:
-            return False
-        if not rt._frame_still_valid(frame):
-            rt.pause(.4)
-            continue
+        if carried is not None:  # the frame the wait returned: decided on itself, not on a later one
+            (screen, frame, recognize), carried = carried, None
+        else:
+            screen, frame, recognize = pages.screen_now(rt)
+            if frame is None:
+                return False
+            if not rt._frame_still_valid(frame):
+                rt.pause(.4)
+                continue
         if screen.kind == "hud":
             return True
+        if left_known is not None and not any(pages.is_exactly(screen, name) for name in LEADS_TO[left_known]):
+            raise Stop(f"{what}：点了返回箭头之后出现了不该出现的画面", [frame])
         if step == BACK_STEPS:
             break
         known = next((name for name in (DIG, MENU) if pages.is_exactly(screen, name)), None)
         if screen.kind != "page" or not (known or any_page):
             kind = "另一个页面" if screen.kind == "page" else pages.SCREEN_KINDS.get(screen.kind, screen.kind)
             raise Stop(f"{what}时画面不是能安全退回的页面（{screen.reason or kind}）", [frame])
+        if known == DIG and watch is not None:
+            watch(frame, recognize)
         title = screen.title  # as observed: the page is left by its whole title, which messages never quote
         place = f"「{known}」页面" if known else pages.LEAVING
         if not pages.tap_on_page(rt, title, actions.BACK_ARROW, retry=False, exact=True, place=place,
-                                 accept=guarded(actions.BACK_ARROW, dig_ready if known == DIG else None)):
+                                 accept=guarded(actions.BACK_ARROW, on_dig if known == DIG else None)):
             return False
+
+        def staying(s, f, r, t=title, dig=known == DIG):
+            if not pages.is_exactly(s, t):
+                return False
+            if dig and watch is not None:
+                watch(f, r)
+            return True
         left = wait_until(rt, f"{what}：点了返回箭头之后等{place}离开",
                           lambda s, f, r, t=title: s.kind == "hud" or (
                               s.kind == "page" and not pages.same_title(s.title, t)),
-                          _titled(title))
+                          staying)
         if left is None:
             return False
+        carried, left_known = left[1:], known
     raise Stop(f"{what}：退了 {BACK_STEPS} 步还没回到大世界", [frame])
 
 
@@ -304,6 +378,12 @@ def attempt(rt, step):
     return None
 
 
+def save_queue(rt, view, frame) -> bool:
+    """The non-empty queue's frame for the survey; True only when the frame was saved."""
+    reference = rt.diagnostic("android_dig_queue", f"挖掘队列不是空的：{view.describe()}", image=frame)
+    return isinstance(reference, dict) and reference.get("image_status") == "saved"
+
+
 def run(rt) -> bool:
     def look():
         if not to_hud(rt, "开始前回到大世界", any_page=True):
@@ -312,22 +392,27 @@ def run(rt) -> bool:
         return first and inspect(rt, first)
     seen = attempt(rt, look)
     # The way back only after the page was read: after a stop, a guard refusal or a fatal error nothing more is sent.
-    if not seen or rt.stopped:
+    if not seen or stopped(rt):
         return False
     view, frame = seen
-    if not view.empty:
-        # Saved before anything else is sent: a non-empty queue on this client, never seen yet, for the survey.
-        rt.diagnostic("android_dig_queue", f"挖掘队列不是空的：{view.describe()}", image=frame)
-    back = attempt(rt, lambda: to_hud(rt, "返回大世界"))
-    if back is None or rt.stopped:
+    # Saved before anything else is sent: a non-empty queue on this client, never seen yet, for the survey.
+    saved = False if view.empty else save_queue(rt, view, frame)
+    later = Later() if view.empty else None
+    back = attempt(rt, lambda: to_hud(rt, "返回大世界", watch=later))
+    # A stop (also one only requested so far) reports nothing: neither the outcome nor a failure.
+    if back is None or stopped(rt):
         return False
     if not back:
         return fail(rt, "没能回到大世界")
+    if later is not None and later.frame is not None:  # the way back saw a queue that is not empty after all
+        view, saved = later.view, save_queue(rt, later.view, later.frame)
+    if stopped(rt):
+        return False
     if view.empty:
         rt.log("美鸭梨挖掘：没有可收获的挖掘。")
         return True
     rt.log(f"美鸭梨挖掘：挖掘队列不是空的（{view.summary()}）。安卓上还没在设备上见过收获的画面，这一版不收获，"
-           "请先在游戏里手动收获；画面已保存。本项未完成。")
+           f"请先在游戏里手动收获；{'画面已保存' if saved else '画面没能保存'}。本项未完成。")
     return False
 
 

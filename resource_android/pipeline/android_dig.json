@@ -20,13 +20,13 @@
   "MaaNikki_Android_DigWords": {
     "recognition": "OCR",
     "roi": [0, 0, 1280, 720],
-    "expected": "再次挖掘|选择物资|消耗|^\\s*挖\\s*掘\\s*$|小时|加速|立即完成",
+    "expected": "再次挖掘|选择物资|消耗|^\\s*[!！]?\\s*挖\\s*掘\\s*[!！?？.。…~～]*\\s*$|小时|加速|立即完成|收获",
     "action": "DoNothing"
   },
   "MaaNikki_Android_DigHarvestLike": {
     "recognition": "OCR",
     "roi": [0, 0, 1280, 720],
-    "expected": "收获|领取|可收|完成",
+    "expected": "收获|领取|可收|完成|再次挖掘",
     "action": "DoNothing"
   }
 }

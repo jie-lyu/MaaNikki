@@ -60,10 +60,12 @@ class Game:
     counter reads (None: nothing), ``harvest``: harvest-like texts read on the dig page, ``busy_slots``: slots
     (1-based) that show something bright, ``words``: extra DIG_WORDS rows per place, ``screens``: frames shown instead,
     keyed by the number of touches sent, ``stop_on``: the touch after which the run is stopped, ``titles``: page
-    titles read instead of TITLES's."""
+    titles read instead of TITLES's, ``request_after``: the number of touches after which stop.request is published
+    while the tasker is not stopping yet (rt.stopped stays False; host.android_user_stop answers True)."""
 
     def __init__(self, *, start="hud", count="(0/4)", harvest=(), busy_slots=(), words=None, screens=None,
-                 menu="menu", stop_on=None, titles=None):
+                 menu="menu", stop_on=None, titles=None, request_after=None):
+        self.request_after, self.requested = request_after, False
         self.where, self.count, self.harvest, self.busy_slots = start, count, tuple(harvest), tuple(busy_slots)
         self.words, self.screens, self.menu, self.stop_on = dict(words or {}), dict(screens or {}), menu, stop_on
         self.titles = {**TITLES, **(titles or {})}
@@ -93,6 +95,10 @@ class Game:
             return result([row("退出游戏", [560, 200, 160, 40])]) if where == "quit" else MISS
         if node == actions.MODAL_CLOSE:
             return result([row("", CLOSE)]) if where == "popup" else MISS
+        if node == dig.LAYER_TITLE:
+            return result([row("恭喜获得", [560, 170, 160, 40])]) if where == "layer" else MISS
+        if node == dig.LAYER_HINT:
+            return result([row("点击空白区域继续", [540, 640, 200, 30])]) if where == "layer" else MISS
         if node == actions.HUD_DUCK:
             return result([row("", DUCK)]) if where == "hud" else MISS
         if node == actions.BACK_ARROW:
@@ -128,6 +134,8 @@ class Game:
         else:
             raise AssertionError(f"unexpected tap {target} on {self.where}")
         self.touches.append(what)
+        if self.request_after == len(self.touches):
+            self.requested = True
         if self.stop_on == what:
             self.rt.stopped = True
         return True
@@ -136,7 +144,8 @@ class Game:
 def runtime(game):
     rt = SimpleNamespace(stopped=False, logs=[], key=Mock(side_effect=AssertionError("shared named action")),
                          _frame_still_valid=Mock(return_value=True), pause=Mock(return_value=True),
-                         diagnostic=Mock(), TOUCH_KEY_ATTEMPTS=3, action=game.action)
+                         diagnostic=Mock(return_value={"image_status": "saved"}), TOUCH_KEY_ATTEMPTS=3,
+                         action=game.action)
     rt.log = lambda text, **kwargs: rt.logs.append(text)
     game.rt = rt
     return rt
@@ -145,6 +154,7 @@ def runtime(game):
 def play(game, call=None):
     rt = runtime(game)
     with patch.object(pages, "screen_now", side_effect=game.screen_now), \
+            patch("host.android_user_stop", lambda **_kwargs: game.requested), \
             patch("time.monotonic", side_effect=itertools.count(0, .25).__next__):
         outcome = (call or dig.run)(rt)
     return outcome, rt
@@ -364,6 +374,111 @@ class FlowTests(unittest.TestCase):
             self.assertNotIn("邮件", " ".join(logs))
             self.assertNotIn("8/300", " ".join(logs))
 
+    def test_a_requested_stop_before_the_tasker_stops_reports_nothing(self):
+        # stop.request is published before post_stop: rt.stopped (the tasker) is still False meanwhile.
+        for name, changes, linger in (("empty", {}, False), ("busy", {"count": "(1/4)"}, False),
+                                      ("empty, menu still shown", {}, True), ("busy, menu still shown",
+                                                                              {"count": "(1/4)"}, True)):
+            with self.subTest(name):
+                game = Game(request_after=4, **changes)
+                if linger:
+                    game.screens = {4: [game.snapshot("menu")] * 3}
+                outcome, rt = play(game)
+                self.assertFalse(outcome)
+                self.assertEqual(game.touches, WAY)  # nothing more sent
+                self.assertFalse(rt.stopped)
+                self.assertEqual(rt.logs, [])  # neither 「没有可收获的挖掘」 nor 「本项未完成」
+                self.assertEqual(stops(rt), [])
+        # Requested after the entry: the queue is not reported either, nor the way back sent.
+        game = Game(request_after=2)
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.touches, ["duck", "entry"])
+        self.assertEqual(rt.logs, [])
+
+    def test_the_frame_a_back_arrow_leads_to_decides_the_next_step(self):
+        # 美鸭梨挖掘 -> 邮件 for one frame -> 美鸭梨: stops with the 邮件 frame, no back arrow on the menu.
+        game = Game()
+        mail = game.snapshot("mail")
+        game.screens = {3: [mail]}
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.touches, ["duck", "entry", "back"])
+        self.assertEqual(len(stops(rt)), 1)
+        self.assertIs(stops(rt)[0].kwargs["image"], mail[1])
+        self.assertNotIn("没有可收获的挖掘", " ".join(rt.logs))
+        # 美鸭梨 -> the dig page again: not the HUD, stops with that frame.
+        game = Game()
+        again = game.snapshot("dig")
+        game.screens = {4: [again]}
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.touches, WAY)
+        self.assertIs(stops(rt)[0].kwargs["image"], again[1])
+
+    def test_positive_evidence_is_no_transition(self):
+        game = Game()
+        layer = game.snapshot("layer")
+        game.screens = {2: [layer, game.snapshot("dig")]}
+        harvest = Game()
+        revealing = harvest.snapshot("dig", count=None, harvest=("确认收获",))
+        harvest.screens = {2: [revealing, harvest.snapshot("dig")]}
+        for name, game_, frame in (("reward layer", game, layer[1]), ("harvest text, unreadable counter", harvest,
+                                                                       revealing[1])):
+            with self.subTest(name):
+                outcome, rt = play(game_)
+                self.assertFalse(outcome)
+                self.assertEqual(game_.touches, ["duck", "entry"])
+                self.assertEqual(len(stops(rt)), 1)
+                self.assertIs(stops(rt)[0].kwargs["image"], frame)
+                self.assertNotIn("没有可收获的挖掘", " ".join(rt.logs))
+
+    def test_queue_evidence_on_the_way_back_overturns_an_empty_read(self):
+        clean = Game().snapshot("dig")
+        # Two empty reads, then the way back's deciding frame; or a frame waited through after the back arrow.
+        for name, at, changes in (("deciding frame, counter", 2, {"count": "(1/4)"}),
+                                  ("tap frame, harvest text", 2, {"harvest": ("确认收获",)}),
+                                  ("frame waited through", 3, {"count": "(1/4)"})):
+            with self.subTest(name):
+                game = Game()
+                busy = game.snapshot("dig", **changes)
+                game.screens = {2: [clean, clean, clean, busy]} if name.startswith("tap") else \
+                    {2: [clean, clean, busy]} if at == 2 else {3: [busy]}
+                outcome, rt = play(game)
+                self.assertFalse(outcome)
+                self.assertEqual(game.touches, WAY)
+                self.assertEqual(stops(rt), [])
+                queue = [c for c in rt.diagnostic.call_args_list if c.args[0] == "android_dig_queue"]
+                self.assertEqual(len(queue), 1)
+                self.assertIs(queue[0].kwargs["image"], busy[1])
+                self.assertEqual(len(rt.logs), 1)
+                self.assertIn("还没在设备上见过收获", rt.logs[0])
+                self.assertIn("画面已保存", rt.logs[0])
+                self.assertNotIn("没有可收获的挖掘", rt.logs[0])
+                self.assertNotIn("确认收获", rt.logs[0])
+
+    def test_only_the_surveyed_four_slot_queue_reads_empty(self):
+        game = Game(count="(0/8)")
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.touches, WAY)
+        self.assertIn("队列 0/8", rt.logs[0])
+        self.assertNotIn("没有可收获的挖掘", rt.logs[0])
+
+    def test_the_report_says_saved_only_when_the_frame_was_saved(self):
+        for reference, words in (({"image_status": "saved"}, "画面已保存"), ({"image_status": "save_failed"}, "画面没能保存"),
+                                 (None, "画面没能保存")):
+            with self.subTest(str(reference)):
+                game = Game(count="(1/4)")
+                rt = runtime(game)
+                rt.diagnostic.return_value = reference
+                with patch.object(pages, "screen_now", side_effect=game.screen_now), \
+                        patch("time.monotonic", side_effect=itertools.count(0, .25).__next__):
+                    self.assertFalse(dig.run(rt))
+                self.assertEqual(len(rt.logs), 1)
+                self.assertIn(words, rt.logs[0])
+                self.assertNotIn("画面已保存" if words != "画面已保存" else "画面没能保存", rt.logs[0])
+
     def test_the_dig_words_check_that_cannot_run_refuses(self):
         game = Game()
         _screen, frame, recognize = game.snapshot("dig")
@@ -480,16 +595,17 @@ class ResourceTests(unittest.TestCase):
         nodes = json.loads((ROOT / "resource_android/pipeline/android_dig.json").read_text(encoding="utf-8"))
         self.assertEqual(set(nodes), set(dig.NODES))
         words = re.compile(nodes[dig.DIG_WORDS]["expected"])
-        for text in ("挖掘", "挖 掘", "再次挖掘", "！选择物资", "选择物资", "消耗", "小时", "4小时", "加速", "立即完成"):
+        for text in ("挖掘", "挖 掘", "挖掘！", "挖掘!", "挖掘。", "！挖掘", "再次挖掘", "！选择物资", "选择物资", "消耗", "小时",
+                     "4小时", "加速", "立即完成", "确认收获", "一键收获"):
             self.assertTrue(words.search(text), text)
-        for text in ("美鸭梨挖掘", "挖掘队列", "美鸭梨", "(0/4)", "返回", "心愿原野", "采集物资：32/56"):
+        for text in ("美鸭梨挖掘", "挖掘队列", "美鸭梨挖掘！", "美鸭梨", "(0/4)", "返回", "心愿原野", "采集物资：32/56"):
             self.assertFalse(words.search(text), text)
         self.assertEqual(nodes[dig.DIG_WORDS]["roi"], [0, 0, 1280, 720])  # labels read whole, on the full frame
         entry = re.compile(nodes[dig.MENU_DIG]["expected"])
         self.assertTrue(entry.search("美鸭梨挖掘"))
         self.assertFalse(entry.search("美鸭梨快跑") or entry.search("挖掘"))
         harvest = re.compile(nodes[dig.HARVEST_LIKE]["expected"])
-        for text in ("确认收获", "一键收获", "可收获", "领取", "已完成"):
+        for text in ("确认收获", "一键收获", "可收获", "领取", "已完成", "再次挖掘"):
             self.assertTrue(harvest.search(text), text)
         # The shared list stays as it is: 挖掘 in it would refuse the menu entry 「美鸭梨挖掘」 itself.
         shared = re.compile(json.loads((ROOT / "resource_android/pipeline/android_mailbox.json")
