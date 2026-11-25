@@ -125,6 +125,15 @@ class ScreenTests(unittest.TestCase):
         for screen in (Scripted(duck=True, ocr=False), Scripted(arrow=True, ocr=False)):
             self.assertEqual(actions.read_screen(screen).kind, "unknown")
 
+    def test_brightness_is_checked_on_the_matched_icon(self):
+        for kind, icon, lit, box in (("hud", "duck", actions.HUD_DUCK_LIT, [44, 30, 54, 54]),
+                                     ("page", "arrow", actions.BACK_ARROW_LIT, [60, 40, 40, 40])):
+            with self.subTest(kind=kind):
+                recognize = Scripted(**{icon: True})
+                recognize.fixed[actions.HUD_DUCK if icon == "duck" else actions.BACK_ARROW] = hit(box)
+                self.assertEqual(actions.read_screen(recognize).kind, kind)
+                self.assertIn((lit, {"roi": box}), recognize.calls)  # not a fixed rectangle
+
     def test_the_quit_guard_is_checked_before_anything_else(self):
         recognize = Scripted(quit=True, cancel=True, duck=True)
         actions.read_screen(recognize)
@@ -224,6 +233,17 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(actions.confirm_tap(back, actions.read_screen(page), Scripted(arrow=True)), back.target)
         self.assertIsNone(actions.confirm_tap(back, actions.read_screen(page), Scripted(modal=True, arrow=True)))
         self.assertIsNone(actions.confirm_tap(back, actions.read_screen(page), Scripted(arrow=True, title="地图")))
+
+    def test_boxes_are_compared_where_they_would_be_tapped(self):
+        quit = Scripted(quit=True, cancel=True, duck=True)
+        screen = actions.read_screen(quit)
+        plan = actions.plan_tap("leave", screen, quit)
+        wider = Scripted(quit=True, cancel=True, duck=True)
+        wider.fixed[actions.QUIT_CANCEL] = hit([467, 461, 98, 40], "取消")  # corner 8 px away, centre 21 px away
+        self.assertIsNone(actions.confirm_tap(plan, screen, wider))
+        nudged = Scripted(quit=True, cancel=True, duck=True)
+        nudged.fixed[actions.QUIT_CANCEL] = hit([463, 463, 72, 40], "取消")
+        self.assertEqual(actions.confirm_tap(plan, screen, nudged), [463, 463, 72, 40])
 
     def test_unknown_actions_are_not_planned(self):
         with self.assertRaises(ValueError):

@@ -13,6 +13,7 @@
     "FrameworkTests.test_the_nodes_load_run_and_tell_the_hud_from_a_page",
     "PlanTests.test_a_shortcut_that_cannot_be_placed_is_refused",
     "PlanTests.test_an_unknown_screen_gets_no_tap",
+    "PlanTests.test_boxes_are_compared_where_they_would_be_tapped",
     "PlanTests.test_hud_actions_are_refused_off_the_hud",
     "PlanTests.test_hud_shortcuts_tap_the_icon_above_their_label",
     "PlanTests.test_menu_only_opens_and_leave_only_leaves",
@@ -35,6 +36,7 @@
     "RuntimeKeyTests.test_the_quit_guard_cancels_then_decides_again",
     "RuntimeKeyTests.test_the_tap_carries_the_confirming_frame",
     "ScreenTests.test_anything_uncertain_is_unknown",
+    "ScreenTests.test_brightness_is_checked_on_the_matched_icon",
     "ScreenTests.test_screens",
     "ScreenTests.test_the_quit_guard_is_checked_before_anything_else",
     "ScreenTests.test_without_ocr_the_quit_confirmation_is_never_the_hud"

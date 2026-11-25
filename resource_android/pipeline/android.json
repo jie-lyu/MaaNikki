@@ -50,10 +50,10 @@
   "MaaNikki_Android_BackArrowLit": {
     "recognition": "ColorMatch",
     "roi": [37, 22, 40, 40],
-    "method": 6,
-    "lower": [200],
-    "upper": [255],
-    "count": 100,
+    "method": 40,
+    "lower": [0, 0, 200],
+    "upper": [180, 255, 255],
+    "count": 120,
     "action": "DoNothing"
   },
   "MaaNikki_Android_HudLabel": {

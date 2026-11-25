@@ -121,13 +121,13 @@ def read_screen(recognize) -> Screen:
     if duck is None or arrow is None:
         return Screen("unknown", reason="左上角图标的检查没能完成")
     if _hit(duck) and not _hit(arrow):
-        if not _hit(recognize(HUD_DUCK_LIT)):
+        if not _hit(recognize(HUD_DUCK_LIT, {"roi": _box(duck)})):  # the matched icon itself, not a fixed place
             return Screen("unknown", reason="大世界的鸭子图标被压暗了，前面可能有认不出的弹窗")
         if not _hit(recognize(HUD_LABEL, {"expected": HUD_ROW_TEXT})):
             return Screen("unknown", reason="看到了大世界的鸭子图标，但读不出快捷栏的文字（文字识别可能不可用）")
         return Screen("hud", {"duck": _box(duck)})
     if _hit(arrow) and not _hit(duck):
-        if not _hit(recognize(BACK_ARROW_LIT)):
+        if not _hit(recognize(BACK_ARROW_LIT, {"roi": _box(arrow)})):
             return Screen("unknown", reason="返回箭头被压暗了，前面可能有认不出的弹窗")
         page_title = recognize(PAGE_TITLE)
         if not _hit(page_title) or _cjk(_text(page_title)) < 2:
@@ -172,15 +172,23 @@ def locate_shortcut(recognize, label: str):
     median = centres[len(centres) // 2]
     if any(abs(c - median) > LABEL_AGREEMENT for c in centres):
         return None
-    x = round(median)
-    target = [x, max(0, min(tops) - ICON_ABOVE_LABEL)]
-    # Confirm on a window centred on the chosen point: it must read this label at this place, so a point that
-    # drifted towards a neighbour (共鸣 sits next to 商城 and 奇迹之旅) is refused instead of tapped.
-    return target if _near(_label_window(recognize, label, x), target) else None
+    # The target is read again in a window about one label wide centred on the scan's estimate: it must read this
+    # label there, so a point that drifted towards a neighbour (共鸣 sits next to 商城 and 奇迹之旅) is refused
+    # instead of tapped, and the confirmation on the fresh frame measures the same way.
+    target = _label_window(recognize, label, round(median))
+    if target is None or abs(target[0] - median) > LABEL_AGREEMENT:
+        return None
+    return target
 
 
 def _near(found, target) -> bool:
-    return found is not None and all(abs(a - b) <= CONFIRM_TOLERANCE for a, b in zip(found[:2], target[:2]))
+    """Whether two targets (points or boxes) would be tapped within CONFIRM_TOLERANCE of each other: boxes are
+    compared at the point the dispatch taps, not at their corner."""
+    if found is None or target is None:
+        return False
+    from host.android import touch_point
+    a, b = touch_point(list(found)), touch_point(list(target))
+    return all(abs(x - y) <= CONFIRM_TOLERANCE for x, y in zip(a, b))
 
 
 def plan_tap(action: str, screen: Screen, recognize) -> Plan:
