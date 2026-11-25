@@ -490,6 +490,14 @@ class ResourceTests(unittest.TestCase):
                     self.assertTrue((ROOT / "resource_android" / "image" / node["template"]).is_file())
                     self.assertGreaterEqual(node["threshold"], 0.8)
         self.assertEqual(nodes[actions.HUD_LABEL]["roi"], list(actions.LABEL_ROW))
+        # The corner icons are matched on their own pixels only: the background around them changes with the scene
+        # (an unmasked duck scored 0.64 against dark trees on the device). Masked pixels are pure green.
+        import cv2
+        for name in (actions.HUD_DUCK, actions.BACK_ARROW):
+            self.assertIs(nodes[name].get("green_mask"), True, name)
+            image = cv2.imread(str(ROOT / "resource_android" / "image" / nodes[name]["template"]))
+            corners = [image[0, 0], image[0, -1], image[-1, 0], image[-1, -1]]
+            self.assertTrue(all(tuple(int(v) for v in c) == (0, 255, 0) for c in corners), name)
 
 
 FRAMEWORK_CHECK = r"""

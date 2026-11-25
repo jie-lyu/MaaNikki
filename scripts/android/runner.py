@@ -159,13 +159,13 @@ def adb_alive(adb: str, serial: str, seconds: float = 8) -> None:
 
 def methods_in_log(log_text: str) -> dict:
     """What the framework log says about the ADB input and capture methods in use (lines quoted, not parsed)."""
-    lines = [line.strip() for line in log_text.splitlines()
-             if any(word in line for word in ("Maatouch", "MaaTouch", "RawByNetcat", "Minitouch", "minitouch",
-                                              "AdbShell", "EncodeToFileAndPull", "MinicapDirect", "MinicapStream"))]
-    return {"maatouch": any("aatouch" in line for line in lines),
-            "raw_by_netcat": any("RawByNetcat" in line for line in lines),
-            "minitouch": any("initouch" in line for line in lines),
-            "lines": lines[-12:]}
+    words = ("method_vector", "method_set", "Testing ", "[method=")
+    lines = [line.strip() for line in log_text.splitlines() if any(word in line for word in words)]
+    text = "\n".join(lines)
+    return {"input": [name for name in INPUT_METHODS if f'"{name}"' in text],
+            "screencap_tested": [name for name in SCREENCAP_METHODS if f"Testing {name}" in text],
+            "maatouch": '"Maatouch"' in text, "minitouch": "initouch" in text.lower(),
+            "lines": [line[line.find("]", line.find("][", 60)) + 1:][:200] for line in lines][-8:]}
 
 
 def agent_environment(controller: dict, data_root: Path) -> dict:
@@ -265,15 +265,17 @@ def run(args) -> int:
 
 def agent_messages(data_root: Path, since: dt.datetime) -> list[str]:
     """The agent's user-facing messages written during this run (its message log under the data root)."""
-    lines = []
-    for path in sorted((data_root / "logs").glob("**/*.log")) if (data_root / "logs").is_dir() else []:
+    messages = []
+    folder = data_root / "debug" / "messages"
+    for path in sorted(folder.glob("*.log")) if folder.is_dir() else []:
         try:
-            if dt.datetime.fromtimestamp(path.stat().st_mtime).astimezone() < since:
-                continue
-            lines.extend(path.read_text(encoding="utf-8", errors="replace").splitlines()[-40:])
-        except OSError:
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                entry = json.loads(line)
+                if dt.datetime.fromisoformat(entry["timestamp"]) >= since:
+                    messages.append(str(entry.get("message", "")))
+        except (OSError, ValueError, KeyError, TypeError):
             continue
-    return lines[-40:]
+    return messages[-20:]
 
 
 def list_tasks(args) -> int:

@@ -29,7 +29,8 @@
     "template": "android/menu_duck.png",
     "roi": [0, 0, 160, 120],
     "threshold": 0.8,
-    "action": "DoNothing"
+    "action": "DoNothing",
+    "green_mask": true
   },
   "MaaNikki_Android_HudDuckLit": {
     "recognition": "ColorMatch",
@@ -45,7 +46,8 @@
     "template": "android/back_arrow.png",
     "roi": [0, 0, 160, 120],
     "threshold": 0.8,
-    "action": "DoNothing"
+    "action": "DoNothing",
+    "green_mask": true
   },
   "MaaNikki_Android_BackArrowLit": {
     "recognition": "ColorMatch",

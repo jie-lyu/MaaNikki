@@ -80,11 +80,14 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual((env["MAANIKKI_DATA_ROOT"], env["MAANIKKI_RESOURCE_ROOT"]), ("/tmp/runner-data", str(ROOT)))
 
     def test_the_log_summary_quotes_the_method_lines(self):
-        log = "\n".join(["[INF] connecting", "[INF] input method: Maatouch selected",
-                         "[INF] screencap RawByNetcat cost 102ms", "[INF] other"])
+        prefix = "[2026-11-25 22:40:14.177][INF][Px1][Tx2][InputAgent.cpp][L37][MaaNS::X]"
+        log = "\n".join([prefix + ' [methods=4] [method_vector=["Maatouch"]]',
+                         prefix + ' [methods=4] [method_set=["RawWithGzip"]]',
+                         prefix + " Testing RawWithGzip ", prefix + " other line"])
         summary = runner.methods_in_log(log)
-        self.assertEqual((summary["maatouch"], summary["raw_by_netcat"], summary["minitouch"]), (True, True, False))
-        self.assertEqual(len(summary["lines"]), 2)
+        self.assertEqual((summary["input"], summary["screencap_tested"]), (["Maatouch"], ["RawWithGzip"]))
+        self.assertEqual((summary["maatouch"], summary["minitouch"]), (True, False))
+        self.assertEqual(len(summary["lines"]), 3)
 
     def test_the_command_line(self):
         args = runner.build_parser().parse_args(["run", "MaaNikki_AndroidCheck", "--purpose", "t", "--option", "A=B"])
