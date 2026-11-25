@@ -575,35 +575,27 @@ pub fn platform_refuses_task(entry: &str) -> Option<String> {
 }
 
 /// 本次运行的游戏目标：由控制器类型（interface 中 controller.type）决定，与 agent 的 host.game_backend 规则相同。
-/// 只有 Win32、MacOS、Adb 三种类型参与判断，其他类型（Gamepad、PlayCover 等）按当前系统的原规则处理。
+/// 只有 Win32、MacOS、Adb 三种类型决定目标，其他类型（Gamepad、PlayCover 等）按当前系统的原规则处理。
 /// Windows 上只会出现 Win32 控制器，macOS 上只会出现 MacOS 控制器，这两种情况下结果与原来完全相同。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GameTarget {
     Win32,
     MacOS,
     Adb,
-    /// 无效的控制器定义（PI_CONTROLLER 不是带 type 的 JSON 对象）。
+    /// 无效的控制器定义（PI_CONTROLLER 不是带非空 type 的 JSON 对象）。
     Malformed,
 }
 
 impl GameTarget {
-    fn from_type(kind: &str) -> Option<GameTarget> {
+    fn from_kind(kind: &ControllerKind) -> Option<GameTarget> {
         match kind {
-            "Win32" => Some(GameTarget::Win32),
-            "MacOS" => Some(GameTarget::MacOS),
-            "Adb" => Some(GameTarget::Adb),
-            _ => None,
-        }
-    }
-
-    /// 已连接的控制器对应的目标；其他类型返回 None（按当前系统的原规则）。
-    pub fn of_connection(config: &super::types::ControllerConfig) -> Option<GameTarget> {
-        use super::types::ControllerConfig;
-        match config {
-            ControllerConfig::Win32 { .. } => Some(GameTarget::Win32),
-            ControllerConfig::MacOS { .. } => Some(GameTarget::MacOS),
-            ControllerConfig::Adb { .. } => Some(GameTarget::Adb),
-            _ => None,
+            ControllerKind::Malformed => Some(GameTarget::Malformed),
+            ControllerKind::Type(t) => match t.as_str() {
+                "Win32" => Some(GameTarget::Win32),
+                "MacOS" => Some(GameTarget::MacOS),
+                "Adb" => Some(GameTarget::Adb),
+                _ => None,
+            },
         }
     }
 
@@ -619,22 +611,53 @@ impl GameTarget {
     }
 }
 
-/// 提交的控制器决定的游戏目标：优先用传给 agent 的 PI_CONTROLLER（agent 按它判断），其次用前端传来的
-/// 控制器类型。PI_CONTROLLER 存在但不是有效的控制器定义时返回 Malformed（拒绝运行，与 agent 相同）。
-pub fn submitted_game_target(
+/// 控制器的类型：提交的控制器定义里的 type，或已连接控制器的种类。比较是否一致时保留原样，
+/// 包括不决定目标的类型（Gamepad 等），这样「提交 Win32、连接 Gamepad」也算不一致。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ControllerKind {
+    Malformed,
+    Type(String),
+}
+
+impl ControllerKind {
+    /// 已连接的控制器的种类，名称与 interface 的 controller.type 相同。
+    pub fn of_connection(config: &super::types::ControllerConfig) -> ControllerKind {
+        use super::types::ControllerConfig;
+        ControllerKind::Type(
+            match config {
+                ControllerConfig::Adb { .. } => "Adb",
+                ControllerConfig::Win32 { .. } => "Win32",
+                ControllerConfig::MacOS { .. } => "MacOS",
+                ControllerConfig::WlRoots { .. } => "WlRoots",
+                ControllerConfig::Gamepad { .. } => "Gamepad",
+                ControllerConfig::PlayCover { .. } => "PlayCover",
+                ControllerConfig::Linux { .. } => "Linux",
+            }
+            .to_string(),
+        )
+    }
+
+    pub fn of_instance(config: Option<&super::types::ControllerConfig>) -> Option<ControllerKind> {
+        config.map(ControllerKind::of_connection)
+    }
+}
+
+/// 提交的控制器的类型：优先用传给 agent 的 PI_CONTROLLER（agent 按它判断），其次用前端传来的类型。
+/// PI_CONTROLLER 存在但不是带非空 type 的 JSON 对象时为 Malformed（拒绝运行，与 agent 相同）。
+pub fn submitted_controller_kind(
     pi_envs: Option<&std::collections::HashMap<String, String>>,
     controller_type: Option<&str>,
-) -> Option<GameTarget> {
+) -> Option<ControllerKind> {
     if let Some(raw) = pi_envs.and_then(|envs| envs.get("PI_CONTROLLER")) {
         let kind = serde_json::from_str::<serde_json::Value>(raw)
             .ok()
             .and_then(|value| value.get("type").and_then(|t| t.as_str()).map(str::to_owned));
-        return match kind {
-            Some(kind) => GameTarget::from_type(&kind),
-            None => Some(GameTarget::Malformed),
-        };
+        return Some(match kind {
+            Some(kind) if !kind.is_empty() => ControllerKind::Type(kind),
+            _ => ControllerKind::Malformed,
+        });
     }
-    controller_type.and_then(GameTarget::from_type)
+    controller_type.filter(|t| !t.is_empty()).map(|t| ControllerKind::Type(t.to_string()))
 }
 
 /// 控制器本身就不能运行任务时的原因（与任务入口无关）；能运行时返回 None。
@@ -648,12 +671,12 @@ fn controller_refusal(host: Option<GameTarget>, target: Option<GameTarget>) -> O
     }
 }
 
-/// 一批任务的准入：以已连接的控制器为准，提交的控制器与它不一致时整批拒绝；控制器本身不能运行时
+/// 一批任务的准入：以已连接的控制器为准，提交的控制器与它的类型不一致时整批拒绝；控制器本身不能运行时
 /// 整批拒绝（即使没有任务）；否则逐个入口按当前系统的规则判断。
 fn admit_batch_on(
     host: Option<GameTarget>,
-    connected: Option<GameTarget>,
-    submitted: Option<GameTarget>,
+    connected: Option<&ControllerKind>,
+    submitted: Option<&ControllerKind>,
     entries: &[&str],
     host_rules: impl Fn(&str) -> Option<String>,
 ) -> Result<Vec<Option<String>>, String> {
@@ -662,7 +685,7 @@ fn admit_batch_on(
             return Err("所选的控制器与当前连接的不一致，请重新连接后再运行。".to_string());
         }
     }
-    if let Some(reason) = controller_refusal(host, connected.or(submitted)) {
+    if let Some(reason) = controller_refusal(host, connected.or(submitted).and_then(GameTarget::from_kind)) {
         return Err(reason);
     }
     Ok(entries.iter().map(|entry| host_rules(entry)).collect())
@@ -670,19 +693,26 @@ fn admit_batch_on(
 
 /// start_tasks 的准入（手动开始和定时运行都经过这里）。Ok 里是每个入口的拒绝原因（None 表示可以运行）。
 pub fn admit_tasks(
-    connected: Option<GameTarget>,
-    submitted: Option<GameTarget>,
+    connected: Option<&ControllerKind>,
+    submitted: Option<&ControllerKind>,
     entries: &[&str],
 ) -> Result<Vec<Option<String>>, String> {
     admit_batch_on(GameTarget::host(), connected, submitted, entries, platform_refuses_task)
 }
 
 /// 运行中追加单个任务的准入：只看已连接的控制器。
-pub fn target_refuses_task(connected: Option<GameTarget>, entry: &str) -> Option<String> {
+pub fn target_refuses_task(connected: Option<&ControllerKind>, entry: &str) -> Option<String> {
     match admit_batch_on(GameTarget::host(), connected, None, &[entry], platform_refuses_task) {
         Ok(mut reasons) => reasons.pop().flatten(),
         Err(reason) => Some(format!("{}已跳过 {}。", reason, entry)),
     }
+}
+
+/// 准入之后、真正绑定控制器下发任务之前（在同一把锁里）再核对一次：连接的控制器种类必须与准入时相同。
+pub const CONNECTION_CHANGED: &str = "开始之前当前连接的控制器发生了变化，请重新开始。";
+
+pub fn connection_unchanged(admitted: Option<&ControllerKind>, now: Option<&super::types::ControllerConfig>) -> bool {
+    admitted == ControllerKind::of_instance(now).as_ref()
 }
 
 /// 获取应用数据目录
@@ -1001,7 +1031,11 @@ mod preview_task_tests {
         assert_eq!(super::macos_task_tiers(), super::task_tiers_view(manifest));
     }
 
-    use super::{admit_batch_on, admit_tasks, submitted_game_target, target_refuses_task, GameTarget};
+    use super::{admit_batch_on, admit_tasks, submitted_controller_kind, target_refuses_task, ControllerKind, GameTarget};
+
+    fn kind(t: &str) -> Option<ControllerKind> {
+        Some(ControllerKind::Type(t.to_string()))
+    }
 
     fn envs(controller: &str) -> std::collections::HashMap<String, String> {
         std::collections::HashMap::from([("PI_CONTROLLER".to_string(), controller.to_string())])
@@ -1031,20 +1065,23 @@ mod preview_task_tests {
     const ADB: &str = r#"{"name":"nikki_android","type":"Adb"}"#;
 
     /// Windows itself: the production admission (start_tasks, manual and scheduled) and the append path admit
-    /// every shipped entry with the Win32 controller, connected or not, submitted or not.
+    /// every shipped entry, plus the start-game pretask entry and MXU's built-in launch task, with the Win32
+    /// controller connected or not, submitted or not.
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_admits_every_shipped_task_as_before() {
-        let entries = shipped_entries();
+        let mut entries = shipped_entries();
+        entries.extend(["MaaNikki_StartGame".to_string(), "MXU_LAUNCH".to_string()]);
         let refs: Vec<&str> = entries.iter().map(String::as_str).collect();
-        let windows = Some(GameTarget::Win32);
-        for (connected, submitted) in [(windows, submitted_game_target(Some(&envs(WINDOWS)), None)),
-                                       (None, windows), (windows, None), (None, None)] {
-            let admitted = admit_tasks(connected, submitted, &refs).unwrap();
+        let windows = kind("Win32");
+        let submitted = submitted_controller_kind(Some(&envs(WINDOWS)), None);
+        assert_eq!(submitted, windows);
+        for (connected, submitted) in [(&windows, &submitted), (&None, &windows), (&windows, &None), (&None, &None)] {
+            let admitted = admit_tasks(connected.as_ref(), submitted.as_ref(), &refs).unwrap();
             assert!(admitted.iter().all(Option::is_none), "{:?} {:?}", connected, submitted);
         }
         for entry in &refs {
-            assert_eq!(target_refuses_task(windows, entry), None);
+            assert_eq!(target_refuses_task(windows.as_ref(), entry), None);
             assert_eq!(target_refuses_task(None, entry), None);
         }
     }
@@ -1053,65 +1090,91 @@ mod preview_task_tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_admission_with_its_controller_matches_the_host_rules() {
-        let entries = shipped_entries();
+        let mut entries = shipped_entries();
+        entries.extend(["MaaNikki_StartGame".to_string(), "MXU_LAUNCH".to_string()]);
         let refs: Vec<&str> = entries.iter().map(String::as_str).collect();
         let expected: Vec<Option<String>> = refs.iter().map(|e| super::platform_refuses_task(e)).collect();
-        let macos = submitted_game_target(Some(&envs(MACOS)), None);
-        assert_eq!(macos, Some(GameTarget::MacOS));
-        for (connected, submitted) in [(macos, macos), (None, macos), (macos, None), (None, None)] {
-            assert_eq!(admit_tasks(connected, submitted, &refs).unwrap(), expected);
+        let macos = submitted_controller_kind(Some(&envs(MACOS)), None);
+        assert_eq!(macos, kind("MacOS"));
+        for (connected, submitted) in [(&macos, &macos), (&None, &macos), (&macos, &None), (&None, &None)] {
+            assert_eq!(admit_tasks(connected.as_ref(), submitted.as_ref(), &refs).unwrap(), expected);
         }
         for (entry, reason) in refs.iter().zip(&expected) {
-            assert_eq!(&target_refuses_task(macos, entry), reason);
+            assert_eq!(&target_refuses_task(macos.as_ref(), entry), reason);
         }
     }
 
     #[test]
     fn the_host_rules_apply_unchanged_for_the_hosts_own_controller() {
         let refusing = |e: &str| if e == "B" { Some("no B".to_string()) } else { None };
-        for host in [GameTarget::Win32, GameTarget::MacOS] {
-            for (connected, submitted) in [(Some(host), Some(host)), (None, Some(host)), (Some(host), None), (None, None)] {
-                assert_eq!(admit_batch_on(Some(host), connected, submitted, &["A", "B"], refusing).unwrap(),
-                           vec![None, Some("no B".to_string())]);
+        for (host, name) in [(GameTarget::Win32, "Win32"), (GameTarget::MacOS, "MacOS")] {
+            let own = kind(name);
+            for (connected, submitted) in [(&own, &own), (&None, &own), (&own, &None), (&None, &None)] {
+                assert_eq!(admit_batch_on(Some(host), connected.as_ref(), submitted.as_ref(), &["A", "B"], refusing)
+                               .unwrap(), vec![None, Some("no B".to_string())]);
             }
         }
     }
 
     #[test]
-    fn other_controller_types_keep_the_host_rules() {
-        // Gamepad, PlayCover, WlRoots… are not targets: they behave exactly as before.
-        for kind in ["Gamepad", "PlayCover", "WlRoots"] {
-            let raw = format!(r#"{{"name":"x","type":"{}"}}"#, kind);
-            assert_eq!(submitted_game_target(Some(&envs(&raw)), None), None, "{}", kind);
-            assert_eq!(submitted_game_target(None, Some(kind)), None, "{}", kind);
-        }
+    fn other_controller_types_keep_the_host_rules_but_must_match() {
         let admit_all = |_: &str| None;
-        assert_eq!(admit_batch_on(Some(GameTarget::Win32), None, None, &["A"], admit_all).unwrap(), vec![None]);
+        for name in ["Gamepad", "PlayCover", "WlRoots"] {
+            let raw = format!(r#"{{"name":"x","type":"{}"}}"#, name);
+            let submitted = submitted_controller_kind(Some(&envs(&raw)), None);
+            assert_eq!(submitted, kind(name));
+            // Same type connected: the host rules, as before.
+            assert_eq!(admit_batch_on(Some(GameTarget::Win32), kind(name).as_ref(), submitted.as_ref(), &["A"],
+                                      admit_all).unwrap(), vec![None]);
+            // A Win32 request while a legacy controller is connected (or the reverse) is a mismatch.
+            assert!(admit_batch_on(Some(GameTarget::Win32), kind(name).as_ref(), kind("Win32").as_ref(), &["A"],
+                                   admit_all).is_err());
+            assert!(admit_batch_on(Some(GameTarget::Win32), kind("Win32").as_ref(), submitted.as_ref(), &["A"],
+                                   admit_all).is_err());
+        }
     }
 
     #[test]
     fn adb_mismatched_and_malformed_controllers_are_refused_as_a_batch() {
         let admit_all = |_: &str| None;
-        let adb = submitted_game_target(Some(&envs(ADB)), None);
-        assert_eq!(adb, Some(GameTarget::Adb));
-        for host in [GameTarget::Win32, GameTarget::MacOS] {
+        let adb = submitted_controller_kind(Some(&envs(ADB)), None);
+        assert_eq!(adb, kind("Adb"));
+        for (host, name) in [(GameTarget::Win32, "Win32"), (GameTarget::MacOS, "MacOS")] {
             // Refused even with no tasks: a batch must not start up an agent for a controller that cannot run.
             for entries in [&["MaaNikki_Mailbox"][..], &[][..]] {
-                let reason = admit_batch_on(Some(host), adb, adb, entries, admit_all).unwrap_err();
+                let reason = admit_batch_on(Some(host), adb.as_ref(), adb.as_ref(), entries, admit_all).unwrap_err();
                 assert!(reason.contains("安卓"), "{}", reason);
-                assert!(admit_batch_on(Some(host), adb, None, entries, admit_all).is_err());
+                assert!(admit_batch_on(Some(host), adb.as_ref(), None, entries, admit_all).is_err());
+                assert!(admit_batch_on(Some(host), None, adb.as_ref(), entries, admit_all).is_err());
             }
             // Connected to an emulator while the request says the desktop controller (stale or missing metadata).
-            assert!(admit_batch_on(Some(host), Some(GameTarget::Adb), Some(host), &["A"], admit_all).is_err());
+            assert!(admit_batch_on(Some(host), adb.as_ref(), kind(name).as_ref(), &["A"], admit_all).is_err());
         }
-        assert!(admit_batch_on(Some(GameTarget::MacOS), Some(GameTarget::Win32), None, &["A"], admit_all).is_err());
-        assert!(admit_batch_on(Some(GameTarget::Win32), Some(GameTarget::MacOS), None, &["A"], admit_all).is_err());
-        for bad in ["{", "[]", r#"{"type":3}"#, r#"{"name":"x"}"#] {
-            let target = submitted_game_target(Some(&envs(bad)), Some("Win32"));
-            assert_eq!(target, Some(GameTarget::Malformed), "{}", bad);
-            assert!(admit_batch_on(Some(GameTarget::Win32), None, target, &["A"], admit_all).is_err());
+        assert!(admit_batch_on(Some(GameTarget::MacOS), kind("Win32").as_ref(), None, &["A"], admit_all).is_err());
+        assert!(admit_batch_on(Some(GameTarget::Win32), kind("MacOS").as_ref(), None, &["A"], admit_all).is_err());
+        for bad in ["{", "[]", r#"{"type":3}"#, r#"{"name":"x"}"#, r#"{"type":""}"#] {
+            let submitted = submitted_controller_kind(Some(&envs(bad)), Some("Win32"));
+            assert_eq!(submitted, Some(ControllerKind::Malformed), "{}", bad);
+            assert!(admit_batch_on(Some(GameTarget::Win32), None, submitted.as_ref(), &["A"], admit_all).is_err());
         }
-        assert!(target_refuses_task(Some(GameTarget::Adb), "X").unwrap().contains("已跳过 X"));
+        assert_eq!(submitted_controller_kind(None, Some("")), None);
+        assert_eq!(submitted_controller_kind(None, None), None);
+        assert!(target_refuses_task(kind("Adb").as_ref(), "X").unwrap().contains("已跳过 X"));
+    }
+
+    #[test]
+    fn the_connection_is_rechecked_before_binding() {
+        use super::super::types::ControllerConfig;
+        let win32 = ControllerConfig::Win32 { handle: 1, screencap_method: 1, screencap_fallbacks: vec![],
+                                              mouse_method: 1, keyboard_method: 1, display_short_side: None };
+        let adb = ControllerConfig::Adb { adb_path: "adb".into(), address: "127.0.0.1:5555".into(),
+                                          screencap_methods: "8".into(), input_methods: "4".into(),
+                                          config: "{}".into(), display_short_side: None };
+        assert!(super::connection_unchanged(kind("Win32").as_ref(), Some(&win32)));
+        assert!(!super::connection_unchanged(kind("Win32").as_ref(), Some(&adb)));
+        assert!(!super::connection_unchanged(None, Some(&adb)));  // connected after admission
+        assert!(!super::connection_unchanged(kind("Win32").as_ref(), None));
+        assert!(super::connection_unchanged(None, None));
     }
 
     #[test]

@@ -461,6 +461,12 @@ async fn start_single_agent(
         // PI v2.5.0: 仅允许注入 PI_* 环境变量，避免覆盖宿主进程关键环境。
         let mut injected_count = 0usize;
         for (key, value) in pi_envs.iter() {
+            // Windows 的环境变量名不分大小写：大小写不同的 PI_CONTROLLER 会被 agent 当作它，而准入只认
+            // 精确的名字，两边会不一致。
+            if key != "PI_CONTROLLER" && key.eq_ignore_ascii_case("PI_CONTROLLER") {
+                warn!("[agent#{}] Skipping {}: only PI_CONTROLLER names the run's controller", agent_index, key);
+                continue;
+            }
             if !key.starts_with("PI_") {
                 warn!(
                     "[agent#{}] Skipping non-PI_ env key from pi_envs: {}",
@@ -644,17 +650,16 @@ pub async fn start_tasks_impl(
     // 两者都没有时按当前系统。控制器本身不能运行时整批拒绝，即使没有任务。
     let connected = {
         let instances = maa_state.instances.lock().map_err(|e| e.to_string())?;
-        instances
-            .get(&instance_id)
-            .and_then(|inst| inst.controller_config.as_ref())
-            .and_then(super::utils::GameTarget::of_connection)
+        super::utils::ControllerKind::of_instance(
+            instances.get(&instance_id).and_then(|inst| inst.controller_config.as_ref()),
+        )
     };
-    let submitted = super::utils::submitted_game_target(
+    let submitted = super::utils::submitted_controller_kind(
         pi_envs.as_ref(),
         controller_info.as_ref().and_then(|info| info.type_name.as_deref()),
     );
     let entries: Vec<&str> = tasks.iter().map(|task| task.entry.as_str()).collect();
-    let refusals = match super::utils::admit_tasks(connected, submitted, &entries) {
+    let refusals = match super::utils::admit_tasks(connected.as_ref(), submitted.as_ref(), &entries) {
         Ok(refusals) => refusals,
         Err(reason) => {
             emit_agent_output(&app, &instance_id, "stderr", &reason);
@@ -761,6 +766,12 @@ pub async fn start_tasks_impl(
             .ok_or("Controller not connected")?
             .clone();
         debug!("[start_tasks] Controller acquired");
+
+        // 准入看的是开始时的连接；在绑定控制器、改动任何状态之前，在这把锁里确认它没有换成别的控制器。
+        // 同一份配置的重连（上面的刷新）种类不变，不受影响。
+        if !super::utils::connection_unchanged(connected.as_ref(), instance.controller_config.as_ref()) {
+            return Err(super::utils::CONNECTION_CHANGED.to_string());
+        }
 
         // Mac：重连期间用户已停止这次启动，不能清掉停止标记把新的代数当作自己的。
         if mac_token.is_some_and(|token| !super::mac_connection::start_owned(instance.macos_run, token)) {

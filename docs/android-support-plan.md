@@ -313,7 +313,7 @@ Windows 打包现在复制整个 `agent/`，只排除 `agent/host/macos`（`scri
 
 | 步骤 | 内容 | 单独的通过标准 |
 | --- | --- | --- |
-| B1 目标后端选择 | agent：`host.game_backend()` 按提交的控制器（`PI_CONTROLLER`）决定游戏目标，涉及游戏目标的调用点改用它，工作线程、剪贴板、凭据存储仍按主机系统；客户端 Rust：任务准入按所选控制器类型决定（Win32 放行、MacOS 读 Mac 清单、Adb 在这一步一律拒绝并说明「还在开发中」、没有控制器信息时维持原来按主机系统的规则）。不加入任何安卓行为。 | Windows CI 绿；离线测试的每项结果与改动前相同（本机前后对比）；正向的 Win32 测试：真实准入路径（agent 的守卫和 Rust 的准入函数，含定时运行走的 `start_tasks_impl`）、整数键码下发不变、`Asset` 只查主资源；`cargo test --lib` 本机通过（两条 CI 都不跑 Rust 测试，报告里写明）。 |
+| B1 目标后端选择 | agent：`host.game_backend()` 按提交的控制器（`PI_CONTROLLER`）决定游戏目标，涉及游戏目标的调用点改用它，工作线程、剪贴板、凭据存储仍按主机系统；客户端 Rust：任务准入按所选控制器类型决定（Win32 放行、MacOS 读 Mac 清单、Adb 在这一步一律拒绝并说明「还在开发中」、没有控制器信息时维持原来按主机系统的规则）。不加入任何安卓行为。 | Windows CI 绿；离线测试的每项结果与改动前相同（本机前后对比）；正向的 Win32 测试：真实准入路径（agent 的守卫和 Rust 的准入函数，含定时运行走的 `start_tasks_impl`）、整数键码下发不变、`Asset` 只查主资源；`cargo test --lib` 通过（Windows CI 会跑 `cargo check` 和 `cargo test --lib`，其中有只在 Windows 上编译的准入测试）。 |
 | B2 安卓后端骨架与打包排除 | `agent/host/android/`（能力清单、设备焦点、任务清单含一个只读检查任务）；Adb 目标改为选到它；Windows 包排除安卓文件。 | Windows 包文件清单不变；Win32/MacOS 路径的测试结果不变。 |
 | B3 分层资源 | `resource_android/`、有序资源根、索引合并、两层资源在第一次识别前加载完。 | 只有主资源时查找结果与改动前逐项相同。 |
 | B4 下发路径拦截与动作骨架 | 按名字的动作和整数键码在安卓目标上的拦截；HUD 入口、页面专用的关闭动作、退出确认框守卫、BACK 规则。 | Win32 和 MacOS 目标上的按键与动作路径测试结果不变。 |

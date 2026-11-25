@@ -165,13 +165,14 @@ class Win32UnchangedTests(unittest.TestCase):
             self.assertTrue(host.capabilities(host.game_backend()).tall_window)
 
     def test_assets_resolve_in_the_main_resource_only(self):
-        # The root a Runtime hands its GameUI (daily/runtime.py), not one chosen by the test.
+        # The GameUI a real Runtime builds, with the root it chooses, not one chosen by the test.
         from app_paths import RESOURCE_ROOT
-        from daily.runtime import RESOURCE as resource
-        from daily.ui import GameUI, catalog
-        self.assertEqual(resource, RESOURCE_ROOT / "resource")
-        with desktop("win32", WINDOWS_CONTROLLER):
-            ui = GameUI(None, resource)
+        from daily.runtime import Runtime
+        from daily.ui import catalog
+        resource = RESOURCE_ROOT / "resource"
+        with desktop("win32", WINDOWS_CONTROLLER), patch("daily.runtime.active_session", return_value=None):
+            ui = Runtime(SimpleNamespace(tasker=SimpleNamespace(controller=None))).ui
+            self.assertEqual(ui.resource, resource)
             self.assertEqual(ui.asset_path("game/ui/AreaDialog.png"),
                              (resource / "image" / "game/ui/AreaDialog.png").resolve())
             self.assertEqual(catalog(resource)["assets"]["AreaDialog"]["template"], "game/ui/AreaDialog.png")

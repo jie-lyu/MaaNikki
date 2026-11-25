@@ -655,6 +655,8 @@ pub async fn run_pretask(
     cmd.env("PYTHONIOENCODING", "utf-8");
     cmd.env("PYTHONUTF8", "1");
     super::utils::apply_agent_root_env(&mut cmd);
+    // 前置任务不是某次提交的运行：不把客户端环境里继承来的 PI_CONTROLLER 交给它（agent 会按它选游戏目标）。
+    cmd.env_remove("PI_CONTROLLER");
     if let Some(guard_channel) = crate::mouse_guard::ensure_server_channel() {
         cmd.env("MAANIKKI_MOUSE_GUARD_CHANNEL", guard_channel);
     }
