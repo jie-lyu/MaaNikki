@@ -158,41 +158,6 @@ def agent_action(name, *, stop_on_failure=False):
     return register
 
 
-def _frame_key(image):
-    """A cheap fingerprint of the frame MaaFramework handed a callback (sampled pixels and shape)."""
-    import hashlib
-    sample = image[::16, ::16]
-    return hashlib.blake2b(sample.tobytes(), digest_size=16).hexdigest() + repr(image.shape)
-
-
-def _frame_with_device_focus(session, original, attempts=3):
-    """A frame captured while the game had focus on the device both right before and right after the capture,
-    or None.
-
-    MaaFramework captured ``original`` before this callback; on a device another app may have been in front then
-    even if the game has focus now. Every callback handed the same original frame (the children of an And/Or
-    node, for example) gets the same replacement, so one decision is never made from two different frames.
-    """
-    key = _frame_key(original) if original is not None and getattr(original, "size", 0) else None
-    cached = getattr(session, "focused_frame", None)
-    if key is not None and cached is not None and cached[0] == key:
-        return cached[1]
-    adapter = session.ensure_adapter()
-    for _ in range(attempts):
-        session.wait(adapter, require_foreground=True)
-        # wait() returns at once inside another wait or in background observation: read focus explicitly.
-        if not adapter.foreground():
-            continue
-        captured = session.controller.post_screencap().wait()
-        if not captured.succeeded:
-            return None
-        image = captured.get()  # the controller's latest image: read it before the final focus check
-        if image is not None and getattr(image, "size", 0) and adapter.foreground():
-            session.focused_frame = (key, image)
-            return image
-    return None
-
-
 def agent_recognition(name):
     def register(cls):
         analyze = cls.analyze
@@ -212,12 +177,6 @@ def agent_recognition(name):
                                 return None
                             argv = copy(argv)
                             argv.image = captured.get()
-                        if session and capabilities(game_backend()).frames_follow_device_focus:
-                            image = _frame_with_device_focus(session, argv.image)
-                            if image is None:
-                                return None
-                            argv = copy(argv)
-                            argv.image = image
                         pause_generation = session.pause_generation if session else 0
                         generation = session.generation if session else 0
                         if session and argv.image is not None and argv.image.size and not session.stopped():

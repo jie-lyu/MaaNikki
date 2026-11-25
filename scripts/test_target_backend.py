@@ -201,7 +201,6 @@ class Win32FocusLostModeTests(unittest.TestCase):
                 self.assertEqual(focus_lost_mode("return"), "return")
                 self.assertEqual(focus_lost_mode("pause"), "pause")
                 self.assertEqual(focus_lost_mode("background"), "background" if name == "win32" else "pause")
-                self.assertFalse(host.capabilities(host.game_backend()).frames_follow_device_focus)
 
 
 class Win32SessionStartupTests(unittest.TestCase):

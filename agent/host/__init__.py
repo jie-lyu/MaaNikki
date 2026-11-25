@@ -75,9 +75,6 @@ class Capabilities:
     # The "return to the game" choice for focus loss is offered (Win32 brings the window back; macOS keeps its
     # existing behaviour). Without it a saved "return" behaves like "pause".
     refocus_game: bool = False
-    # A frame shows the game only while the game has focus on the device (Android): a custom recognition gets a
-    # frame captured after that focus was confirmed, never the one MaaFramework took before the check.
-    frames_follow_device_focus: bool = False
 
 
 UNSUPPORTED = Capabilities("unsupported")
