@@ -462,20 +462,21 @@ def back_through(rt, titles, attempts: int = 3) -> bool:
     return False
 
 
-def tap_on_layer(rt, what: str, accept, point, *, delay: float = .5) -> bool:
+def tap_on_layer(rt, what: str, accept, point, *, delay: float = .5, verify=None) -> bool:
     """Tap the fixed ``point`` on a screen that is not a page (e.g. a reward layer that closes on a tap on blank
     space), with the rules of tap_on_page: ``accept(screen, recognize)`` must recognise the layer on the deciding
     frame and again on a fresh confirming frame, no forbidden label may come within FORBIDDEN_MARGIN of the point on
     either, both frames must still be valid, and the tap carries the confirming frame. False when the run stopped;
     LayerMismatch (nothing sent, no second attempt) with the first tap frame that is not the layer; GuardRefusal next
-    to a forbidden word. Only a frame voided by a focus change is decided again."""
+    to a forbidden word. Only a frame voided by a focus change is decided again. ``verify(frame)``, when given, must
+    hold on both frames too (e.g. no input strip across the point), else LayerMismatch with that frame."""
     from task_control import ForegroundChanged
     box = [int(point[0]), int(point[1]), 1, 1]
     for _attempt in range(rt.TOUCH_KEY_ATTEMPTS):
         screen, decided, recognize = screen_now(rt)
         if decided is None:
             return False
-        if not accept(screen, recognize):
+        if not accept(screen, recognize) or (verify is not None and not verify(decided)):
             raise LayerMismatch(f"当前画面不是{what}", screen, decided, recognize)
         word = _forbidden_near(recognize, box)
         if word:
@@ -485,7 +486,7 @@ def tap_on_layer(rt, what: str, accept, point, *, delay: float = .5) -> bool:
         fresh, confirming, recognize_b = screen_now(rt)
         if confirming is None:
             return False
-        if not accept(fresh, recognize_b):
+        if not accept(fresh, recognize_b) or (verify is not None and not verify(confirming)):
             raise LayerMismatch(f"确认时画面已经不是{what}", fresh, confirming, recognize_b)
         word = _forbidden_near(recognize_b, box)
         if word:
@@ -604,7 +605,12 @@ def send_text(rt, text: str, source_frame) -> bool:
             except BaseException as error:
                 state.record_touch(TEXT_ACTION, fields, f"raised {type(error).__name__}")
                 rt._halt_unconfirmed()
-                raise
+                if not isinstance(error, Exception):
+                    raise
+                # Always reported as an unconfirmed input, whatever was raised (as Runtime._dispatch_touch does): no
+                # handler that turns an ordinary error into a failure result or a quiet stop may hide it.
+                raise InputUnconfirmed(f"安卓模拟器上的文字输入发出后没能确认完成（{type(error).__name__}: {error}），"
+                                       "输入框里是什么不确定，已停止所有输入；请检查模拟器后重新启动 MaaNikki。") from error
             state.record_touch(TEXT_ACTION, fields, "sent" if succeeded else "failed")
         finally:
             if not sent:

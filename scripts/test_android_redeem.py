@@ -93,13 +93,19 @@ class Game:
 
     def __init__(self, results=(), *, field="", typed=None, forbidden=(), screens=None, stop_on=None, start="hud",
                  banner_reads=2, tab="settings", settle_after=None, close_to="scrolled", fade_reads=0,
-                 result_field=None, with_banner=None):
+                 result_field=None, with_banner=None, layer_stays=False, dismiss_field=None, layer_text=False,
+                 layer_strip=False):
         self.where, self.field, self.focused, self.banner, self.banner_left = start, field, False, "", 0
         self.results, self.typed, self.forbidden = list(results), typed, list(forbidden)
         self.screens, self.stop_on, self.banner_reads, self.tab = dict(screens or {}), stop_on, banner_reads, tab
         self.settle_after, self.other_reads, self.close_to = settle_after, 0, close_to
         self.touches, self.texts, self.rt = [], [], None
         self.fade_reads, self.fade_left, self.result_field, self.with_banner = fade_reads, 0, result_field, with_banner
+        # The success layer: ``layer_stays`` (the dismissal tap does nothing), ``dismiss_field`` (what the field reads
+        # once the modal is back), ``layer_text`` (text read around the dismissal point), ``layer_strip`` (the input
+        # strip still open under the layer).
+        self.layer_stays, self.dismiss_field, self.layer_text, self.layer_strip = (layer_stays, dismiss_field,
+                                                                                   layer_text, layer_strip)
 
     def frame(self):
         frame = np.zeros((720, 1280, 3), np.uint8)
@@ -109,6 +115,8 @@ class Game:
             if self.field:
                 x, y, w, h = redeem.USE_FACE
                 frame[y:y + h, x:x + w] = GOLD
+        if self.where == "layer" and self.layer_strip:
+            frame[665:720, :] = 255
         if self.where == "banner":
             frame[192:232, 310:970] = PINK
         if self.where == "fade":  # about half the band still pink: neither a banner nor gone
@@ -157,6 +165,8 @@ class Game:
             return result([row("使用", USE)]) if body else MISS
         if node == redeem.BANNER:
             return result([row(self.banner, BANNER)]) if where == "banner" else MISS
+        if node == actions.PAGE_TITLE and (override or {}).get("roi") == redeem.DISMISS_CLEAR:
+            return result([row("活动", [560, 670, 60, 24])]) if where == "layer" and self.layer_text else MISS
         if node in (redeem.LAYER_TITLE, redeem.LAYER_HINT):
             layer = where == "layer" or (where == "banner" and self.with_banner == "layer")
             return result([row("恭喜获得", [570, 165, 136, 42])]) if layer else MISS
@@ -232,6 +242,11 @@ class Game:
                 self.where, self.banner, self.banner_left = "banner", BANNERS[outcome], self.banner_reads
                 self.restore_field = self.field
                 self.field = self.result_field or self.field
+        elif target == list(redeem.DISMISS_POINT) and self.where == "layer":
+            what = "dismiss"
+            if not self.layer_stays:
+                self.where = "modal"
+                self.field = self.dismiss_field or self.field
         elif target == CLOSE and self.where == "modal":
             self.where, what = self.close_to, "close"
         elif target == BACK and self.where in ("scrolled", "menu"):
@@ -357,7 +372,7 @@ class FlowTests(unittest.TestCase):
 
     def test_an_unknown_result_or_a_reward_layer_stops_with_that_frame_and_records_nothing(self):
         for results, words in ((["nothing"], "没有看到认得的提示条"), (["other"], "提示条认不出：「请输入兑换码」"),
-                               (["popup"], "认不出的画面"), (["layer"], "没有记录，也没有点")):
+                               (["popup"], "认不出的画面")):
             with self.subTest(results=results):
                 game = Game(results)
                 outcome, rt = play(game, ("ABC123", "NEXT"))
@@ -420,6 +435,35 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(game.touches[-1], "close")
         self.assertIs(stops(rt)[0].kwargs["image"], QUIT[1])
 
+    def test_a_success_layer_is_dismissed_once_and_recorded_after_the_modal_shows_the_code_again(self):
+        game = Game(["already_used", "layer", "expired"])
+        outcome, rt = play(game, ("USED1", "为暖暖攒下生日祝福", "OLD3"))
+        self.assertTrue(outcome, rt.logs)
+        self.assertEqual(rt.record, {"USED1": "already_used", "为暖暖攒下生日祝福": "redeemed", "OLD3": "expired"})
+        self.assertEqual(game.touches.count("dismiss"), 1)
+        at = game.touches.index("dismiss")
+        self.assertEqual(game.touches[at - 1:at + 3], ["use", "dismiss", "clear", "field"])  # then the next code
+        self.assertIn("兑换码「为暖暖攒下生日祝福」兑换成功。", rt.logs)
+        self.assertIn("兑换码领取：成功兑换 1 个兑换码。", rt.logs)
+
+    def test_a_success_layer_that_cannot_be_confirmed_records_nothing(self):
+        for options, touched, words in (
+                ({"layer_stays": True}, True, "关闭「恭喜获得」奖励层"),
+                ({"dismiss_field": "OTHER"}, True, "不是刚提交的「ABC123」，没有记录"),
+                ({"layer_text": True}, False, "奖励层在点空白处之前变了"),
+                ({"layer_strip": True}, False, "奖励层在点空白处之前变了"),
+                ({"with_banner": "layer"}, False, "奖励层和提示条同时出现")):
+            with self.subTest(options=options):
+                results = ["already_used"] if "with_banner" in options else ["layer"]
+                game = Game(results, **options)
+                outcome, rt = play(game, ("ABC123", "NEXT"))
+                self.assertFalse(outcome)
+                self.assertEqual(rt.record, {})
+                self.assertEqual(game.touches.count("dismiss"), int(touched))
+                self.assertEqual(game.touches[-1], "dismiss" if touched else "use")
+                self.assertEqual(len(stops(rt)), 1)
+                self.assertIn(words, stops(rt)[0].args[1])
+
     def test_a_fading_banner_is_waited_out_before_any_tap_on_the_modal(self):
         game = Game(["already_used", "expired"], fade_reads=3)  # the 「清空」 tap on a fading frame would raise
         outcome, rt = play(game, ("USED1", "OLD2"))
@@ -432,6 +476,18 @@ class FlowTests(unittest.TestCase):
         self.assertFalse(redeem.quiet(half))  # 0.5: not a banner to read, not gone either
         self.assertLess(tap(half), redeem.BANNER_PINK)
 
+    def test_the_pink_score_counts_both_hue_ranges_together(self):
+        import cv2
+        x, y, w, h = redeem.BANNER_BAND
+        frame = np.zeros((720, 1280, 3), np.uint8)
+        hsv = np.zeros((h, w, 3), np.uint8)
+        hsv[:, :] = (100, 10, 120)  # grey
+        hsv[:, :round(w * .28)] = (172, 80, 240)  # pink just below red's wrap-around
+        hsv[:, round(w * .28):round(w * .54)] = (4, 80, 240)  # pink just above it
+        frame[y:y + h, x:x + w] = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        self.assertAlmostEqual(redeem.banner_pink(frame), .54, delta=.02)
+        self.assertFalse(redeem.quiet(frame))  # each range alone (0.28, 0.26) would pass as gone
+
     def test_a_banner_is_recorded_only_with_the_submitted_code_still_in_the_field(self):
         game = Game(["already_used"], result_field="PROBE123")
         outcome, rt = play(game)
@@ -440,7 +496,7 @@ class FlowTests(unittest.TestCase):
         self.assertIn("不是刚提交的「ABC123」，没有记录", stops(rt)[0].args[1])
 
     def test_a_banner_with_a_reward_layer_another_popup_or_prices_is_not_recorded(self):
-        for with_banner, words in (("layer", "奖励层"), ("close", "别的弹窗的关闭标记"), ("price", "价格或购买")):
+        for with_banner, words in (("close", "别的弹窗的关闭标记"), ("price", "价格或购买")):
             with self.subTest(with_banner=with_banner):
                 game = Game(["already_used"], with_banner=with_banner)
                 outcome, rt = play(game)
@@ -569,6 +625,24 @@ class TextInputTests(unittest.TestCase):
             pages.send_text(self.rt, "ABC123", unread)
         self.assertTrue(self.state.halted)
 
+    def test_an_exception_after_the_send_is_an_unconfirmed_input(self):
+        for error, stop in ((OSError("adb pipe"), False), (RuntimeError("stopping"), True)):
+            with self.subTest(error=type(error).__name__):
+                self.setUp()
+                self.rt.controller = SimpleNamespace(post_input_text=lambda text: SimpleNamespace(
+                    wait=Mock(side_effect=error)))
+                with patch("host.game_backend", return_value="android"):
+                    if stop:  # the stop is published while the input is in flight
+                        self.rt.controller = SimpleNamespace(post_input_text=lambda text: (
+                            self.state.stop_request().parent.mkdir(parents=True, exist_ok=True),
+                            self.state.stop_request().write_text("stop"),
+                            SimpleNamespace(wait=Mock(side_effect=error)))[2])
+                    with self.assertRaises(host.InputUnconfirmed) as caught:
+                        pages.send_text(self.rt, "ABC123", self.frame)
+                self.assertIs(caught.exception.__cause__, error)
+                self.assertTrue(self.state.halted and self.state.marker().exists())
+                self.assertEqual(self.log()[-1], ("InputText", "ABC123", f"raised {type(error).__name__}"))
+
     def test_a_failed_input_halts_all_input_and_keeps_the_reservation(self):
         self.succeeded = False
         with self.assertRaises(host.InputUnconfirmed):
@@ -640,7 +714,7 @@ class ResourceTests(unittest.TestCase):
         tiers = json.loads((ROOT / "agent/host/android/tasks.json").read_text(encoding="utf-8"))
         self.assertIn("MaaNikki_RedeemCodes", tiers["experimental"])
         note = tiers["notes"]["MaaNikki_RedeemCodes"]
-        for words in ("兑换码已使用", "奖励层", "不记录也不点", "停下并保存截图"):
+        for words in ("兑换码已使用", "兑换成功过一次", "还没在设备上跑过", "就不记录", "停下并保存截图"):
             self.assertIn(words, note)
         if not (ROOT / "resource_android").is_dir():  # the release source archive does not list it (plan risk 13)
             self.assertFalse((ROOT / ".git").exists(), "resource_android/ is missing from the checkout")
@@ -684,6 +758,7 @@ image_header = crop("redeem_image_header.png")  # 「基础设置」, the 图像
 faded, scrolled = crop("redeem_list.jpg"), crop("redeem_list_scrolled.jpg")
 empty, typed = crop("redeem_modal_empty.jpg"), crop("redeem_modal_typed.jpg")
 banner = crop("redeem_modal_banner.jpg")  # device run 1's stop frame: 「兑换码已使用」 over the modal's title bar
+success = crop("redeem_success_layer.jpg")  # device run 2's stop frame, x >= 230, y >= 140: the 「恭喜获得」 layer
 layer_title, layer_hint = crop("reward_layer_title.png"), crop("reward_layer_hint.png")
 
 def compose(marks, dim=False, strip=False):
@@ -711,6 +786,7 @@ frames["modal focused"] = frames["modal empty"].copy(); frames["modal focused"][
 frames["modal typed"] = compose([(under, 0, 0)], dim=True); frames["modal typed"][160:560, 300:980] = typed
 frames["modal typed"][668:720, :] = 255
 frames["modal banner"] = compose([(under, 0, 0)], dim=True); frames["modal banner"][160:560, 300:980] = banner
+frames["success layer"] = compose([(success, 230, 140)])
 frames["layer"] = (frames["modal typed"] * 0.45).astype(np.uint8)
 frames["layer"][140:220, 540:740], frames["layer"][620:680, 520:760] = layer_title, layer_hint
 current, results = {}, {}
@@ -739,7 +815,8 @@ class Judge(CustomAction):
         out = {"kind": screen.kind, "title": screen.title, "gear": target(recognize, redeem.MENU_SETTINGS),
                "other_view": redeem.other_view(screen, recognize), "other_tab": target(recognize, redeem.OTHER_TAB),
                "layer": redeem.is_reward_layer(screen, recognize), "image": redeem.image_view(screen, recognize),
-               "banner": redeem.banner(screen, image, recognize)}
+               "banner": redeem.banner(screen, image, recognize), "blank": redeem.blank_at_dismiss(recognize),
+               "dismiss": pages._forbidden_near(recognize, [*redeem.DISMISS_POINT, 1, 1])}
         use = redeem.row_use(recognize)
         out["row_use"] = use and [touch_point(use), pages._forbidden_near(recognize, use)]
         out["faded"] = redeem.faded_row(recognize)
@@ -790,7 +867,8 @@ class FrameworkTests(unittest.TestCase):
                                  "other faded": ("page", "设置"), "other scrolled": ("page", "设置"),
                                  "reset under the row": ("page", "设置"), "modal empty": ("modal", "兑换奖励"),
                                  "modal focused": ("modal", "兑换奖励"), "modal typed": ("modal", "兑换奖励"),
-                                 "modal banner": ("unknown", ""), "layer": ("unknown", "")})
+                                 "modal banner": ("unknown", ""), "success layer": ("unknown", ""),
+                                 "layer": ("unknown", "")})
         # The gear only on the menu, where the survey tapped (633,668).
         self.assertEqual(out["menu"]["gear"], [[633, 667], None])
         self.assertEqual([name for name, value in out.items() if value["gear"]], ["menu"])
@@ -828,7 +906,11 @@ class FrameworkTests(unittest.TestCase):
         self.assertEqual([name for name, value in out.items() if value["banner"]], ["modal banner"])
         self.assertEqual(out["modal banner"]["banner"], "兑换码已使用")
         self.assertEqual(out["modal banner"]["field"], ["filled", "拾光二载暖赴新章"])
-        self.assertEqual([name for name, value in out.items() if value["layer"]], ["layer"])
+        self.assertEqual([name for name, value in out.items() if value["layer"]], ["success layer", "layer"])
+        # The success layer of device run 2: its dismissal point blank on it and on the modal and 其他 frames beneath.
+        for name in ("success layer", "modal empty", "modal banner", "other scrolled"):
+            self.assertTrue(out[name]["blank"], name)
+            self.assertIsNone(out[name]["dismiss"], name)
 
 
 if __name__ == "__main__":

@@ -26,8 +26,11 @@ Device run 1 (2026-11-26): every step up to the submit worked (the Chinese code 
 back exactly). The game answered with a pink banner 「兑换码已使用」 across the modal's title bar (~x 310-970,
 y 192-232), hiding the title and most of ✕ (so the frame is no recognised modal), gone ~20 s later with the code still
 in the field. The result is read only from that banner, on a frame that also shows the modal's body (its 使用 and its
-field); a banner text the PC's classification does not know stops the task with that frame. A 「恭喜获得」 layer after a
-submit has never been seen for this modal: it is saved and the task stops, nothing recorded, nothing tapped. Anything
+field); a banner text the PC's classification does not know stops the task with that frame. Device run 2: codes 1-7
+got that banner; code 8 was redeemed and brought the 「恭喜获得」 layer over the blurred modal (title ~y 185, one item,
+「点击空白区域继续」 ~(640,650)); a probe tap at (600,705) closed it and the modal came back with the code in the field.
+So a layer after a submit is a candidate success: one guarded tap at DISMISS_POINT, and ``redeemed`` is recorded only
+once the next settled frame is the modal with the field still reading exactly that code (confirm_success). Anything
 else, or nothing within RESULT_WAIT, stops the task with that frame saved. A submit is never repeated.
 """
 from __future__ import annotations
@@ -79,6 +82,12 @@ TRANSITION_ALLOWANCE = 1.5
 FIELD_WAIT = 4  # the field showing what was typed / cleared, or the strip opening
 RESULT_WAIT = 6
 BANNER_WAIT = 30  # device run 1: gone within ~20 s
+# The success layer's dismissal (device run 2: a probe tap here closed the 「恭喜获得」 layer and the next frame was the
+# 兑换奖励 modal with the code still in the field). Blank on the layer (46 px below its hint ~[569,640,140,19]) and on
+# the modal over 设置 beneath it (saved modal and 其他 frames); the input strip must not be open across it.
+DISMISS_POINT = (600, 705)
+DISMISS_CLEAR = [480, 662, 240, 58]  # no text may be read here on either tap frame
+AFTER_DISMISS_WAIT = 5
 
 RECORD_FILE = ("config", "android", "redeem_codes.json")
 RECORD_OUTCOMES = frozenset({"redeemed", "already_used", "expired", "cooldown"})
@@ -157,8 +166,13 @@ def use_gold(frame) -> float:
 
 
 def banner_pink(frame) -> float:
-    return max(_fraction(frame, BANNER_BAND, (150, 25, 170), (180, 170, 255)),
-               _fraction(frame, BANNER_BAND, (0, 25, 170), (8, 170, 255))) if frame is not None else 0.0
+    """The share of the band that is pink: the union of the two hue ranges either side of red's wrap-around."""
+    if frame is None:
+        return 0.0
+    x, y, w, h = BANNER_BAND
+    hsv = cv2.cvtColor(frame[y:y + h, x:x + w], cv2.COLOR_BGR2HSV)
+    pink = cv2.inRange(hsv, (150, 25, 170), (180, 170, 255)) | cv2.inRange(hsv, (0, 25, 170), (8, 170, 255))
+    return cv2.countNonZero(pink) / (w * h)
 
 
 def _rows(result):
@@ -554,8 +568,9 @@ def submit(rt, code):
             return None
         if rt._frame_still_valid(frame):
             if is_reward_layer(screen, recognize):  # also under a banner: the layer wins
-                raise Stop(f"提交兑换码「{code}」之后出现了奖励层；兑换成功的画面还没在设备上见过，没有记录，也没有点",
-                           [frame])
+                if banner(screen, frame, recognize) is not None:
+                    raise Stop(f"提交兑换码「{code}」之后奖励层和提示条同时出现，没有记录，也没有点", [frame])
+                return "layer", "", frame  # a candidate success: recorded only once the modal is back with the code
             text = banner(screen, frame, recognize)
             if text is not None:
                 other = foreign(screen, recognize)
@@ -579,7 +594,47 @@ def submit(rt, code):
     raise Stop(f"提交兑换码「{code}」之后没有看到认得的提示条", [frame])
 
 
+def blank_at_dismiss(recognize) -> bool:
+    """No text read around DISMISS_POINT (the check ran). A single character spanning the whole region is the OCR's
+    reading of empty background (seen on the saved modal and 其他 frames as 「1」), not a label."""
+    result = recognize(actions.PAGE_TITLE, {"roi": DISMISS_CLEAR, "expected": ".+"})
+    return result is not None and not any(len(text.strip()) >= 2 for text, _box in _rows(result))
+
+
+def confirm_success(rt, code) -> bool:
+    """After a submit whose read-back matched on both of its tap frames, a 「恭喜获得」 layer appeared: one tap at
+    DISMISS_POINT (pages.tap_on_layer: the layer recognised, no text around the point, no input strip, on both tap
+    frames; no second attempt), then the next settled frame must be the 兑换奖励 modal with the field reading exactly
+    ``code`` (the layer belonged to this submit). Anything else stops with that frame; the caller records nothing
+    then."""
+    def accept(screen, recognize):
+        return is_reward_layer(screen, recognize) and blank_at_dismiss(recognize)
+    try:
+        if not pages.tap_on_layer(rt, "兑换成功后的「恭喜获得」奖励层", accept, DISMISS_POINT,
+                                  verify=lambda frame: not strip_open(frame)):
+            return False
+    except pages.LayerMismatch as mismatch:
+        raise Stop(f"兑换码「{code}」的奖励层在点空白处之前变了，没有记录", [mismatch.frame]) from None
+
+    def settled(screen, frame, recognize):
+        if is_reward_layer(screen, recognize):  # the layer still showing, even with the modal readable under it
+            return None
+        field = _modal_field()(screen, frame, recognize)
+        return None if field is None or field[0] == "unknown" else field
+
+    def leaving(screen, frame, recognize):
+        return is_reward_layer(screen, recognize) or banner_fading(screen, frame, recognize) or (
+            is_modal(screen) and settled(screen, frame, recognize) is None)
+    found = wait_until(rt, "关闭「恭喜获得」奖励层", settled, leaving, seconds=AFTER_DISMISS_WAIT)
+    if found is None:
+        return False
+    if found[0] != ("filled", code):
+        raise Stop(f"关掉奖励层后输入框读到的是「{found[0][1]}」，不是刚提交的「{code}」，没有记录", [found[2]])
+    return True
+
+
 OUTCOME_LOGS = {
+    "redeemed": "兑换码「{code}」兑换成功。",
     "already_used": "兑换码「{code}」已使用过，已记录跳过。",
     "expired": "兑换码「{code}」已过期或无效，已记录跳过。",
     "cooldown": "兑换码「{code}」提示操作太频繁，本次不再提交它，下次运行再试。",
@@ -587,7 +642,7 @@ OUTCOME_LOGS = {
 
 
 def redeem_all(rt, record, pending) -> bool:
-    last_use = None
+    last_use, redeemed = None, 0
     for code in pending:
         if rt.stopped:
             return False
@@ -602,11 +657,15 @@ def redeem_all(rt, record, pending) -> bool:
         if result is None:
             return False
         outcome, detail, _frame = result
+        if outcome == "layer":
+            if not confirm_success(rt, code):
+                return False
+            outcome, redeemed = "redeemed", redeemed + 1
         record.record(code, outcome, detail)
         rt.log(OUTCOME_LOGS[outcome].format(code=code))
         if outcome == "cooldown":
             last_use += USE_COOLDOWN_SECONDS  # the next code waits twice the spacing
-    rt.log("兑换码领取：本批兑换码均已使用、失效或暂时不能提交。")
+    rt.log(f"兑换码领取：成功兑换 {redeemed} 个兑换码。" if redeemed else "兑换码领取：本批兑换码均已使用、失效或暂时不能提交。")
     return True
 
 
