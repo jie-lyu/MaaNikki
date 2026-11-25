@@ -35,25 +35,6 @@ def native_key_fields(action, fields):
     return {**fields, "key": [native_key(item) for item in key] if isinstance(key, list) else native_key(key)}
 
 
-def _refuse_child_actions(overrides):
-    """Android: a child task's override may not introduce an action type outside host.android's list."""
-    from host.android import CHILD_OVERRIDE_ACTIONS
-    from host import UnsupportedInput
-
-    def walk(value):
-        if isinstance(value, dict):
-            action = value.get("action")
-            kind = action.get("type") if isinstance(action, dict) else action
-            if kind is not None and kind not in CHILD_OVERRIDE_ACTIONS:
-                raise UnsupportedInput(f"安卓模拟器上不能发送「{kind}」，这一步暂不支持。")
-            for item in value.values():
-                walk(item)
-        elif isinstance(value, list):
-            for item in value:
-                walk(item)
-    walk(overrides or {})
-
-
 class Runtime:
     OBSERVATION_MAX_AGE = .25
 
@@ -402,11 +383,10 @@ class Runtime:
         return None
 
     def action(self, action, *, ui_click=True, focus_generation=None, **fields):
-        if capabilities(game_backend()).touch_actions_only:
-            from host.android import DISPATCHABLE_ACTIONS
-            if action not in DISPATCHABLE_ACTIONS:
-                from host import UnsupportedInput
-                raise UnsupportedInput(f"安卓模拟器上不能发送「{action}」，这一步暂不支持。")
+        touch_only = capabilities(game_backend()).touch_actions_only
+        if touch_only:
+            from host.android import check_touch_fields
+            check_touch_fields(action, {k: v for k, v in fields.items() if k != "window_cursor_pos"})
         if self.stopped:
             return False
         self.check_focus()
@@ -486,11 +466,25 @@ class Runtime:
         if window_only and not inputs.foreground():
             # Never dispatch fallback Seize actions when the game is unfocused.
             inputs.check(require_foreground=True)
+        if touch_only:
+            # Right before the tap: the frame it was decided on must still be current and the game must have focus
+            # on the device now (a positive reading, no waiting); otherwise the caller re-checks the page.
+            self.check_focus()
+            from task_control import ForegroundChanged
+            if focus_generation is not None and self._focus_generation != focus_generation:
+                raise ForegroundChanged("前台切换后已取消本次输入，等待重新核对")
+            if not self._device_focus_now():
+                raise ForegroundChanged("设备上游戏不在前台，已取消本次输入，等待重新核对")
         fields = native_key_fields(action, fields)
         with measure("input.action"):
             result = self.context.run_action("MaaNikki_Daily_Action", pipeline_override={
                 "MaaNikki_Daily_Action": {"action": action, **fields}})
         succeeded = result is not None and result.success
+        if touch_only and not succeeded:
+            # The tap or swipe may have gone down without coming up: nothing more is sent in this run.
+            self.navigation_halted = True
+            from host import InputUnconfirmed
+            raise InputUnconfirmed(f"安卓模拟器上的「{action}」没有确认完成（可能留下按住的触点），任务已停止，请检查模拟器。")
         if succeeded and action == "Click" and ui_click:
             return self.pause(.1) and self.ui.unhover()
         return succeeded
@@ -547,6 +541,22 @@ class Runtime:
     def capture(self):
         return self._capture()
 
+    def _sessionless_target(self):
+        target = getattr(self, "_device_target", None)
+        if target is None:
+            from host import connect_target
+            target = self._device_target = connect_target(self.controller)
+        return target
+
+    def _device_focus_now(self):
+        """Android: a positive reading that the game has focus on the device right now (no waiting)."""
+        inputs = self._active_inputs()
+        if inputs is None:
+            session = active_session()
+            inputs = session.ensure_adapter() if session is not None else None
+        target = inputs if inputs is not None else self._sessionless_target()
+        return bool(target.foreground())
+
     def _device_focus_ready(self):
         """Android: True when the game has focus on the device now; otherwise wait for it (a pause, also in
         background observation, which does not wait on its own) and return False so the caller captures again."""
@@ -556,12 +566,12 @@ class Runtime:
             inputs = session.ensure_adapter() if session is not None else None
         if inputs is None:
             # No session to wait in: still a positive reading from the device, never an assumption.
-            target = getattr(self, "_device_target", None)
-            if target is None:
-                from host import connect_target
-                target = self._device_target = connect_target(self.controller)
+            target = self._sessionless_target()
             if target.foreground():
                 return True
+            if not target.exists():
+                from navigation.models import GameWindowClosed
+                raise GameWindowClosed("模拟器里的游戏已经退出。")
             wall_time.sleep(.3)
             return False
         if inputs.foreground():
@@ -1113,7 +1123,10 @@ class Runtime:
 
     def run(self, entry, overrides=None):
         if capabilities(game_backend()).touch_actions_only:
-            _refuse_child_actions(overrides)
+            # A child task runs pipeline nodes whose actions (and any override set earlier in the run) this guard
+            # cannot see; not needed on Android yet.
+            from host import UnsupportedInput
+            raise UnsupportedInput(f"安卓模拟器上暂不运行子任务「{entry}」。")
         if self.stopped:
             return False
         self.invalidate_frame()

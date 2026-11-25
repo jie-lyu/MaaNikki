@@ -296,33 +296,71 @@ class NoKeyboardOrMouseTests(unittest.TestCase):
                     rt.action(action, key=27, target=[11, 21, 4, 4], contact=1)
         rt.context.run_action.assert_not_called()
 
-    def test_a_tap_is_dispatched(self):
+    def tap_runtime(self, *, focused=True, success=True):
         rt = self.runtime()
-        rt.context.run_action.return_value = SimpleNamespace(success=True)
+        rt.context.run_action.return_value = SimpleNamespace(success=success)
         rt._target_point = lambda target, name: (target[0] + target[2] // 2, target[1] + target[3] // 2)
         rt._validate_pointer_targets = Mock(return_value=(1280, 720))
         rt.pause = Mock(return_value=True)
         rt.ui = SimpleNamespace(unhover=Mock(return_value=True))  # without pointer hover it returns at once
+        rt._device_target = SimpleNamespace(foreground=Mock(return_value=focused), exists=Mock(return_value=True))
+        return rt
+
+    def test_a_tap_is_dispatched_with_device_focus_confirmed_right_before(self):
+        rt = self.tap_runtime()
         with android_run(), patch("daily.runtime.active_session", return_value=None):
             self.assertTrue(rt.action("Click", target=[100, 200, 40, 20]))
         override = rt.context.run_action.call_args.kwargs["pipeline_override"]["MaaNikki_Daily_Action"]
-        self.assertEqual(override["action"], "Click")
+        self.assertEqual(override, {"action": "Click", "target": (120, 210)})
+        rt._device_target.foreground.assert_called()
 
-    def test_child_task_overrides_cannot_introduce_other_actions(self):
+    def test_a_tap_without_device_focus_or_on_an_old_frame_is_cancelled(self):
+        from task_control import ForegroundChanged
+        rt = self.tap_runtime(focused=False)
+        with android_run(), patch("daily.runtime.active_session", return_value=None), \
+                self.assertRaises(ForegroundChanged):
+            rt.action("Click", target=[100, 200, 40, 20])
+        rt = self.tap_runtime()
+        rt._focus_generation = 8  # the decision was made on generation 7
+        with android_run(), patch("daily.runtime.active_session", return_value=None), \
+                self.assertRaises(ForegroundChanged):
+            rt.action("Click", target=[100, 200, 40, 20], focus_generation=7)
+        rt.context.run_action.assert_not_called()
+
+    def test_an_unconfirmed_tap_halts_the_run(self):
+        rt = self.tap_runtime(success=False)
+        with android_run(), patch("daily.runtime.active_session", return_value=None):
+            with self.assertRaises(host.InputUnconfirmed):
+                rt.action("Swipe", begin=[100, 100], end=[300, 100], duration=300)
+            self.assertTrue(rt.navigation_halted)
+            self.assertFalse(rt.action("Click", target=[10, 10, 4, 4]))  # stopped: nothing more is sent
+        self.assertEqual(rt.context.run_action.call_count, 1)
+
+    def test_only_plain_targets_inside_the_frame(self):
+        rt = self.tap_runtime()
+        with android_run(), patch("daily.runtime.active_session", return_value=None):
+            for action, fields in (("Click", {"target": [50, 50, 4, 4], "target_offset": [200, 100, 0, 0]}),
+                                   ("Swipe", {"begin": [1, 1], "end": [5, 5], "only_hover": True}),
+                                   ("Click", {"target": [50, 50], "contact": 1}),
+                                   ("Click", {"target": [1270, 700, 40, 40]}),
+                                   ("Click", {"target": [-1, 5]}),
+                                   ("Click", {}),
+                                   ("Swipe", {"begin": [1, 1], "end": [5, 5], "duration": -1})):
+                with self.subTest(action=action, fields=fields), self.assertRaises(host.UnsupportedInput):
+                    rt.action(action, **fields)
+        rt.context.run_action.assert_not_called()
+
+    def test_child_tasks_do_not_run(self):
         rt = self.runtime()
         rt.context.clone = Mock()
         with android_run():
-            for override in ({"X": {"action": "ClickKey", "key": 87}}, {"X": {"action": {"type": "Key"}}},
-                             {"X": {"next": ["Y"]}, "Y": {"action": "TouchDown"}}):
+            for override in (None, {}, {"X": {"next": []}}, {"X": {"action": "ClickKey", "key": 87}}):
                 with self.subTest(override=override), self.assertRaises(host.UnsupportedInput):
                     rt.run("X", override)
-            rt.context.clone.assert_not_called()
-            rt.context.clone.return_value.run_task.return_value = SimpleNamespace(status=SimpleNamespace(succeeded=True))
-            self.assertTrue(rt.run("X", {"X": {"next": []}}))
+        rt.context.clone.assert_not_called()
 
     def test_shipped_pipelines_use_only_actions_a_child_task_may_run(self):
         import glob
-        from host.android import CHILD_OVERRIDE_ACTIONS
         kinds = set()
 
         def walk(value):
@@ -339,7 +377,7 @@ class NoKeyboardOrMouseTests(unittest.TestCase):
         for path in glob.glob(str(ROOT / "resource*/pipeline/*.json")) + glob.glob(str(ROOT / "tasks/*.json")):
             walk(json.loads(Path(path).read_text(encoding="utf-8")))
         self.assertTrue(kinds)
-        self.assertLessEqual(kinds, CHILD_OVERRIDE_ACTIONS)
+        self.assertLessEqual(kinds, {"DoNothing", "Custom"})
 
     def test_text_input_and_camera_moves_are_refused_before_posting(self):
         from navigation.controller import relative_camera
@@ -458,6 +496,25 @@ class SessionlessCaptureTests(unittest.TestCase):
         sleep.assert_called_once()  # the launcher reading waited instead of capturing
         self.assertEqual(controller.post_screencap.call_count, 1)
         self.assertGreaterEqual(sum("mCurrentFocus" in c for c in controller.commands), 3)
+
+
+class SessionlessExitTests(unittest.TestCase):
+    def test_sessionless_capture_ends_when_the_game_has_exited(self):
+        from daily.runtime import Runtime
+        from navigation.models import GameWindowClosed
+        controller = FakeShellController({"mCurrentFocus": FOCUS_LAUNCHER, "pidof": "__exit=1\n"})
+        controller.info = INFO
+        controller.post_screencap = Mock()
+        rt = Runtime.__new__(Runtime)
+        rt.controller, rt.context = controller, SimpleNamespace(tasker=SimpleNamespace(stopping=False))
+        rt.navigation_halted, rt._focus_generation = False, 0
+        rt.check_focus, rt.invalidate_frame = Mock(), Mock()
+        rt.observation_generation = Mock(return_value=0)
+        rt._active_inputs = Mock(return_value=None)
+        with android_run(), patch("daily.runtime.active_session", return_value=None), \
+                patch("daily.runtime.wall_time.sleep"), self.assertRaises(GameWindowClosed):
+            rt._capture()
+        controller.post_screencap.assert_not_called()
 
 
 class FocusLostModeTests(unittest.TestCase):

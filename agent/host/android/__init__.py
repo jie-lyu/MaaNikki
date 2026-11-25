@@ -16,10 +16,39 @@ from host import Capabilities
 
 CAPABILITIES = Capabilities("android", capture_needs_device_focus=True, touch_actions_only=True)
 
-# Runtime.action types an Android run may dispatch (exact spelling), and the action types a child task's override
-# may contain. The shipped pipelines use only DoNothing and Custom; custom actions call back into guarded code.
-DISPATCHABLE_ACTIONS = frozenset({"Click", "Swipe"})
-CHILD_OVERRIDE_ACTIONS = frozenset({"DoNothing", "Custom"}) | DISPATCHABLE_ACTIONS
+# Runtime.action types an Android run may dispatch (exact spelling) and the only fields each may carry; anything
+# else (offsets, hover-only swipes, contacts, pressure) would change what reaches the device after the checks.
+DISPATCHABLE_ACTIONS = {"Click": frozenset({"target"}), "Swipe": frozenset({"begin", "end", "duration"})}
+FRAME_SIZE = (1280, 720)
+
+
+def check_touch_fields(action, fields) -> None:
+    """Raise UnsupportedInput unless ``action`` is a tap or swipe with only its own fields, inside the frame."""
+    from host import UnsupportedInput
+    allowed = DISPATCHABLE_ACTIONS.get(action)
+    if allowed is None:
+        raise UnsupportedInput(f"安卓模拟器上不能发送「{action}」，这一步暂不支持。")
+    extra = set(fields) - allowed
+    if extra:
+        raise UnsupportedInput(f"安卓模拟器上的「{action}」不支持参数 {sorted(extra)}，这一步暂不支持。")
+    width, height = FRAME_SIZE
+    for name in ("target", "begin", "end"):
+        if name not in fields:
+            continue
+        value = fields[name]
+        if (not isinstance(value, (list, tuple)) or len(value) not in (2, 4)
+                or any(type(v) is not int for v in value)):
+            raise UnsupportedInput(f"安卓模拟器上的点击位置 {name}={value!r} 无效。")
+        x, y = value[0], value[1]
+        w, h = (value[2], value[3]) if len(value) == 4 else (0, 0)
+        if w < 0 or h < 0 or not (0 <= x and x + w <= width and 0 <= y and y + h <= height):
+            raise UnsupportedInput(f"安卓模拟器上的点击位置 {name}={list(value)} 超出画面。")
+    if action == "Click" and "target" not in fields:
+        raise UnsupportedInput("安卓模拟器上的点击需要明确的位置。")
+    if action == "Swipe":
+        duration = fields.get("duration", 200)
+        if "begin" not in fields or "end" not in fields or type(duration) is not int or not 0 < duration <= 5000:
+            raise UnsupportedInput("安卓模拟器上的滑动需要起点、终点和 1–5000 毫秒的时长。")
 
 
 # The Android task list, same format as the macOS preview list (host/macos/__init__.py parse_task_tiers) and read
