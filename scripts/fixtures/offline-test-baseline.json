@@ -124,6 +124,7 @@
     "CheckTaskTests.test_the_check_reports_the_screen_and_sends_nothing",
     "CheckTaskTests.test_the_check_runs_through_the_gameplay_action_without_recovery",
     "DevHomeTests.test_a_home_without_the_maatouch_helper_is_refused",
+    "DevHomeTests.test_a_runtime_inside_the_home_is_refused_and_another_home_is_a_source",
     "DevHomeTests.test_a_runtime_without_the_adb_unit_is_refused",
     "DevHomeTests.test_the_home_links_the_repository_and_writes_the_interface",
     "InterfaceTests.test_the_android_interface",
@@ -133,6 +134,7 @@
    "known_failures": [],
    "skips": [
     "DevHomeTests.test_a_home_without_the_maatouch_helper_is_refused",
+    "DevHomeTests.test_a_runtime_inside_the_home_is_refused_and_another_home_is_a_source",
     "DevHomeTests.test_a_runtime_without_the_adb_unit_is_refused",
     "DevHomeTests.test_the_home_links_the_repository_and_writes_the_interface"
    ]

@@ -94,6 +94,36 @@ class DevHomeTests(unittest.TestCase):
             with self.assertRaises(SystemExit):  # never writes into a directory it did not create
                 android_dev_home.main(["--home", str(tmp / "other"), "--python", str(venv), "--runtime", str(runtime)])
 
+    def test_a_runtime_inside_the_home_is_refused_and_another_home_is_a_source(self):
+        import android_dev_home
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            venv, runtime = tmp / "venv", tmp / "runtime"
+            (venv / "bin").mkdir(parents=True)
+            (venv / "bin/python3").write_text("")
+            runtime.mkdir()
+            for name in ("libMaaFramework.dylib", "libMaaAdbControlUnit.dylib"):
+                (runtime / name).write_text("")
+            helper = venv / "lib/python3.12/site-packages/MaaAgentBinary" / android_dev_home.MAATOUCH
+            helper.parent.mkdir(parents=True)
+            helper.write_text("")
+
+            def build(home, source):
+                with patch("builtins.print"):
+                    return android_dev_home.main(["--home", str(home), "--python", str(venv),
+                                                  "--runtime", str(source)])
+            first = tmp / "first"
+            self.assertEqual(build(first, runtime), 0)
+            for source in (first / "maafw", first):
+                with self.subTest(source=source.name), self.assertRaises(SystemExit):
+                    build(first, source)
+            self.assertTrue((first / "maafw/libMaaFramework.dylib").resolve().is_file())  # left working
+            self.assertTrue((first / "maafw/MaaAgentBinary" / android_dev_home.MAATOUCH).is_file())
+            second = tmp / "second"
+            self.assertEqual(build(second, first / "maafw"), 0)
+            self.assertTrue((second / "maafw/libMaaFramework.dylib").resolve().is_file())
+            self.assertTrue((second / "maafw/MaaAgentBinary" / android_dev_home.MAATOUCH).is_file())
+
     def test_a_home_without_the_maatouch_helper_is_refused(self):
         import android_dev_home
         with tempfile.TemporaryDirectory() as tmp:

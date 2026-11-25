@@ -52,7 +52,7 @@ def runtime_dir(target: Path, runtime: Path, agent_binary: Path) -> None:
             entry.unlink()
     (target / RUNTIME_MARKER).write_text("written by scripts/android_dev_home.py\n", encoding="utf-8")
     for entry in runtime.iterdir():
-        if entry.name != "MaaAgentBinary":
+        if entry.name not in ("MaaAgentBinary", RUNTIME_MARKER):  # another generated home's maafw/ is a fine source
             (target / entry.name).symlink_to(entry, target_is_directory=entry.is_dir())
     (target / "MaaAgentBinary").symlink_to(agent_binary, target_is_directory=True)
 
@@ -73,6 +73,11 @@ def main(argv=None) -> int:
         sys.exit(f"{venv} is not a virtual environment; create it with Python 3.12 and requirements.txt")
     if not (runtime / "libMaaFramework.dylib").exists() or not (runtime / "libMaaAdbControlUnit.dylib").exists():
         sys.exit(f"{runtime} is not a MaaFramework runtime with the ADB control unit")
+    # Never read from what is about to be rewritten: a runtime inside the home (its own maafw/, or the home itself)
+    # would lose its links before they are read again.
+    for source, what in ((runtime, "--runtime"), (venv, "--python")):
+        if source == home or home in source.parents:
+            sys.exit(f"{what} {source} is inside the home {home} being written")
     agent_binary = args.agent_binary or next(
         (candidate for candidate in (runtime / "MaaAgentBinary",
                                      *sorted(venv.glob("lib/python3*/site-packages/MaaAgentBinary")))
