@@ -1571,7 +1571,7 @@ class GameUI:
                 if escapes >= 8:
                     break
                 escapes += 1
-                if not self.rt.key("menu", .35):
+                if not self.rt.escape(.35):
                     return False
             if self.wait_page("MaaNikki_MainDetected", seconds=min(1.5, max(0, deadline-time.monotonic()))):
                 return True
@@ -1602,7 +1602,7 @@ class GameUI:
                     and self.dismiss_realm_confirm() is False):
                 return False
             for parent in route:
-                if not self.enter_page(lambda: self.rt.key("menu", 0), parent,
+                if not self.enter_page(lambda: self.rt.escape(0), parent,
                                        source=node, attempts=1):
                     return False
                 node = parent

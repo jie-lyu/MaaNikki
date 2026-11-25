@@ -41,15 +41,20 @@ class Scripted:
     wholly inside its region (as one merged box, like the real OCR). ``ocr=False`` models an OCR engine that cannot
     run: every OCR node reports an ordinary miss (what MaaFramework 5.16.1 does without its model)."""
 
-    OCR_NODES = {actions.QUIT_TITLE, actions.QUIT_CANCEL, actions.HUD_LABEL, actions.PAGE_TITLE}
+    OCR_NODES = {actions.QUIT_TITLE, actions.QUIT_CANCEL, actions.REDEEM_TITLE, actions.HUD_LABEL, actions.PAGE_TITLE}
 
-    def __init__(self, *, quit=False, cancel=False, modal=False, duck=False, arrow=False, title="设置",
-                 labels=LABELS, ocr=True, errors=()):
+    def __init__(self, *, quit=False, cancel=False, modal=False, redeem=True, duck=False, arrow=False, lit=None,
+                 title="设置", labels=LABELS, ocr=True, errors=()):
+        # A dialog dims what is behind it; without one the HUD and page icons are at full brightness.
+        lit = not (quit or modal) if lit is None else lit
         self.fixed = {actions.QUIT_TITLE: quit and hit([560, 180, 160, 40], "退出游戏"),
                       actions.QUIT_CANCEL: cancel and hit([459, 461, 72, 40], "取消"),
                       actions.MODAL_CLOSE: (modal or quit) and hit([929, 177, 36, 36]),
+                      actions.REDEEM_TITLE: modal and redeem and hit([580, 176, 118, 38], "兑换奖励"),
                       actions.HUD_DUCK: duck and hit([30, 18, 54, 54]),
+                      actions.HUD_DUCK_LIT: duck and lit and hit([30, 18, 54, 54]),
                       actions.BACK_ARROW: arrow and hit([37, 22, 40, 40]),
+                      actions.BACK_ARROW_LIT: arrow and lit and hit([37, 22, 40, 40]),
                       actions.PAGE_TITLE: arrow and title and hit([96, 26, 30 * len(title), 30], title)}
         self.labels, self.ocr, self.errors, self.calls = labels, ocr, set(errors), []
 
@@ -97,6 +102,9 @@ class ScreenTests(unittest.TestCase):
                  "HUD without readable labels": Scripted(duck=True, labels={}),
                  "page without a readable title": Scripted(arrow=True, title=""),
                  "page title not text": Scripted(arrow=True, title="L6"),
+                 "a modal that is not identified": Scripted(modal=True, redeem=False, arrow=True),
+                 "a dimmed HUD (an unrecognised dialog)": Scripted(duck=True, lit=False),
+                 "a dimmed page (an unrecognised dialog)": Scripted(arrow=True, lit=False),
                  "nothing": Scripted()}
         for case, recognize in cases.items():
             with self.subTest(case=case):
@@ -107,11 +115,13 @@ class ScreenTests(unittest.TestCase):
     def test_without_ocr_the_quit_confirmation_is_never_the_hud(self):
         recognize = Scripted(quit=True, cancel=True, duck=True, ocr=False)
         screen = actions.read_screen(recognize)
-        self.assertEqual(screen.kind, "modal")  # found by its close mark, which needs no OCR
-        self.assertEqual(actions.plan_tap("leave", screen, recognize).target, [929, 177, 36, 36])
-        for action in ("menu", "map", "shop", "calendar"):
+        self.assertEqual(screen.kind, "unknown")  # a close mark, but no identified modal: nothing is tapped
+        for action in sorted(actions.ACTIONS):
             with self.subTest(action=action), self.assertRaises(actions.ScreenUnrecognised):
                 actions.plan_tap(action, screen, recognize)
+        # Even with the dialog's texts and close mark hidden, the dimmed duck keeps it from being the HUD.
+        masked = Scripted(duck=True, lit=False)
+        self.assertEqual(actions.read_screen(masked).kind, "unknown")
         for screen in (Scripted(duck=True, ocr=False), Scripted(arrow=True, ocr=False)):
             self.assertEqual(actions.read_screen(screen).kind, "unknown")
 
@@ -199,10 +209,21 @@ class PlanTests(unittest.TestCase):
         self.assertIsNone(actions.confirm_tap(shop, screen, Scripted(arrow=True)))  # now a page
         moved = {**LABELS, "商城": (727, 36), "共鸣": (657, 36)}
         self.assertIsNone(actions.confirm_tap(shop, screen, Scripted(duck=True, labels=moved)))
+        lower = {label: (cx, width) for label, (cx, width) in LABELS.items()}
+
+        class Lowered(Scripted):
+            def __call__(inner, node, override=None):  # the label strip 16 px lower: the label reads, elsewhere
+                result = Scripted.__call__(inner, node, override)
+                if node == actions.HUD_LABEL and result.hit:
+                    return hit([result.box[0], result.box[1] + 16, result.box[2], result.box[3]],
+                               result.best_result.text)
+                return result
+        self.assertIsNone(actions.confirm_tap(shop, screen, Lowered(duck=True, labels=lower)))
         page = Scripted(arrow=True)
         back = actions.plan_tap("leave", actions.read_screen(page), page)
         self.assertEqual(actions.confirm_tap(back, actions.read_screen(page), Scripted(arrow=True)), back.target)
         self.assertIsNone(actions.confirm_tap(back, actions.read_screen(page), Scripted(modal=True, arrow=True)))
+        self.assertIsNone(actions.confirm_tap(back, actions.read_screen(page), Scripted(arrow=True, title="地图")))
 
     def test_unknown_actions_are_not_planned(self):
         with self.assertRaises(ValueError):
@@ -318,6 +339,43 @@ class RuntimeKeyTests(FreshAndroidState):
         self.assertEqual(rt.capture.call_count, 4)  # decide, confirm (stale), decide, confirm
         self.assertEqual(len(self.sent(rt)), 1)
 
+    def test_a_focus_loss_while_deciding_voids_the_decision(self):
+        for name, screens in (("shop", [Scripted(duck=True)] * 4), ("leave", [Scripted(duck=True)] * 2)):
+            with self.subTest(name=name):
+                rt = self.runtime(screens)
+                original = rt.context.run_recognition.side_effect
+                lost = []
+
+                def recognize(node, image, override=None, rt=rt, original=original, lost=lost):
+                    if len(self.frames) == 1 and not lost:
+                        lost.append(node)
+                        self.state.observed_loss()  # while the deciding frame is being recognised
+                    return original(node, image, override)
+                rt.context.run_recognition.side_effect = recognize
+                with android_run(), patch("daily.runtime.active_session", return_value=None):
+                    self.assertTrue(rt.leave_page() if name == "leave" else rt.key(name))
+                # The first decision was discarded: a second frame was decided on (and, for shop, confirmed).
+                self.assertEqual(rt.capture.call_count, 2 if name == "leave" else 3)
+                self.assertEqual(len(self.sent(rt)), 0 if name == "leave" else 1)
+                if name == "shop":
+                    source = rt.context.run_action_direct.call_args
+                    self.assertIsNotNone(source)
+
+    def test_escape_is_esc_on_the_desktop_and_leave_on_android(self):
+        from daily.runtime import Runtime
+        rt = Runtime.__new__(Runtime)
+        rt.key, rt.leave_page = Mock(return_value=True), Mock(return_value=True)
+        for backend, controller in (("win32", "Win32"), ("macos", "MacOS")):
+            with self.subTest(backend=backend), patch.object(host, "platform_backend", return_value=backend), \
+                    patch.dict(os.environ, {"PI_CONTROLLER": json.dumps({"type": controller})}):
+                self.assertTrue(rt.escape(.35))
+                rt.key.assert_called_with("menu", .35)
+        rt.leave_page.assert_not_called()
+        with android_run():
+            self.assertTrue(rt.escape(0))
+        rt.leave_page.assert_called_once_with(0)
+        self.assertEqual(rt.key.call_count, 2)
+
     def test_focus_lost_at_dispatch_is_decided_again_within_the_limit(self):
         rt = self.runtime([Scripted(duck=True)] * 4)
         rt._device_target.foreground = Mock(side_effect=[False, True, True, True])
@@ -414,10 +472,13 @@ frames = {}
 for name, marks in (("blank", []), ("duck only", [(duck, 30, 18)]), ("hud", [(duck, 30, 18), (row, 600, 50)]),
                     ("page", [(title, 0, 10)]), ("arrow only", [(arrow, 37, 22)]),
                     ("quit over hud", [(duck, 30, 18), (row, 600, 50), (dialog, 300, 150)]),
-                    ("duck and arrow", [(duck, 30, 18), (arrow, 100, 60), (row, 600, 50)])):
+                    ("duck and arrow", [(duck, 30, 18), (arrow, 100, 60), (row, 600, 50)]),
+                    ("dimmed hud", [(duck, 30, 18), (row, 600, 50)])):
     frame = np.full((720, 1280, 3), 90, np.uint8)
     for image, x, y in marks:
         frame[y:y + image.shape[0], x:x + image.shape[1]] = image
+    if name == "dimmed hud":  # what a dialog's dim layer does to the HUD behind it (texts still readable)
+        frame = (frame * 0.45).astype(np.uint8)
     frames[name] = frame
 current = {}
 
@@ -445,7 +506,8 @@ class Classify(CustomAction):
                 plans[name] = plan.target
             except actions.ScreenUnrecognised:
                 plans[name] = "refused"
-        results[current["name"]] = {"kind": screen.kind, "targets": screen.targets, "ran": nodes, "plans": plans}
+        results[current["name"]] = {"kind": screen.kind, "targets": screen.targets, "ran": nodes, "plans": plans,
+                                    "reason": screen.reason}
         return CustomAction.RunResult(success=True)
 
 resource = Resource()
@@ -481,7 +543,9 @@ class FrameworkTests(unittest.TestCase):
         outcome = json.loads(result.stdout.strip().splitlines()[-1])
         self.assertEqual({name: value["kind"] for name, value in outcome.items()},
                          {"blank": "unknown", "duck only": "unknown", "hud": "hud", "page": "page",
-                          "arrow only": "unknown", "quit over hud": "quit_dialog", "duck and arrow": "unknown"})
+                          "arrow only": "unknown", "quit over hud": "quit_dialog", "duck and arrow": "unknown",
+                          "dimmed hud": "unknown"})
+        self.assertIn("压暗", outcome["dimmed hud"]["reason"])  # refused for the dim layer, not for unreadable text
         hud, page, quit = outcome["hud"]["plans"], outcome["page"]["plans"], outcome["quit over hud"]["plans"]
         self.assertEqual(hud["menu"], [30, 18, 54, 54])
         self.assertIsNone(hud["leave"])

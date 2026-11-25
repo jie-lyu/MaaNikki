@@ -18,6 +18,12 @@
     "threshold": 0.9,
     "action": "DoNothing"
   },
+  "MaaNikki_Android_RedeemModal": {
+    "recognition": "OCR",
+    "roi": [540, 160, 200, 70],
+    "expected": "^兑换奖励$",
+    "action": "DoNothing"
+  },
   "MaaNikki_Android_HudDuck": {
     "recognition": "TemplateMatch",
     "template": "android/menu_duck.png",
@@ -25,11 +31,29 @@
     "threshold": 0.8,
     "action": "DoNothing"
   },
+  "MaaNikki_Android_HudDuckLit": {
+    "recognition": "ColorMatch",
+    "roi": [30, 18, 54, 54],
+    "method": 40,
+    "lower": [15, 120, 200],
+    "upper": [35, 255, 255],
+    "count": 120,
+    "action": "DoNothing"
+  },
   "MaaNikki_Android_BackArrow": {
     "recognition": "TemplateMatch",
     "template": "android/back_arrow.png",
     "roi": [0, 0, 160, 120],
     "threshold": 0.8,
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_BackArrowLit": {
+    "recognition": "ColorMatch",
+    "roi": [37, 22, 40, 40],
+    "method": 6,
+    "lower": [200],
+    "upper": [255],
+    "count": 100,
     "action": "DoNothing"
   },
   "MaaNikki_Android_HudLabel": {

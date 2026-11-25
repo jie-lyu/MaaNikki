@@ -413,8 +413,8 @@ class Recognizer:
             if not job.succeeded:
                 raise ProbeError("capture failed")
             image = self.last_frame = job.get()
-            return self._request(lambda name, override=None: context.run_recognition(
-                name, image, {name: override} if override else None))
+            return [self._request(lambda name, override=None: context.run_recognition(
+                name, image, {name: override} if override else None))]  # wrapped: None is a valid answer
         names, any_roi, adhoc = self._request
         job = context.tasker.controller.post_screencap().wait()
         if not job.succeeded:
@@ -459,7 +459,7 @@ class Recognizer:
         self.tasker.post_task(self.ENTRY, override).wait()
         if self._results is None:
             raise ProbeError("the probe action did not run")
-        return self._results
+        return self._results[0]
 
     def run(self, name: str, *, any_roi: bool = False) -> dict:
         return self.run_many([name], any_roi=any_roi)[0]

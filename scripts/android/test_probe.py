@@ -196,6 +196,7 @@ class ProbeTests(unittest.TestCase):
     def test_screen_reports_the_action_table_without_input(self):
         from types import SimpleNamespace
         hits = {"MaaNikki_Android_BackArrow": SimpleNamespace(hit=True, box=[37, 22, 40, 40], best_result=None),
+                "MaaNikki_Android_BackArrowLit": SimpleNamespace(hit=True, box=[37, 22, 40, 40], best_result=None),
                 "MaaNikki_Android_PageTitle": SimpleNamespace(hit=True, box=[96, 26, 80, 30],
                                                               best_result=SimpleNamespace(text="设置"))}
         miss = SimpleNamespace(hit=False, box=None, best_result=None)

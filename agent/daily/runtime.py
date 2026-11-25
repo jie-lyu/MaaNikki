@@ -563,6 +563,13 @@ class Runtime:
 
     TOUCH_KEY_ATTEMPTS = 3
 
+    def escape(self, delay=0.35):
+        """Back out of the current screen: Esc (``key("menu")``) on the desktop, ``leave_page`` on Android, where
+        the duck that Esc's menu key maps to would open the menu instead of leaving."""
+        if capabilities(game_backend()).touch_actions_only:
+            return self.leave_page(delay)
+        return self.key("menu", delay)
+
     def leave_page(self, delay=0.35):
         """Android: leave the current screen (a modal by its close mark, a page by its back arrow, the quit
         confirmation by 取消); True at once on the open-world HUD. The PC counterpart is pressing Esc."""
@@ -601,6 +608,8 @@ class Runtime:
                 if not self._frame_still_valid(decided):
                     continue  # focus changed while recognising: decide again on a new frame
                 raise NavigationError(f"{error}，{sent_so_far()}。") from error
+            if not self._frame_still_valid(decided):
+                continue  # a focus loss was observed while deciding: nothing decided on this frame counts
             if plan.target is None:
                 return True  # nothing to do (e.g. leaving while already in the open world)
             # Right before sending: the same screen with the same thing in the same place on a fresh frame, which
@@ -609,7 +618,9 @@ class Runtime:
             if confirming is None:
                 return False
             target = actions.confirm_tap(plan, screen, self._recognizer_on(confirming))
-            if target is None or not self._frame_still_valid(confirming):
+            # Both frames must still carry the current focus generation and epoch: a loss observed at any point
+            # since the decision began voids it (the dispatch then rechecks the confirming frame under its lock).
+            if target is None or not (self._frame_still_valid(decided) and self._frame_still_valid(confirming)):
                 continue
             try:
                 if not self.action("Click", target=target, source_frame=confirming):
@@ -1858,7 +1869,7 @@ class Executors(Runtime):
                 if not self.key("interact", 2):
                     return False
                 if self.text([1050, 120, 220, 500], r"牵手|添加好友"):
-                    self.key("menu", .5)
+                    self.escape(.5)
                     if not self.hold("forward", .25) or not self.pause(.2):
                         return False
                     continue
