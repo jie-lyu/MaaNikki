@@ -201,8 +201,9 @@ def run(args) -> int:
     record = {"time": started.isoformat(timespec="seconds"), "entry": args.entry, "options": chosen,
               "purpose": args.purpose, "serial": args.serial, "log_dir": str(log_dir)}
 
-    check_unconfirmed(data_root, args.clear_unconfirmed)
     adb_alive(args.adb, args.serial)
+    record["marker_recovery"] = check_unconfirmed(data_root, args.clear_unconfirmed,
+                                                  lambda: device_touch_state(args.adb, args.serial), args.serial)
     Tasker.set_log_dir(str(log_dir))
     agent_binary = ROOT / ".venv" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / \
         "site-packages" / "MaaAgentBinary"
@@ -285,8 +286,21 @@ def run(args) -> int:
     return 0 if record.get("status") == "succeeded" else 1
 
 
-RELEASE_ADVICE = ("没有办法从这里证明那个触点已经抬起（Maatouch 用 InputManager 注入事件，重启 ADB 或看画面都证明不了），"
-                  "所以运行器停下，需要人来决定：先报告协调者或维护者；确认可以继续时，用 --clear-unconfirmed 加上上面的指纹重跑。")
+RELEASE_ADVICE = ("设备没有报告触点已经全部抬起（或者标记记的不是这台设备的序列号、标记读不出来），重启 ADB 或看画面都证明不了"
+                  "那个触点已经抬起，所以运行器停下，需要人来决定：先报告协调者或维护者；确认可以继续时，用 --clear-unconfirmed "
+                  "加上上面的指纹重跑。")
+
+
+def device_touch_state(adb: str, serial: str, seconds: float = 10) -> str | None:
+    """Whether a contact is held on the device, read with `dumpsys input` (read-only; host.android.target)."""
+    sys.path.insert(0, str(ROOT / "agent"))
+    from host.android.target import touch_state
+    try:
+        result = subprocess.run([adb, "-s", serial, "shell", "dumpsys", "input"], capture_output=True, text=True,
+                                timeout=seconds)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return touch_state(result.stdout) if result.returncode == 0 else None
 
 
 def marker_fingerprint(raw: bytes) -> str:
@@ -296,44 +310,62 @@ def marker_fingerprint(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()[:12]
 
 
-def check_unconfirmed(data_root: Path, clear: str | None) -> None:
+def check_unconfirmed(data_root: Path, clear: str | None, read_touch_state=None, serial: str | None = None):
     """The runner is the recovery boundary for its own data root, as MaaNikki's start is for the client's: a touch
-    marker left by an earlier run (a touch that was never confirmed released) stops the runner until a person has
-    decided (RELEASE_ADVICE). Clearing names the marker by the fingerprint printed with the refusal and is checked
-    against the marker's bytes under the agent's owner lock, so a different, later marker is never cleared."""
+    marker left by an earlier run (a touch that was never confirmed released) is cleared when it names this serial
+    and the device, read now under the agent's owner lock, reports no contact held; otherwise it stops the runner
+    until a person has decided (RELEASE_ADVICE). Clearing by hand names the marker by the fingerprint printed with
+    the refusal; either way the marker's bytes are checked under the owner lock, so a different, later marker is
+    never cleared. Returns what was done (None when there was no marker)."""
     marker = data_root / "config" / "android-input" / "touch.json"
     if not marker.exists():
-        return
+        return None
     try:
         raw = marker.read_bytes()
     except OSError as error:
         raise RunnerError(f"读不了留下的触摸标记 {marker}：{error}") from None
     fingerprint = marker_fingerprint(raw)
     try:
-        since = json.loads(raw.decode("utf-8")).get("since")
-    except (ValueError, UnicodeDecodeError, AttributeError):
-        since = None
-    if clear != fingerprint:
+        content = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        content = None
+    content = content if isinstance(content, dict) else {}
+    since = content.get("since")
+    by_device = clear != fingerprint and bool(serial) and content.get("serial") == serial \
+        and read_touch_state is not None
+
+    def refuse(reading=None):
         named = "" if clear is None else f"（给的指纹 {clear} 对不上）"
-        raise RunnerError(f"上一次运行留下了没有确认抬起的触摸{named}：{marker}，时间 {since or '不明'}，指纹 {fingerprint}。"
-                          f"{RELEASE_ADVICE}")
+        device = f"设备读数 {reading or '读不出'}" if by_device else \
+            f"标记记的序列号 {content.get('serial') or '没有'}，现在连的是 {serial or '不明'}"
+        return RunnerError(f"上一次运行留下了没有确认抬起的触摸{named}：{marker}，时间 {since or '不明'}，指纹 {fingerprint}，"
+                           f"{device}。{RELEASE_ADVICE}")
+    if clear != fingerprint and not by_device:
+        raise refuse()
     sys.path.insert(0, str(ROOT / "agent"))
     from host import UnsupportedInput, take_owner_lock
     try:
         handle = take_owner_lock(marker.parent / "owner.lock")
     except UnsupportedInput as error:
-        raise RunnerError(f"清除触摸标记之前没能拿到 owner.lock：{error}") from None
+        raise RunnerError(f"处理触摸标记之前没能拿到 owner.lock：{error}") from None
+    reading = None
     try:
         try:
             current = marker.read_bytes()
         except FileNotFoundError:
-            return  # already gone
-        if marker_fingerprint(current) != clear:
-            raise RunnerError("触摸标记已经不是指纹对应的那个了（可能有另一次运行留下了新的），没有清除。")
+            return {"marker": fingerprint, "cleared_by": "already gone"}
+        if marker_fingerprint(current) != fingerprint:
+            raise RunnerError("触摸标记在检查期间换了（可能有另一次运行留下了新的），没有清除，请重跑。")
+        if by_device:
+            reading = read_touch_state()  # under the owner lock: no agent can touch the device meanwhile
+            if reading != "none":
+                raise refuse(reading)
         marker.unlink()
     finally:
         handle.close()
-    print(f"已清除指纹 {clear} 的触摸标记（{since or '时间不明'}）", file=sys.stderr)
+    how = "device reports no contact held" if reading == "none" else "fingerprint given by a person"
+    print(f"已清除指纹 {fingerprint} 的触摸标记（{since or '时间不明'}；{how}）", file=sys.stderr)
+    return {"marker": fingerprint, "since": since, "cleared_by": how}
 
 
 def stop_tasker(tasker) -> bool:

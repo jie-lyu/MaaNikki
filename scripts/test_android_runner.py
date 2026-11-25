@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -301,6 +301,37 @@ class RunnerTests(unittest.TestCase):
             with patch("sys.stderr"):
                 runner.check_unconfirmed(root, empty)
             self.assertFalse(marker.exists())
+
+    def test_a_left_marker_naming_this_device_is_cleared_when_the_device_reports_no_contact_held(self):
+        import tempfile
+        serial = "127.0.0.1:5555"
+        for content, reading, cleared in (({"serial": serial}, "none", True),
+                                          ({"serial": serial}, "injected", False),
+                                          ({"serial": serial}, None, False),
+                                          ({"serial": "emulator-5554"}, "none", False),
+                                          ({}, "none", False)):
+            with self.subTest(content=content, reading=reading), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                marker = root / "config" / "android-input" / "touch.json"
+                marker.parent.mkdir(parents=True)
+                marker.write_text(json.dumps({"pid": 1, "since": "2026-11-26T00:00:00+09:00", **content}))
+                fingerprint = runner.marker_fingerprint(marker.read_bytes())
+                read = Mock(return_value=reading)
+                if runner.os.name == "nt" and content.get("serial") == serial:
+                    continue  # take_owner_lock needs fcntl
+                if cleared:
+                    with patch("sys.stderr"):
+                        done = runner.check_unconfirmed(root, None, read, serial)
+                    self.assertEqual(done["cleared_by"], "device reports no contact held")
+                    self.assertEqual(done["marker"], fingerprint)
+                else:
+                    with self.assertRaises(runner.RunnerError) as caught:
+                        runner.check_unconfirmed(root, None, read, serial)
+                    self.assertIn(fingerprint, str(caught.exception))
+                    self.assertIn("需要人来决定", str(caught.exception))
+                self.assertEqual(marker.exists(), not cleared)
+                # the device is read only for a marker that names it
+                self.assertEqual(read.call_count, int(content.get("serial") == serial))
 
     def test_a_malformed_touch_line_is_flagged_not_hiding_later_rows(self):
         import datetime as dt

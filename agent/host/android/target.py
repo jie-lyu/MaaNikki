@@ -51,6 +51,45 @@ def process_state(output: str | None) -> bool | None:
     return None
 
 
+_TOUCH_ENTRY = re.compile(r"^\s*\d+: down=(true|false),.*\bdeviceId=(-?\d+)\b")
+# ADB-injected events (MaaTouch uses InputManager.injectInputEvent) carry no input device: deviceId -1.
+INJECTED_DEVICE = -1
+
+
+def touch_state(output: str | None) -> str | None:
+    """Whether a contact is held on the device, from the InputDispatcher's touch state in `dumpsys input` (read-only).
+
+    "none": the dispatcher reports no display touched; "injected": an injected contact (deviceId -1) is down on some
+    display; "other": a contact from a real input device is down and no injected one; None: the answer could not be
+    read or has a form not seen on the device (it then says nothing). Measured on BlueStacks Air (Android 13,
+    2026-11-26): a contact held through MaaTouch shows `down=true ... deviceId=-1` and disappears once lifted; with
+    the MaaTouch process killed while the contact was held, the entry stays until a new touch on the same spot."""
+    if output is None:
+        return None
+    lines = output.splitlines()
+    headers = [index for index, line in enumerate(lines) if line.strip().startswith("TouchStates")]
+    if len(headers) != 1:
+        return None
+    header = lines[headers[0]]
+    if header.strip() == "TouchStates: <no displays touched>":
+        return "none"
+    if header.strip() != "TouchStatesByDisplay:":
+        return None
+    depth = len(header) - len(header.lstrip())
+    downs = []
+    for line in lines[headers[0] + 1:]:
+        if line.strip() and len(line) - len(line.lstrip()) <= depth:
+            break
+        match = _TOUCH_ENTRY.match(line)
+        if match:
+            downs.append((match.group(1) == "true", int(match.group(2))))
+    if any(down and device == INJECTED_DEVICE for down, device in downs):
+        return "injected"
+    if any(down for down, _device in downs):
+        return "other"
+    return None  # a touched display with nothing down: not a form seen on the device
+
+
 def check_controller_info(info) -> str:
     """The ADB serial of a connection the Android backend can drive; raises NavigationError otherwise."""
     serial = info.get("adb_serial") if isinstance(info, dict) else None
@@ -152,6 +191,10 @@ class AndroidTarget:
             if package != GAME_PACKAGE:
                 state.observed_loss()
             return package
+
+    def touch_state(self) -> str | None:
+        """Whether a contact is held on the device now (see touch_state()); None when it cannot be read."""
+        return touch_state(self._shell("dumpsys input"))
 
     def hung(self) -> bool:
         return False

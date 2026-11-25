@@ -289,7 +289,8 @@ class RuntimeKeyTests(FreshAndroidState):
         rt._active_inputs = Mock(return_value=None)
         rt.pause = Mock(return_value=True)
         rt.ui = SimpleNamespace(unhover=Mock(return_value=True))
-        rt._device_target = SimpleNamespace(foreground=Mock(return_value=True), exists=Mock(return_value=True))
+        rt._device_target = SimpleNamespace(foreground=Mock(return_value=True), exists=Mock(return_value=True),
+                                            serial="127.0.0.1:5555", touch_state=Mock(return_value="none"))
         screens = list(screens)
         self.frames = []
 

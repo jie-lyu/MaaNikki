@@ -20,13 +20,21 @@ os.environ.setdefault("MAAFW_BINARY_PATH", str(ROOT / "maafw"))
 
 import host  # noqa: E402
 from host import android  # noqa: E402
-from host.android.target import AndroidTarget, NoInput, check_controller_info, focused_package, process_state  # noqa: E402
+from host.android.target import (AndroidTarget, NoInput, check_controller_info, focused_package, process_state,  # noqa: E402
+                                 touch_state)
 from navigation.models import NavigationError  # noqa: E402
 
 ADB_CONTROLLER = {"name": "nikki_android", "type": "Adb", "display_short_side": 720}
 INFO = {"type": "adb", "adb_serial": "127.0.0.1:5555", "adb_path": "/opt/homebrew/bin/adb",
         "input_methods": 4, "screencap_methods": 8}
 FOCUS_GAME = "  mCurrentFocus=Window{fe7cc5b u0 com.papegames.infinitynikki/com.epicgames.unreal.GameActivity}\n"
+# `dumpsys input` around the InputDispatcher's touch state, as read on BlueStacks Air (Android 13, 2026-11-26).
+TOUCH_NONE = ("  Pointer Capture Requested: false\n  TouchStates: <no displays touched>\n  Display: 0\n"
+              "    logicalSize=1920x1080\n")
+TOUCH_HELD = ("  Pointer Capture Requested: false\n  TouchStatesByDisplay:\n"
+              "    0: down=true, split=true, deviceId=-1, source=0x00001002\n      Windows:\n"
+              "        0: name='fe7cc5b com.papegames.infinitynikki/com.epicgames.unreal.GameActivity', "
+              "pointerIds=0x80000000, targetFlags=0x105\n  Display: 0\n    logicalSize=1920x1080\n")
 FOCUS_LAUNCHER = "  mCurrentFocus=Window{1 u0 com.bluestacks.launcher/com.android.launcher3.Launcher}\n"
 
 
@@ -172,6 +180,27 @@ class TargetTests(FreshAndroidState):
         self.assertIsNone(focused_package("  mCurrentFocus=null\n"))
         self.assertIsNone(focused_package(None))
         self.assertIsNone(focused_package(FOCUS_GAME + FOCUS_LAUNCHER))  # ambiguous
+
+    def test_touch_state_reads_only_the_forms_seen_on_the_device(self):
+        self.assertEqual(touch_state(TOUCH_NONE), "none")
+        self.assertEqual(touch_state(TOUCH_HELD), "injected")
+        self.assertEqual(touch_state(TOUCH_HELD.replace("deviceId=-1", "deviceId=7")), "other")
+        two = TOUCH_HELD.replace("  Display: 0", "    1: down=true, split=true, deviceId=-1, source=0x00001002\n"
+                                                 "  Display: 0")
+        self.assertEqual(touch_state(two.replace("0: down=true, split=true, deviceId=-1",
+                                                 "0: down=true, split=true, deviceId=7")), "injected")
+        for output in (None, "", "  Display: 0\n",
+                       TOUCH_HELD.replace("down=true", "down=false"),  # touched but nothing down: not seen
+                       TOUCH_NONE + TOUCH_HELD,  # two touch states: ambiguous
+                       "  TouchState: down=false, split=false, deviceId=0, source=0x00000000\n",  # older Android
+                       "  TouchStatesByDisplay:\n  Display: 0\n",
+                       "  TouchStates: <something else>\n"):
+            with self.subTest(output=output):
+                self.assertIsNone(touch_state(output))
+        controller = FakeShellController({"dumpsys input": TOUCH_HELD})
+        target = AndroidTarget(INFO, controller)
+        self.assertEqual(target.touch_state(), "injected")
+        self.assertEqual(controller.commands, ["dumpsys input"])
 
     def test_only_an_adb_connection_is_accepted(self):
         self.assertEqual(check_controller_info(INFO), "127.0.0.1:5555")
@@ -397,7 +426,7 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
         rt.pause = Mock(return_value=True)
         rt.ui = SimpleNamespace(unhover=Mock(return_value=True))  # without pointer hover it returns at once
         rt._device_target = SimpleNamespace(foreground=Mock(return_value=focused), exists=Mock(return_value=True),
-                                            serial=INFO["adb_serial"])
+                                            serial=INFO["adb_serial"], touch_state=Mock(return_value="none"))
         return rt
 
     def test_a_tap_is_dispatched_with_device_focus_confirmed_right_before(self):
@@ -524,6 +553,7 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
                 self.state = state
                 nxt = self.tap_runtime()
                 nxt._device_target.serial = serial
+                nxt._device_target.touch_state.return_value = "injected"  # the device still reports it held
                 with android_run(), patch("daily.runtime.active_session", return_value=None):
                     with self.assertRaises(host.InputUnconfirmed):
                         nxt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
@@ -532,6 +562,75 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
                 nxt.context.run_action_direct.assert_not_called()
                 nxt.context.tasker.post_stop.assert_called_once()
                 self.assertTrue(state.marker().is_file())  # still there for the next one
+                state._owner.close()
+
+    def test_a_touch_counts_as_confirmed_only_once_the_device_reports_no_contact_held(self):
+        # The framework reports the lift done even when MaaTouch is gone; the device's own state decides.
+        for index, (readings, outcome) in enumerate(((["injected"] * 3, "unconfirmed: device reports injected"),
+                                                     ([None] * 3, "unconfirmed: device reports nothing readable"),
+                                                     (["other"] * 3, "unconfirmed: device reports other"),
+                                                     (["injected", "none"], "confirmed"))):
+            with self.subTest(readings=readings), \
+                    patch.object(host, "_DEVICE_INPUT", self.fresh_state(self.data_root / str(index))) as state, \
+                    patch("daily.runtime.wall_time.sleep"):
+                self.state = state
+                rt = self.tap_runtime()
+                rt._device_target.touch_state.side_effect = list(readings)
+                with android_run(), patch("daily.runtime.active_session", return_value=None):
+                    if outcome == "confirmed":
+                        self.assertTrue(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
+                    else:
+                        with self.assertRaises(host.InputUnconfirmed):
+                            rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
+                self.assertEqual(rt._device_target.touch_state.call_count, len(readings))
+                self.assertEqual(state.marker().exists(), outcome != "confirmed")
+                self.assertEqual(state.halted, outcome != "confirmed")
+                log = state.root / "logs" / "android-input.jsonl"
+                self.assertEqual(json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["outcome"], outcome)
+                state._owner.close()
+        with patch.object(host, "_DEVICE_INPUT", self.fresh_state(self.data_root / "raised")) as state, \
+                android_run(), patch("daily.runtime.active_session", return_value=None), \
+                self.assertRaises(host.DeviceUnreachable):
+            self.state = state
+            rt = self.tap_runtime()
+            rt._device_target.touch_state.side_effect = host.DeviceUnreachable("gone")
+            rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
+        self.assertTrue(state.halted)
+        self.assertTrue(state.marker().exists())
+
+    def test_a_left_marker_is_cleared_only_for_this_device_reporting_no_contact_held(self):
+        serial = INFO["adb_serial"]
+        cases = (("same serial, nothing held", {"pid": 1, "serial": serial}, "none", True),
+                 ("same serial, still held", {"pid": 1, "serial": serial}, "injected", False),
+                 ("same serial, unreadable", {"pid": 1, "serial": serial}, None, False),
+                 ("other serial of the same emulator", {"pid": 1, "serial": "emulator-5554"}, "none", False),
+                 ("marker from before serials were recorded", {"pid": 1}, "none", False),
+                 ("this process's own marker", {"pid": os.getpid(), "serial": serial}, "none", False),
+                 ("empty marker", None, "none", False))
+        for name, content, reading, cleared in cases:
+            with self.subTest(name), \
+                    patch.object(host, "_DEVICE_INPUT", self.fresh_state(self.data_root / name)) as state:
+                self.state = state
+                marker = state.marker()
+                marker.parent.mkdir(parents=True)
+                marker.write_bytes(b"" if content is None else json.dumps({"since": "x", **content}).encode())
+                rt = self.tap_runtime()
+                rt._device_target.touch_state.side_effect = [reading, "none"]
+                with android_run(), patch("daily.runtime.active_session", return_value=None):
+                    if cleared:
+                        self.assertTrue(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
+                    else:
+                        with self.assertRaises(host.InputUnconfirmed):
+                            rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
+                self.assertEqual(rt.context.run_action_direct.call_count, int(cleared))
+                self.assertEqual(marker.exists(), not cleared)
+                self.assertEqual(state.halted, not cleared)
+                log = state.root / "logs" / "android-input.jsonl"
+                lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+                recovered = [json.loads(line) for line in lines if json.loads(line)["action"] == "RecoverMarker"]
+                self.assertEqual(len(recovered), int(cleared))
+                if cleared:  # the new reservation names the device it was made for
+                    self.assertIn(serial, recovered[0]["outcome"])
                 state._owner.close()
 
     @unittest.skipUnless(HAS_FLOCK, "flock is macOS/POSIX only; Android hosts are macOS for now")
@@ -644,8 +743,8 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
                 rt = self.tap_runtime()
                 original = self.state.begin_touch
 
-                def begin_touch_while_something_changes(change=change, rt=rt, original=original):
-                    original()
+                def begin_touch_while_something_changes(*args, change=change, rt=rt, original=original):
+                    original(*args)
                     if change == "focus":
                         rt._device_target.foreground.return_value = False
                     elif change == "stopping":

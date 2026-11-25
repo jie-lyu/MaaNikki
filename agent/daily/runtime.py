@@ -521,8 +521,11 @@ class Runtime:
         with state.lock:
             if state.halted or self.stopped:
                 return False
+            target = self._sessionless_target()
             try:
-                state.begin_touch()  # reserved on disk first, or nothing is sent
+                # Reserved on disk first, or nothing is sent; a marker an earlier process left is cleared only when
+                # this device reports no contact held.
+                state.begin_touch(target.serial, target.touch_state)
             except BaseException:
                 if state.halted:
                     self._halt_unconfirmed()
@@ -549,11 +552,19 @@ class Runtime:
                     with measure("input.action"):
                         result = _android_dispatch(self.context, action, fields)
                     succeeded = result is not None and bool(result.success)
+                    outcome = "unconfirmed"
+                    if succeeded:
+                        # The framework reports a lift as done even when MaaTouch is gone (measured 2026-11-26):
+                        # only the device saying no contact is held confirms it.
+                        released = self._device_touch_released(target)
+                        succeeded = released is True
+                        outcome = "confirmed" if succeeded else \
+                            f"unconfirmed: device reports {released or 'nothing readable'}"
                 except BaseException as error:
                     state.record_touch(action, fields, f"raised {type(error).__name__}")
                     self._halt_unconfirmed()
                     raise
-                state.record_touch(action, fields, "confirmed" if succeeded else "unconfirmed")
+                state.record_touch(action, fields, outcome)
             finally:
                 if not sent:
                     if intent:
@@ -571,6 +582,19 @@ class Runtime:
         return True
 
     TOUCH_KEY_ATTEMPTS = 3
+    RELEASE_READS = 3
+
+    def _device_touch_released(self, target):
+        """Android: True once the device reports no contact held (a few short reads, as the lift may still be in
+        flight); otherwise the last reading ("injected", "other" or None)."""
+        reading = None
+        for attempt in range(self.RELEASE_READS):
+            if attempt:
+                wall_time.sleep(.1)
+            reading = target.touch_state()
+            if reading == "none":
+                return True
+        return reading
 
     def escape(self, delay=0.35):
         """Back out of the current screen: Esc (``key("menu")``) on the desktop, ``leave_page`` on Android, where
