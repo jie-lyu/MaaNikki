@@ -359,6 +359,8 @@ class FlowTests(unittest.TestCase):
         self.assertNotIn("row", game.touches)
         self.assertEqual(game.touches[-1], ("swipe", (700, 520), (700, 300)))
         self.assertTrue(any("退出登录" in line for line in rt.logs), rt.logs)
+        self.assertEqual(len(stops(rt)), 1)  # the refusing frame is saved
+        self.assertIsNotNone(stops(rt)[0].kwargs["image"])
 
     def test_a_row_that_settles_before_the_swipe_is_tapped_without_a_swipe(self):
         game = Game(["already_used"], settle_after=1)

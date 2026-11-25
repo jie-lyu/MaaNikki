@@ -331,17 +331,21 @@ def tap_duck(rt) -> bool:
 
 
 def _left(title):
-    """``done`` after a back-arrow tap on the page titled ``title``: the HUD or a page with another title."""
-    return lambda s, f, r: s.kind == "hud" or (s.kind == "page" and not pages.is_page(s, title))
+    """``done`` after a back-arrow tap on the page titled exactly ``title``: the HUD or a page with another title."""
+    return lambda s, f, r: s.kind == "hud" or (s.kind == "page" and s.title != title)
 
 
 def to_hud(rt, what, *, any_page=False, attempts=6) -> bool:
     """Back to the HUD from where this task leaves the game, one strict step at a time, each step waited out before
     the next: a result banner fades (nothing is tapped while it shows), the 兑换奖励 modal closes by its ✕, 设置 (only on
     its 其他 tab, on both tap frames) and 美鸭梨 by their back arrows. With ``any_page`` (the start of a run), any
-    other page is left by its back arrow too. Every tap is single (no second attempt); the quit dialog, a reward layer,
-    another 设置 tab or anything else stops the task with that frame."""
-    for _ in range(attempts):
+    other page is left by its back arrow too. Every tap is single (no second attempt; back arrows only on the page
+    with exactly the decided title, tap_on_page exact=True); the quit dialog, a reward layer, another 设置 tab or
+    anything else stops the task with that frame. Reaching the HUD after the last allowed step succeeds.
+
+    Not pages.to_hud(single=True): that one stops on the 兑换奖励 modal (a leftover modal must be closed here) and
+    taps the back arrow of any 设置 tab (here only 其他)."""
+    for step in range(attempts + 1):
         screen, frame, recognize = pages.screen_now(rt)
         if frame is None:
             return False
@@ -350,6 +354,8 @@ def to_hud(rt, what, *, any_page=False, attempts=6) -> bool:
             continue
         if screen.kind == "hud":
             return True
+        if step == attempts:
+            break
         if banner(screen, frame, recognize) is not None:
             found = wait_until(rt, f"{what}：等兑换结果的提示条消失", lambda s, f, r: is_modal(s), _banner_shown,
                                seconds=BANNER_WAIT)
@@ -357,18 +363,19 @@ def to_hud(rt, what, *, any_page=False, attempts=6) -> bool:
             if not pages.tap_on_page(rt, MODAL, actions.MODAL_CLOSE, kind="modal", retry=False):
                 return False
             found = wait_until(rt, f"{what}：关闭兑换奖励弹窗", _other, lambda s, f, r: is_modal(s))
-        elif pages.is_page(screen, SETTINGS):
+        elif pages.is_page(screen, SETTINGS) and screen.title == SETTINGS:
             if not other_view(screen, recognize):
                 raise Stop(f"{what}时设置页面不在「其他」页签", [frame])
-            if not pages.tap_on_page(rt, SETTINGS, actions.BACK_ARROW, retry=False,
+            if not pages.tap_on_page(rt, SETTINGS, actions.BACK_ARROW, retry=False, exact=True,
                                      accept=lambda f, r: actions._hit(r(ROW_LABEL))):
                 return False
             found = wait_until(rt, f"{what}：离开设置", _left(SETTINGS), _other)
-        elif pages.is_page(screen, MENU) or (any_page and screen.kind == "page"):
-            title = MENU if pages.is_page(screen, MENU) else screen.title
-            if not pages.tap_on_page(rt, title, actions.BACK_ARROW, retry=False):
+        elif screen.kind == "page" and (screen.title == MENU or any_page):
+            title = screen.title
+            if not pages.tap_on_page(rt, title, actions.BACK_ARROW, retry=False, exact=True):
                 return False
-            found = wait_until(rt, f"{what}：离开「{title}」", _left(title), lambda s, f, r: pages.is_page(s, title))
+            found = wait_until(rt, f"{what}：离开「{title}」", _left(title),
+                               lambda s, f, r: s.kind == "page" and s.title == title)
         else:
             raise Stop(f"{what}时画面不是能安全退回的页面（{screen.reason or screen.kind}）", [frame])
         if found is None:
@@ -379,13 +386,13 @@ def to_hud(rt, what, *, any_page=False, attempts=6) -> bool:
 def open_settings(rt) -> bool:
     if not tap_duck(rt):
         return False
-    if wait_until(rt, "打开美鸭梨菜单", lambda s, f, r: pages.is_page(s, MENU),
+    if wait_until(rt, "打开美鸭梨菜单", lambda s, f, r: s.kind == "page" and s.title == MENU,
                   lambda s, f, r: s.kind == "hud") is None:
         return False
-    if not pages.tap_on_page(rt, MENU, MENU_SETTINGS, retry=False):
+    if not pages.tap_on_page(rt, MENU, MENU_SETTINGS, retry=False, exact=True):
         return False
     return wait_until(rt, "打开设置", lambda s, f, r: pages.is_page(s, SETTINGS),
-                      lambda s, f, r: pages.is_page(s, MENU)) is not None
+                      lambda s, f, r: s.kind == "page" and s.title == MENU) is not None
 
 
 def open_other(rt) -> bool:
@@ -564,6 +571,9 @@ def guarded(rt, step) -> bool:
         rt.diagnostic("android_redeem_stop_0", str(error), image=error.frame)
         fail(rt, str(error))
     except (pages.GuardRefusal, actions.ScreenUnrecognised, NavigationError) as error:
+        frame = getattr(error, "frame", None)  # the refusing frame, when the refusal carries it
+        if frame is not None:
+            rt.diagnostic("android_redeem_stop_0", str(error), image=frame)
         fail(rt, str(error))
     except (OSError, ValueError) as error:  # the record could not be written
         fail(rt, f"写不了安卓兑换码记录（{error}）")
