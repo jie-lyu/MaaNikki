@@ -22,10 +22,19 @@ import host  # noqa: E402
 from host.android import actions, pages, redeem  # noqa: E402
 from host.android.actions import Screen  # noqa: E402
 
+try:
+    import fcntl  # noqa: F401
+    HAS_FLOCK = True
+except ImportError:
+    HAS_FLOCK = False
+
 # Where the saved frames show things (1280x720).
 BACK = [37, 22, 40, 40]
+DUCK = [30, 18, 54, 54]
+DUCK_POINT = [56, 44]  # the duck's touch point (device run 1 tapped (56,44))
 GEAR = [610, 644, 47, 47]
 OTHER = [79, 598, 55, 34]
+IMAGE_HEADER = [282, 91, 98, 28]
 HEADER = [260, 529, 100, 34]
 HEADER_SCROLLED = [260, 510, 100, 34]
 ROW_LABEL = [288, 569, 80, 36]
@@ -37,16 +46,17 @@ CLEAR = [794, 329, 28, 28]
 FIELD = [406, 328, 116, 27]
 USE = [603, 480, 70, 39]
 CLOSE = [929, 177, 36, 36]
-HINT = [450, 400, 380, 30]
+BANNER = [569, 197, 137, 28]
 GOLD = (40, 150, 220)  # BGR of the filled modal's 使用 face (HSV ~18, 208, 220)
+PINK = (215, 190, 245)  # BGR of the result banner (HSV ~177, 57, 245)
 
-HUD = Screen("hud", {"duck": [30, 18, 54, 54]})
+HUD = Screen("hud", {"duck": DUCK})
 MENU = Screen("page", {"back": BACK}, title="美鸭梨")
 SETTINGS = Screen("page", {"back": BACK}, title="设置")
 MODAL = Screen("modal", {"close": CLOSE}, title="兑换奖励")
 UNKNOWN = Screen("unknown", reason="认不出当前画面")
-HINTS = {"already_used": "该兑换码已被使用", "expired": "兑换码已过期", "invalid": "兑换码无效",
-         "cooldown": "操作过于频繁，请稍后再试", "other": "请输入兑换码"}
+BANNERS = {"already_used": "兑换码已使用", "expired": "兑换码已过期", "invalid": "兑换码无效",
+           "cooldown": "操作过于频繁，请稍后再试", "other": "请输入兑换码"}
 
 
 def row(text, box):
@@ -61,36 +71,44 @@ def result(rows):
 
 
 MISS = result([])
+QUIT = (Screen("quit_dialog", {"cancel": [494, 480, 20, 20]}), np.full((720, 1280, 3), 7, np.uint8),
+        lambda node, override=None: result([row("退出游戏", [560, 200, 160, 40])])
+        if node in (actions.QUIT_TITLE, actions.QUIT_CANCEL) else MISS)
 
 
 class Game:
-    """A scripted game: HUD -> 美鸭梨 -> 设置 (图像) -> 其他 (row faded) -> swiped -> 兑换奖励 modal. ``results``: what
-    each 使用 tap brings ("redeemed": the 「恭喜获得」 layer, a HINTS key: that hint on the modal, "nothing": no change,
-    "popup": an unknown dialog). ``field``: what the modal's field holds when it opens. ``typed``: what the field
-    reads after a text input (default: the text). ``screens``: frames shown instead, keyed by the number of touches
-    sent. ``stop_on``: the touch after which the run is stopped. ``layer_stays``: the dismissal tap does nothing.
-    ``sticky_hint``: a hint stays on the modal through clearing and typing."""
+    """A scripted game: HUD -> 美鸭梨 -> 设置 (图像, or ``tab``) -> 其他 (row faded) -> swiped -> 兑换奖励 modal. ``results``:
+    what each 使用 tap brings ("layer": a 「恭喜获得」 layer, a BANNERS key: that banner over the modal for
+    ``banner_reads`` frames, then the modal again with the code still in the field, "nothing": no change, "popup": an
+    unknown dialog). ``field``: what the modal's field holds when it opens. ``typed``: what the field reads after a text
+    input (default: the text). ``screens``: frames shown instead, keyed by the number of touches sent. ``stop_on``: the
+    touch after which the run is stopped. ``start``: where the game is when the task starts. ``settle_after``: the faded
+    row settles by itself after that many 其他 frames. ``close_to``: where the modal's ✕ leads."""
 
-    def __init__(self, results=(), *, field="", typed=None, forbidden=(), screens=None, stop_on=None,
-                 layer_stays=False, sticky_hint=False):
-        self.where, self.field, self.focused, self.hint = "hud", field, False, ""
+    def __init__(self, results=(), *, field="", typed=None, forbidden=(), screens=None, stop_on=None, start="hud",
+                 banner_reads=2, tab="settings", settle_after=None, close_to="scrolled"):
+        self.where, self.field, self.focused, self.banner, self.banner_left = start, field, False, "", 0
         self.results, self.typed, self.forbidden = list(results), typed, list(forbidden)
-        self.screens, self.stop_on, self.layer_stays = dict(screens or {}), stop_on, layer_stays
-        self.touches, self.texts, self.rt, self.sticky_hint = [], [], None, sticky_hint
+        self.screens, self.stop_on, self.banner_reads, self.tab = dict(screens or {}), stop_on, banner_reads, tab
+        self.settle_after, self.other_reads, self.close_to = settle_after, 0, close_to
+        self.touches, self.texts, self.rt = [], [], None
 
     def frame(self):
         frame = np.zeros((720, 1280, 3), np.uint8)
-        if self.where == "modal":
+        if self.where in ("modal", "banner"):
             if self.focused:
                 frame[665:720, :] = 255
             if self.field:
                 x, y, w, h = redeem.USE_FACE
                 frame[y:y + h, x:x + w] = GOLD
+        if self.where == "banner":
+            frame[192:232, 310:970] = PINK
         return frame
 
     def recognize(self, node, override=None):
-        where, modal = self.where, self.where == "modal"
-        settings = where in ("settings", "other", "scrolled") or modal
+        where = self.where
+        modal, body = where == "modal", where in ("modal", "banner")
+        settings = where in ("settings", "control", "other", "scrolled") or body
         if node == pages.FORBIDDEN:
             return result([row(text, box) for text, box in self.forbidden]
                           + ([row("全部恢复默认", RESET)] if settings else []))
@@ -99,45 +117,65 @@ class Game:
         if node == actions.MODAL_CLOSE:
             return result([row("", CLOSE)]) if modal or where == "popup" else MISS
         if node == actions.HUD_DUCK:
-            return result([row("", HUD.targets["duck"])]) if where == "hud" else MISS
+            return result([row("", DUCK)]) if where == "hud" else MISS
         if node == actions.BACK_ARROW:
-            return result([row("", BACK)]) if where in ("menu", "settings", "other", "scrolled") else MISS
+            return result([row("", BACK)]) if where in ("menu", "settings", "control", "other", "scrolled") else MISS
         if node == redeem.MENU_SETTINGS:
             return result([row("", GEAR)]) if where == "menu" else MISS
         if node == redeem.OTHER_TAB:
             return result([row("其他", OTHER)]) if settings else MISS
+        if node == redeem.IMAGE_CONTENT:
+            return result([row("基础设置", IMAGE_HEADER)]) if where == "settings" else MISS
         if node == redeem.ROW_LABEL:
             return result({"other": [row("兑换码", HEADER)],
                            "scrolled": [row("兑换码", HEADER_SCROLLED), row("兑换码", ROW_LABEL)]}.get(where, []))
         if node == redeem.ROW_USE:
             return result({"other": [row("使用", ROW_USE_FADED)], "scrolled": [row("使用", ROW_USE)]}.get(where, []))
         if node == redeem.PLACEHOLDER:
-            return result([row("点击此处输入兑换码", PLACEHOLDER)]) if modal and not self.field else MISS
+            return result([row("点击此处输入兑换码", PLACEHOLDER)]) if body and not self.field else MISS
         if node == redeem.CLEAR:
-            return result([row("", CLEAR)]) if modal and self.field else MISS
+            return result([row("", CLEAR)]) if body and self.field else MISS
         if node == redeem.FIELD:
-            return result([row(self.field, FIELD)]) if modal and self.field else MISS
+            return result([row(self.field, FIELD)]) if body and self.field else MISS
         if node == redeem.USE:
-            return result([row("使用", USE)]) if modal else MISS
-        if node == redeem.HINT:
-            return result([row(self.hint, HINT)]) if modal and self.hint else MISS
+            return result([row("使用", USE)]) if body else MISS
+        if node == redeem.BANNER:
+            return result([row(self.banner, BANNER)]) if where == "banner" else MISS
         if node in (redeem.LAYER_TITLE, redeem.LAYER_HINT):
             return result([row("恭喜获得", [570, 165, 136, 42])]) if where == "layer" else MISS
         return MISS
+
+    def snapshot(self, where):
+        """The frame the game would show at ``where`` (for scripted screens)."""
+        saved, self.where = self.where, where
+        try:
+            screen = {"hud": HUD, "menu": MENU, "settings": SETTINGS, "control": SETTINGS, "other": SETTINGS,
+                      "scrolled": SETTINGS, "modal": MODAL}.get(where, UNKNOWN)
+            return screen, self.frame(), (lambda w: lambda node, override=None: self._at(w, node, override))(where)
+        finally:
+            self.where = saved
+
+    def _at(self, where, node, override):
+        saved, self.where = self.where, where
+        try:
+            return self.recognize(node, override)
+        finally:
+            self.where = saved
 
     def screen_now(self, rt):
         if rt.stopped:
             return None, None, None
         if self.screens.get(len(self.touches)):
             return self.screens[len(self.touches)].pop(0)
-        screen = {"hud": HUD, "menu": MENU, "settings": SETTINGS, "other": SETTINGS, "scrolled": SETTINGS,
-                  "modal": MODAL}.get(self.where, UNKNOWN)
-        return screen, self.frame(), self.recognize
-
-    def key(self, name):
-        assert name == "menu" and self.where == "hud"
-        self.where = "menu"
-        return True
+        if self.where == "other":
+            self.other_reads += 1
+            if self.settle_after is not None and self.other_reads > self.settle_after:
+                self.where = "scrolled"
+        elif self.where == "banner":
+            if self.banner_left <= 0:
+                self.where, self.banner = "modal", ""
+            self.banner_left -= 1
+        return self.snapshot(self.where)
 
     def touched(self, what):
         self.touches.append(what)
@@ -152,8 +190,10 @@ class Game:
             self.touched(("swipe", tuple(fields["begin"]), tuple(fields["end"])))
             return True
         target = list(fields["target"])
-        if target == GEAR and self.where == "menu":
-            self.where, what = "settings", "gear"
+        if target == DUCK_POINT and self.where == "hud":
+            self.where, what = "menu", "duck"
+        elif target == GEAR and self.where == "menu":
+            self.where, what = self.tab, "gear"
         elif target == OTHER and self.where == "settings":
             self.where, what = "other", "other"
         elif target == ROW_USE and self.where == "scrolled":
@@ -162,21 +202,14 @@ class Game:
             self.focused, what = True, "field"
         elif target == CLEAR and self.where == "modal":
             self.field, self.focused, what = "", False, "clear"
-            self.hint = self.hint if self.sticky_hint else ""
         elif target == USE and self.where == "modal":
             what, outcome = "use", self.results.pop(0)
-            if outcome == "redeemed":
-                self.where = "layer"
-            elif outcome == "popup":
-                self.where = "popup"
-            elif outcome in HINTS:
-                self.hint = HINTS[outcome]
-        elif target == list(redeem.DISMISS_POINT) and self.where == "layer":
-            what = "dismiss"
-            if not self.layer_stays:
-                self.where = "modal"
+            if outcome in ("layer", "popup"):
+                self.where = outcome
+            elif outcome in BANNERS:
+                self.where, self.banner, self.banner_left = "banner", BANNERS[outcome], self.banner_reads
         elif target == CLOSE and self.where == "modal":
-            self.where, what = "scrolled", "close"
+            self.where, what = self.close_to, "close"
         elif target == BACK and self.where in ("scrolled", "menu"):
             self.where, what = {"scrolled": "menu", "menu": "hud"}[self.where], "back"
         else:
@@ -188,13 +221,13 @@ class Game:
         assert self.where == "modal" and self.focused and not self.field and source_frame is not None
         self.texts.append(text)
         self.field = self.typed or text
-        self.hint = self.hint if self.sticky_hint else ""
         return True
 
 
 def play(game, codes=("ABC123",), record=None):
-    rt = SimpleNamespace(stopped=False, logs=[], key=game.key, _frame_still_valid=Mock(return_value=True),
-                         pause=Mock(return_value=True), diagnostic=Mock(), TOUCH_KEY_ATTEMPTS=3, action=game.action)
+    rt = SimpleNamespace(stopped=False, logs=[], key=Mock(side_effect=AssertionError("shared named action")),
+                         _frame_still_valid=Mock(return_value=True), pause=Mock(return_value=True),
+                         diagnostic=Mock(), TOUCH_KEY_ATTEMPTS=3, action=game.action)
     rt.log = rt.logs.append
     game.rt = rt
     root = Path(tempfile.mkdtemp())
@@ -216,26 +249,44 @@ def stops(rt):
     return [c for c in rt.diagnostic.call_args_list if c.args[0].startswith("android_redeem_stop_")]
 
 
+ENTRY = ["duck", "gear", "other", ("swipe", (700, 520), (700, 300)), "row", "field"]
+
+
 class FlowTests(unittest.TestCase):
-    def test_each_code_is_typed_read_back_and_submitted_once_and_each_outcome_is_recorded(self):
-        codes = ("USED1", "OLD2", "BAD3", "BUSY4", "NEW5")
-        game = Game(["already_used", "expired", "invalid", "cooldown", "redeemed"])
+    def test_each_code_is_typed_read_back_and_submitted_once_and_each_banner_is_recorded(self):
+        codes = ("USED1", "OLD2", "BAD3", "BUSY4")
+        game = Game(["already_used", "expired", "invalid", "cooldown"])
         outcome, rt = play(game, codes)
         self.assertTrue(outcome, rt.logs)
-        self.assertEqual(game.touches[:5], ["gear", "other", ("swipe", (700, 520), (700, 300)), "row", "field"])
+        self.assertEqual(game.touches[:6], ENTRY)
         self.assertEqual(game.texts, list(codes))
         self.assertEqual(game.touches.count("use"), len(codes))  # never a second submit, a cooldown included
-        self.assertEqual(game.touches[-4:], ["dismiss", "close", "back", "back"])
+        self.assertEqual(game.touches[-3:], ["close", "back", "back"])
         self.assertEqual(rt.record, {"USED1": "already_used", "OLD2": "expired", "BAD3": "expired",
-                                     "BUSY4": "cooldown", "NEW5": "redeemed"})
+                                     "BUSY4": "cooldown"})
         for words in ("兑换码「USED1」已使用过", "兑换码「OLD2」已过期或无效", "兑换码「BUSY4」提示操作太频繁，本次不再提交它",
-                      "兑换码「NEW5」兑换成功。", "兑换码领取：成功兑换 1 个兑换码。"):
+                      "兑换码输入框读回「USED1」，与兑换码一致。"):
             self.assertTrue(any(words in line for line in rt.logs), (words, rt.logs))
-        # Each later code: the field still holds the previous code, so its X first, then the field, then the text.
+        # Each later code: after the banner has gone, the field still holds the previous code: its X, then the field.
         uses = [i for i, t in enumerate(game.touches) if t == "use"]
         for before, after in zip(uses, uses[1:]):
             self.assertEqual(game.touches[before + 1:after], ["clear", "field"])
         self.assertEqual(stops(rt), [])
+        rt.key.assert_not_called()  # the shared named action (which taps 取消 and tries again) is not used
+
+    def test_the_device_run_banner_is_waited_out_before_the_next_code(self):
+        game = Game(["already_used", "already_used"], banner_reads=8)
+        outcome, rt = play(game, ("拾光二载暖赴新章", "NEXT"))
+        self.assertTrue(outcome, rt.logs)
+        self.assertEqual(rt.record, {"拾光二载暖赴新章": "already_used", "NEXT": "already_used"})
+
+    def test_a_banner_that_never_goes_stops_before_the_next_code(self):
+        game = Game(["already_used", "already_used"], banner_reads=10 ** 6)
+        outcome, rt = play(game, ("USED1", "NEXT"))
+        self.assertFalse(outcome)
+        self.assertEqual(game.touches.count("use"), 1)
+        self.assertEqual(game.touches[-1], "use")
+        self.assertEqual(len(stops(rt)), 1)
 
     def test_recorded_codes_are_skipped_as_on_the_pc(self):
         done = {"A": "redeemed", "B": "already_used", "C": "expired", "D": "cooldown"}
@@ -248,26 +299,41 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(game.touches, [])
         self.assertIn("兑换码领取：暂无待兑换的新兑换码，跳过。", rt.logs)
 
+    def test_with_nothing_pending_a_leftover_modal_is_left_the_verified_way(self):
+        game = Game(start="modal", field="USED1")
+        outcome, rt = play(game, ("A",), record={"A": "already_used"})
+        self.assertTrue(outcome, rt.logs)
+        self.assertEqual(game.touches, ["close", "back", "back"])
+        for start in ("layer", "popup"):
+            with self.subTest(start=start):
+                game = Game(start=start)
+                outcome, rt = play(game, ("A",), record={"A": "already_used"})
+                self.assertFalse(outcome)
+                self.assertEqual(game.touches, [])
+                self.assertEqual(len(stops(rt)), 1)
+
     def test_a_filled_field_is_cleared_by_its_x_before_the_field_is_tapped(self):
         game = Game(["already_used"], field="LEFTOVER")
         outcome, rt = play(game)
         self.assertTrue(outcome, rt.logs)
-        self.assertEqual(game.touches[3:6], ["row", "clear", "field"])
+        self.assertEqual(game.touches[4:7], ["row", "clear", "field"])
         self.assertEqual(game.texts, ["ABC123"])
 
     def test_a_field_that_reads_other_text_is_never_submitted(self):
-        game = Game(["redeemed"], typed="ABCI23")
-        outcome, rt = play(game)
-        self.assertFalse(outcome)
-        self.assertNotIn("use", game.touches)
-        self.assertEqual(game.touches[-1], "field")  # nothing after the input, not even the way back
-        self.assertEqual(len(stops(rt)), 1)
-        self.assertIn("「ABCI23」，不是兑换码「ABC123」，没有提交", stops(rt)[0].args[1])
-        self.assertEqual(rt.record, {})
+        for typed in ("ABCI23", "ABC 123"):  # inner whitespace is not stripped away either
+            with self.subTest(typed=typed):
+                game = Game(["already_used"], typed=typed)
+                outcome, rt = play(game)
+                self.assertFalse(outcome)
+                self.assertNotIn("use", game.touches)
+                self.assertEqual(game.touches[-1], "field")  # nothing after the input, not even the way back
+                self.assertEqual(len(stops(rt)), 1)
+                self.assertIn(f"输入框读回「{typed}」，不是兑换码「ABC123」，没有提交", stops(rt)[0].args[1])
+                self.assertEqual(rt.record, {})
 
-    def test_an_unknown_result_stops_with_that_frame_saved_and_nothing_recorded(self):
-        for results, words in ((["nothing"], "没有看到成功的奖励层"), (["other"], "没有看到成功的奖励层"),
-                               (["popup"], "认不出的画面")):
+    def test_an_unknown_result_or_a_reward_layer_stops_with_that_frame_and_records_nothing(self):
+        for results, words in ((["nothing"], "没有看到认得的提示条"), (["other"], "提示条认不出：「请输入兑换码」"),
+                               (["popup"], "认不出的画面"), (["layer"], "没有记录，也没有点")):
             with self.subTest(results=results):
                 game = Game(results)
                 outcome, rt = play(game, ("ABC123", "NEXT"))
@@ -280,43 +346,61 @@ class FlowTests(unittest.TestCase):
                 self.assertEqual(rt.record, {})
 
     def test_a_stop_before_the_text_input_sends_no_text(self):
-        game = Game(["redeemed"], stop_on="field")
+        game = Game(["already_used"], stop_on="field")
         outcome, rt = play(game)
         self.assertFalse(outcome)
         self.assertEqual(game.texts, [])
         self.assertEqual(game.touches[-1], "field")
 
     def test_a_forbidden_word_next_to_the_row_refuses_the_tap_and_ends_all_input(self):
-        game = Game(["redeemed"], forbidden=[("退出登录", [940, 615, 100, 30])])
+        game = Game(["already_used"], forbidden=[("退出登录", [940, 615, 100, 30])])
         outcome, rt = play(game)
         self.assertFalse(outcome)
         self.assertNotIn("row", game.touches)
         self.assertEqual(game.touches[-1], ("swipe", (700, 520), (700, 300)))
         self.assertTrue(any("退出登录" in line for line in rt.logs), rt.logs)
 
-    def test_a_reward_layer_still_there_after_one_tap_stops(self):
-        game = Game(["redeemed"], layer_stays=True)
-        outcome, rt = play(game, ("ABC123", "NEXT"))
+    def test_a_row_that_settles_before_the_swipe_is_tapped_without_a_swipe(self):
+        game = Game(["already_used"], settle_after=1)
+        outcome, rt = play(game)
+        self.assertTrue(outcome, rt.logs)
+        self.assertEqual(game.touches[:5], ["duck", "gear", "other", "row", "field"])
+
+    def test_another_settings_tab_stops_on_its_first_frame(self):
+        game = Game(["already_used"], tab="control")
+        outcome, rt = play(game)
         self.assertFalse(outcome)
-        self.assertEqual(game.touches.count("dismiss"), 1)
-        self.assertEqual(game.touches[-1], "dismiss")
-        self.assertEqual(rt.record, {"ABC123": "redeemed"})  # the layer itself was the evidence
+        self.assertEqual(game.touches, ["duck", "gear"])
+        self.assertEqual(len(stops(rt)), 1)
+        game = Game(["already_used"], close_to="settings")  # the ✕ led to 图像, not 其他
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.touches[-1], "close")
         self.assertEqual(len(stops(rt)), 1)
 
-    def test_an_old_hint_still_on_the_modal_blocks_the_next_submit(self):
-        game = Game(["already_used", "redeemed"], sticky_hint=True)  # the first code's hint does not go away
-        outcome, rt = play(game, ("USED1", "NEW2"))
+    def test_a_quit_dialog_on_an_entry_or_return_tap_frame_stops_with_that_frame(self):
+        game = Game(["already_used"])
+        hud = game.snapshot("hud")
+        game.screens = {0: [hud, hud, hud, QUIT]}  # the duck tap's confirming frame
+        outcome, rt = play(game)
         self.assertFalse(outcome)
-        self.assertEqual(game.touches.count("use"), 1)
-        self.assertEqual(len(stops(rt)), 1)
+        self.assertEqual(game.touches, [])
+        self.assertIs(stops(rt)[0].kwargs["image"], QUIT[1])
+        game = Game(["already_used"])
+        scrolled = game.snapshot("scrolled")
+        game.screens = {8: [scrolled, scrolled, scrolled, QUIT]}  # after the ✕: the back tap's confirming frame
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.touches[-1], "close")
+        self.assertIs(stops(rt)[0].kwargs["image"], QUIT[1])
 
     def test_an_unexpected_screen_while_opening_stops_with_that_frame(self):
         popup = (UNKNOWN, np.zeros((720, 1280, 3), np.uint8),
                  lambda node, override=None: result([row("", CLOSE)]) if node == actions.MODAL_CLOSE else MISS)
-        game = Game(["redeemed"], screens={1: [popup]})  # after the gear: an unknown dialog, not 设置
+        game = Game(["already_used"], screens={2: [popup]})  # after the gear: an unknown dialog, not 设置
         outcome, rt = play(game)
         self.assertFalse(outcome)
-        self.assertEqual(game.touches, ["gear"])
+        self.assertEqual(game.touches, ["duck", "gear"])
         self.assertEqual(len(stops(rt)), 1)
         self.assertIs(stops(rt)[0].kwargs["image"], popup[1])
 
@@ -326,6 +410,11 @@ class TextInputTests(unittest.TestCase):
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
+        if not HAS_FLOCK:  # Windows CI: ownership is injected (as in test_android_backend.py); macOS tests the lock
+            owner = patch.object(host, "take_owner_lock", side_effect=lambda path: (
+                path.parent.mkdir(parents=True, exist_ok=True), SimpleNamespace(close=lambda: None))[1])
+            owner.start()
+            self.addCleanup(owner.stop)
         self.state = host.DeviceInputState(self.root)
         self.frame = np.zeros((4, 4, 3), np.uint8)
         self.state.mark(self.frame, 0, SimpleNamespace(state="none", boot_id="boot", latest=1))
@@ -436,7 +525,7 @@ class EntryTests(unittest.TestCase):
         refuse = Mock(side_effect=AssertionError("host clipboard"))
         with patch("daily.redeem_codes.get_clipboard_text", refuse), \
                 patch("daily.redeem_codes.set_clipboard_text", refuse), patch("host.clipboard", refuse):
-            outcome, _rt = play(Game(["already_used", "redeemed"]), ("A1", "B2"))
+            outcome, _rt = play(Game(["already_used", "expired"]), ("A1", "B2"))
         self.assertTrue(outcome)
         refuse.assert_not_called()
 
@@ -453,7 +542,7 @@ class ResourceTests(unittest.TestCase):
         tiers = json.loads((ROOT / "agent/host/android/tasks.json").read_text(encoding="utf-8"))
         self.assertIn("MaaNikki_RedeemCodes", tiers["experimental"])
         note = tiers["notes"]["MaaNikki_RedeemCodes"]
-        for words in ("从没在设备上见过", "输入", "错误提示", "奖励层", "停下并保存截图"):
+        for words in ("兑换码已使用", "奖励层", "不记录也不点", "停下并保存截图"):
             self.assertIn(words, note)
         if not (ROOT / "resource_android").is_dir():  # the release source archive does not list it (plan risk 13)
             self.assertFalse((ROOT / ".git").exists(), "resource_android/ is missing from the checkout")
@@ -490,11 +579,13 @@ from host.android import actions, pages, redeem, touch_point
 fixtures = repo / "scripts/fixtures/android"
 crop = lambda name: cv2.imread(str(fixtures / name))
 # UID-free crops of the saved frames (menu-p1, settings-other, settings-other-scrolled, c3-settings-open,
-# redeem-modal, text-2-typed), put back where they were.
+# redeem-modal, text-2-typed, device run 1's stop frame), put back where they were.
 menu_title, bar, settings = crop("redeem_menu_title.png"), crop("redeem_menu_bar.png"), crop("page_title.png")
 tabs_other, tabs_image, reset = crop("redeem_tabs_other.png"), crop("redeem_tabs_image.png"), crop("redeem_reset.png")
+image_header = crop("redeem_image_header.png")  # 「基础设置」, the 图像 tab's first header (c3-settings-open)
 faded, scrolled = crop("redeem_list.jpg"), crop("redeem_list_scrolled.jpg")
 empty, typed = crop("redeem_modal_empty.jpg"), crop("redeem_modal_typed.jpg")
+banner = crop("redeem_modal_banner.jpg")  # device run 1's stop frame: 「兑换码已使用」 over the modal's title bar
 layer_title, layer_hint = crop("reward_layer_title.png"), crop("reward_layer_hint.png")
 
 def compose(marks, dim=False, strip=False):
@@ -511,7 +602,7 @@ page = [(settings, 0, 10), (reset, 990, 640)]
 other = page + [(tabs_other, 0, 560)]
 frames = {
     "menu": compose([(menu_title, 0, 0), (bar, 560, 620)]),
-    "settings image": compose(page + [(tabs_image, 0, 560)]),
+    "settings image": compose(page + [(tabs_image, 0, 560), (image_header, 262, 78)]),
     "other faded": compose(other + [(faded, 250, 500)]),
     "other scrolled": compose(other + [(scrolled, 250, 490)]),
     "reset under the row": compose(other + [(scrolled, 250, 490), (reset, 920, 612)]),
@@ -521,6 +612,7 @@ frames["modal empty"] = compose([(under, 0, 0)], dim=True); frames["modal empty"
 frames["modal focused"] = frames["modal empty"].copy(); frames["modal focused"][668:720, :] = 255
 frames["modal typed"] = compose([(under, 0, 0)], dim=True); frames["modal typed"][160:560, 300:980] = typed
 frames["modal typed"][668:720, :] = 255
+frames["modal banner"] = compose([(under, 0, 0)], dim=True); frames["modal banner"][160:560, 300:980] = banner
 frames["layer"] = (frames["modal typed"] * 0.45).astype(np.uint8)
 frames["layer"][140:220, 540:740], frames["layer"][620:680, 520:760] = layer_title, layer_hint
 current, results = {}, {}
@@ -548,16 +640,17 @@ class Judge(CustomAction):
         screen = actions.read_screen(recognize)
         out = {"kind": screen.kind, "title": screen.title, "gear": target(recognize, redeem.MENU_SETTINGS),
                "other_view": redeem.other_view(screen, recognize), "other_tab": target(recognize, redeem.OTHER_TAB),
-               "layer": redeem.is_reward_layer(screen, recognize)}
+               "layer": redeem.is_reward_layer(screen, recognize), "image": redeem.image_view(screen, recognize),
+               "banner": redeem.banner(screen, image, recognize)}
         use = redeem.row_use(recognize)
         out["row_use"] = use and [touch_point(use), pages._forbidden_near(recognize, use)]
+        out["faded"] = redeem.faded_row(recognize)
         out["swipe"] = [pages._forbidden_near(recognize, [*p, 1, 1]) for p in redeem.LIST_SWIPE]
-        if screen.kind == "modal":
+        if screen.kind == "modal" or out["banner"]:
             out.update(field=list(redeem.read_field(image, recognize)), strip=redeem.strip_open(image),
-                       gold=round(redeem.use_gold(image), 3), hint=list(redeem.read_hint(recognize)),
+                       gold=round(redeem.use_gold(image), 3),
                        clear=target(recognize, redeem.CLEAR), placeholder=target(recognize, redeem.PLACEHOLDER),
                        use=target(recognize, redeem.USE), close=target(recognize, actions.MODAL_CLOSE))
-        out["dismiss"] = pages._forbidden_near(recognize, [*redeem.DISMISS_POINT, 1, 1])
         results[current["name"]] = out
         return CustomAction.RunResult(success=True)
 
@@ -599,17 +692,20 @@ class FrameworkTests(unittest.TestCase):
                                  "other faded": ("page", "设置"), "other scrolled": ("page", "设置"),
                                  "reset under the row": ("page", "设置"), "modal empty": ("modal", "兑换奖励"),
                                  "modal focused": ("modal", "兑换奖励"), "modal typed": ("modal", "兑换奖励"),
-                                 "layer": ("unknown", "")})
+                                 "modal banner": ("unknown", ""), "layer": ("unknown", "")})
         # The gear only on the menu, where the survey tapped (633,668).
         self.assertEqual(out["menu"]["gear"], [[633, 667], None])
         self.assertEqual([name for name, value in out.items() if value["gear"]], ["menu"])
         # 其他: its content only on that tab; the tab label tappable on 图像.
         self.assertFalse(out["settings image"]["other_view"])
+        self.assertEqual([name for name, value in out.items() if value["image"]], ["settings image"])
         self.assertEqual(out["settings image"]["other_tab"][1], None)
         self.assertTrue(out["other faded"]["other_view"] and out["other scrolled"]["other_view"])
         # The row's 使用: not lined up while the list is faded (one swipe first), lined up after it; refused once a
         # forbidden label (全部恢复默认) comes within the margin below it.
         self.assertIsNone(out["other faded"]["row_use"])
+        self.assertTrue(out["other faded"]["faded"])
+        self.assertFalse(out["other scrolled"]["faded"])
         self.assertEqual(out["other faded"]["swipe"], [None, None])
         tap, refused = out["other scrolled"]["row_use"]
         self.assertLessEqual(max(abs(tap[0] - 987), abs(tap[1] - 588)), 8)  # phase A tapped (987,588)
@@ -626,13 +722,14 @@ class FrameworkTests(unittest.TestCase):
         self.assertEqual(typed["clear"][1], None)
         self.assertLessEqual(max(abs(typed["clear"][0][0] - 808), abs(typed["clear"][0][1] - 342)), 3)
         for value in (empty, focused, typed):
-            self.assertEqual(value["hint"], [None, ""])
             self.assertEqual(value["use"][1], None)
             self.assertLessEqual(max(abs(value["use"][0][0] - 637), abs(value["use"][0][1] - 499)), 3)
             self.assertEqual(value["close"][1], None)
-            self.assertIsNone(value["dismiss"])
         self.assertTrue(out["layer"]["layer"])
-        self.assertIsNone(out["layer"]["dismiss"])
+        # The result banner (device run 1): read over the modal's body, the field still holding the code.
+        self.assertEqual([name for name, value in out.items() if value["banner"]], ["modal banner"])
+        self.assertEqual(out["modal banner"]["banner"], "兑换码已使用")
+        self.assertEqual(out["modal banner"]["field"], ["filled", "拾光二载暖赴新章"])
         self.assertEqual([name for name, value in out.items() if value["layer"]], ["layer"])
 
 

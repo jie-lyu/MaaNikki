@@ -13,6 +13,12 @@
     "expected": "^其他$",
     "action": "DoNothing"
   },
+  "MaaNikki_Android_SettingsImageContent": {
+    "recognition": "OCR",
+    "roi": [260, 70, 180, 60],
+    "expected": "^基础设置$",
+    "action": "DoNothing"
+  },
   "MaaNikki_Android_RedeemRowLabel": {
     "recognition": "OCR",
     "roi": [260, 80, 160, 560],
@@ -50,15 +56,9 @@
     "expected": "^使用$",
     "action": "DoNothing"
   },
-  "MaaNikki_Android_RedeemHint": {
+  "MaaNikki_Android_RedeemBanner": {
     "recognition": "OCR",
-    "roi": [330, 368, 620, 104],
-    "expected": ".+",
-    "action": "DoNothing"
-  },
-  "MaaNikki_Android_RedeemToast": {
-    "recognition": "OCR",
-    "roi": [300, 20, 680, 140],
+    "roi": [300, 175, 680, 75],
     "expected": ".+",
     "action": "DoNothing"
   }
