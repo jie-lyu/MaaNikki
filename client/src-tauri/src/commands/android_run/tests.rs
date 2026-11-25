@@ -1146,3 +1146,165 @@ fn the_state_snapshot_reports_only_the_android_instance_as_running() {
     assert!(!snapshot.instances[A].is_running);
 }
 
+// ----------------------------------------------------------------------------
+// Review round 3: quitting while starting, a stop request that cannot be written, the device lock
+// ----------------------------------------------------------------------------
+
+#[test]
+fn quitting_while_starting_cancels_the_start_and_closes_android_start_admission() {
+    let _serial = serial();
+    let (state, _dir) = state();
+    let events = Arc::new(Recorded::default());
+    let claimed = claim(&state, A).unwrap();
+    let token = claimed.token;
+    let quitting = {
+        let state = Arc::clone(&state);
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            kill_on_exit(&state);
+            started.elapsed()
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while state.android_run.phase() != (Phase::Starting { token, instance_id: A.into(), cancelled: true }) {
+        assert!(Instant::now() < deadline, "still {:?}", state.android_run.phase());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(claimed.cancelled());
+    // The agent handshake returns only now: the pending start cannot post, it hands its agent to a finishing worker.
+    std::thread::sleep(Duration::from_millis(100));
+    let child = sleeper("30");
+    let pid = child.id();
+    let mut posted = false;
+    let (result, job) = claimed.commit(handles(Some(child), &events), |_| {
+        posted = true;
+        Ok(vec![1])
+    });
+    assert_eq!(result.err().as_deref(), Some(CANCELLED));
+    assert!(!posted, "no task is posted after Quit");
+    job.unwrap().spawn();
+    let waited = quitting.join().unwrap();
+    assert!(waited >= Duration::from_millis(100), "the exit waited for the pending start: {:?}", waited);
+    assert!(waited < timing().exit_wait, "{:?}", waited);
+    assert!(!alive(pid), "the start's agent is killed by the exit");
+    wait_for_idle(&state);
+    // Admission stays closed: no new start, on any instance.
+    assert_eq!(claim(&state, A).err().as_deref(), Some(QUITTING));
+    assert_eq!(claim(&state, B).err().as_deref(), Some(QUITTING));
+
+    // A claim admitted before Quit and committing after it, without the exit having seen it as Starting (the flag
+    // alone): still refused.
+    let (state, _dir) = self::state();
+    let claimed = claim(&state, A).unwrap();
+    lock(&state.android_run.inner).closed = true;
+    let (result, job) = claimed.commit(handles(None, &events), |_| panic!("posted after Quit"));
+    assert_eq!(result.err().as_deref(), Some(CANCELLED));
+    job.unwrap().run();
+    assert_eq!(state.android_run.phase(), Phase::Idle);
+
+    // A start that fails before its agent while the exit waits: the slot goes back to Idle and the exit returns.
+    let (state, _dir) = self::state();
+    let claimed = claim(&state, A).unwrap();
+    let dropper = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        drop(claimed);
+    });
+    let started = Instant::now();
+    kill_on_exit(&state);
+    dropper.join().unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(90) && started.elapsed() < timing().exit_wait);
+    assert_eq!(state.android_run.phase(), Phase::Idle);
+}
+
+#[test]
+fn a_stop_whose_request_cannot_be_written_kills_the_agent_before_it_returns() {
+    let _serial = serial();
+    let (state, dir) = state();
+    let events = Arc::new(Recorded::default());
+    let tasker = FakeTasker::new(true, dir.join("touch.json"));
+    tasker.gate.store(false, Ordering::SeqCst);  // the worker is held at its first step
+    let child = sleeper("30");
+    let pid = child.id();
+    running_with(&state, 7, Some(child), &events, &tasker);
+    let seen = Arc::new(RetireSeesRequest { request: dir.join("stop.request"), seen: Mutex::default() });
+    lock(&state.android_run.inner).run.as_mut().unwrap().events = Arc::clone(&seen) as Arc<dyn RunEvents>;
+    // The staging file cannot be written (a directory has its name) while the touch directory stays writable.
+    std::fs::create_dir(dir.join(format!("stop.request.{}.tmp", std::process::id()))).unwrap();
+    assert_eq!(stop_if_busy(&state, A), Some(Ok(())));
+    assert!(!alive(pid), "the agent is killed (and reaped) inside Stop");
+    assert!(!dir.join("stop.request").exists());
+    assert!(seen.seen.lock().unwrap().is_empty(), "no statistics I/O before Stop returned");
+    tasker.gate.store(true, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(100));
+    tasker.stop();  // the task ends by itself once the agent is gone
+    wait_for_idle(&state);
+    assert_eq!(*seen.seen.lock().unwrap(), [false, false]);
+    assert!(tasker.post_stops().is_empty(), "never post_stop without the handshake");
+}
+
+#[test]
+fn a_start_is_refused_while_another_process_drives_the_emulator() {
+    let _serial = serial();
+    let (state, dir) = state();
+    let path = crate::commands::android_input::device_lock_path(&dir, "127.0.0.1:5555");
+    // The runner (or another client) holds the device lock: refused, the slot stays Idle, nothing is cleared.
+    let holder = std::fs::OpenOptions::new().read(true).append(true).create(true).open(&path).unwrap();
+    assert_eq!(unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+    std::fs::write(dir.join("stop.request"), "{}").unwrap();
+    assert_eq!(claim(&state, A).err().as_deref(), Some(DEVICE_BUSY));
+    assert_eq!(state.android_run.phase(), Phase::Idle);
+    assert!(dir.join("stop.request").exists());
+    // Another emulator is not affected.
+    if let Some(ControllerConfig::Adb { address, .. }) =
+        state.instances.lock().unwrap().get_mut(B).unwrap().controller_config.as_mut()
+    {
+        *address = "127.0.0.1:5556".into();
+    }
+    drop(claim(&state, B).unwrap());
+    drop(holder);
+    drop(claim(&state, A).unwrap());
+    assert!(path.exists(), "the lock file is never removed");
+}
+
+#[test]
+fn the_device_lock_is_held_from_the_claim_until_the_slot_is_idle() {
+    let _serial = serial();
+    let (state, dir) = state();
+    let events = Arc::new(Recorded::default());
+    let free = || crate::commands::android_input::take_device_lock(&dir, "127.0.0.1:5555").unwrap().is_some();
+    assert!(free());
+    // Starting, then Running, then Finishing: held throughout (a runner started meanwhile would be refused).
+    let claimed = claim(&state, A).unwrap();
+    let token = claimed.token;
+    assert!(!free());
+    let (result, _) = claimed.commit(handles(Some(sleeper("0.3")), &events), |_| Ok(vec![11, 12]));
+    assert_eq!(result, Ok(vec![11, 12]));
+    assert!(!free());
+    let job = finishing_job(&state, token);
+    assert!(!free());
+    job.run();
+    assert_eq!(state.android_run.phase(), Phase::Idle);
+    assert!(free());
+    // A start that gives the slot back before its agent releases it too, and a refused claim never keeps it.
+    drop(claim(&state, A).unwrap());
+    assert!(free());
+    let holder = hold_lock(&dir);
+    assert_eq!(claim(&state, A).err().as_deref(), Some(OWNER_LOCK_BUSY));
+    assert!(free());
+    // A finishing slot still waiting for owner.lock keeps the device lock until it heals.
+    let claimed = {
+        drop(holder);
+        claim(&state, A).unwrap()
+    };
+    let token = claimed.token;
+    let (result, _) = claimed.commit(handles(None, &events), |_| Ok(vec![11]));
+    assert!(result.is_ok());
+    let holder = hold_lock(&dir);
+    finishing_job(&state, token).run();
+    assert!(matches!(state.android_run.phase(), Phase::Finishing { released: true, .. }));
+    assert!(!free());
+    drop(holder);
+    assert_eq!(refuse_while_busy(&state, A, Op::Connect), Ok(()));  // heals
+    assert_eq!(state.android_run.phase(), Phase::Idle);
+    assert!(free());
+}

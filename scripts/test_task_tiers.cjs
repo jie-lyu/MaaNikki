@@ -229,11 +229,12 @@ test('a due Adb instance on macOS waits for the Android tiers, chosen by its sel
 });
 
 // The real ScheduleService over the real tiers service: one Mac and one Adb instance due in the same minute.
-function loadSchedulerWith(store, subscribe) {
-  const FIXED = new Date(2026, 10, 24, 21, 30, 10).getTime();
+// `clock.now` (default 21:30:10) is the time the scheduler sees; a test may move it.
+function loadSchedulerWith(store, subscribe, clock = { now: new Date(2026, 10, 24, 21, 30, 10).getTime() }) {
+  const FIXED = clock.now;
   class FixedDate extends Date {
-    constructor(...args) { if (args.length) super(...args); else super(FIXED); }
-    static now() { return FIXED; }
+    constructor(...args) { if (args.length) super(...args); else super(clock.now); }
+    static now() { return clock.now; }
   }
   const policy = { enabled: true, name: 'p', weekdays: [new Date(FIXED).getDay()], times: ['21:30'] };
   for (const inst of store.instances) inst.schedulePolicies = [policy];
@@ -329,6 +330,61 @@ test('an Adb schedule disabled during the Android tier wait is not started; the 
   await new Promise((resolve) => setTimeout(resolve, 5));
   service.stop();
   assert.deepEqual(started, ['B']);
+});
+
+test('a native Mac check in the next minute runs while an Adb instance of the minute before waits for the Android tiers', async () => {
+  const subscribers = new Set();
+  const subscribe = (listener) => { subscribers.add(listener); return () => subscribers.delete(listener); };
+  const store = {
+    backendOS: 'macos', macTaskTiers: macTiers, androidTaskTiers: null, selectedController: {}, selectedResource: {},
+    projectInterface: { controller: [{ name: 'mac', type: 'MacOS' }, { name: 'nikki_android', type: 'Adb' }], resource: [] },
+    instances: [{ id: 'A', name: 'A', controllerName: 'nikki_android', isRunning: false },
+                { id: 'M', name: 'M', controllerName: 'mac', isRunning: false }],
+  };
+  const clock = { now: new Date(2026, 10, 24, 21, 30, 55).getTime() };
+  const service = loadSchedulerWith(store, subscribe, clock);
+  store.instances[1].schedulePolicies = [{ ...store.instances[1].schedulePolicies[0], times: ['21:31'] }];  // Mac at 21:31
+  const started = [];
+  service.setTriggerCallback(async (inst) => { started.push(inst.id); return true; });
+  service.start();  // 21:30:55: A is due and its tiers are pending
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(started, []);
+  clock.now = new Date(2026, 10, 24, 21, 30, 58).getTime();
+  await service.check();  // the same minute again: A is left to the wait already running (returns at once)
+  assert.deepEqual(started, []);
+  clock.now = new Date(2026, 10, 24, 21, 31, 2).getTime();
+  await service.check();  // the next minute's check is not blocked by A's wait
+  assert.deepEqual(started, ['M']);
+  service.stop();  // stopped during A's wait: Mac has already started; A is not started
+  store.androidTaskTiers = androidTiers;
+  for (const listener of [...subscribers]) listener();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(started, ['M']);
+
+  // Stopped (and started again) during A's wait, before the Mac minute: the restart's own check starts Mac.
+  const again = { ...store, androidTaskTiers: null,
+    instances: store.instances.map((inst) => ({ ...inst })) };
+  const clock2 = { now: new Date(2026, 10, 24, 21, 30, 55).getTime() };
+  const subscribers2 = new Set();
+  const service2 = loadSchedulerWith(again, (listener) => { subscribers2.add(listener); return () => subscribers2.delete(listener); }, clock2);
+  again.instances[1].schedulePolicies = [{ ...again.instances[1].schedulePolicies[0], times: ['21:31'] }];
+  const started2 = [];
+  service2.setTriggerCallback(async (inst) => { started2.push(inst.id); return true; });
+  service2.start();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  clock2.now = new Date(2026, 10, 24, 21, 30, 58).getTime();
+  await service2.check();  // queues no second wait for A
+  service2.stop();
+  clock2.now = new Date(2026, 10, 24, 21, 31, 2).getTime();
+  service2.start();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(started2, ['M']);
+  again.androidTaskTiers = androidTiers;
+  for (const listener of [...subscribers2]) listener();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  service2.stop();
+  // A's wait belonged to 21:30 and the service is running again: A's slot is decided once, for the running service.
+  assert.deepEqual(started2, ['M', 'A']);
 });
 
 test('startup with only native controllers never requests the Android manifest; an Adb selection loads it once', async () => {

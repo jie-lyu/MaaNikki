@@ -207,6 +207,7 @@ class RunnerTests(unittest.TestCase):
             stack.enter_context(patch.object(runner.subprocess, "Popen", Child))
             stack.enter_context(patch.object(runner, "LOG_ROOT", Path(tmp) / "logs"))
             stack.enter_context(patch.object(runner, "RUN_LOG", Path(tmp) / "runs.jsonl"))
+            stack.enter_context(patch.object(runner, "device_lock_dir", lambda: Path(tmp)))
             stack.enter_context(patch("builtins.print"))
             stack.enter_context(patch("sys.stderr"))
             if runner.os.name == "nt":  # no flock on Windows: inject the owner lock (the real one runs on macOS)
@@ -214,6 +215,8 @@ class RunnerTests(unittest.TestCase):
                 sys.path.insert(0, str(Path(runner.__file__).resolve().parents[2] / "agent"))
                 import host
                 stack.enter_context(patch.object(host, "take_owner_lock",
+                                                 return_value=SimpleNamespace(close=lambda: None)))
+                stack.enter_context(patch.object(runner, "take_device_lock",
                                                  return_value=SimpleNamespace(close=lambda: None)))
             argv = ["run", "MaaNikki_AndroidCheck", "--purpose", "t", "--data-root", str(Path(tmp) / "data")]
             for index in range(runs):
@@ -329,21 +332,37 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(record["touch_at_stop"].startswith("request not written"))
             self.assertEqual((record["stop_path"], tasker.post_stops, child.killed), ("agent terminated", 0, True))
 
-    def test_a_task_that_keeps_running_after_the_agent_is_killed_fails_the_stop_without_post_stop(self):
+    def test_a_task_that_keeps_running_after_the_agent_is_killed_is_waited_for_without_post_stop(self):
         import tempfile
+        import threading
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             marker = root / "config" / "android-input" / "touch.json"
             marker.parent.mkdir(parents=True)
             marker.write_text("{}")
             child = self.KillableChild()
-            tasker = self.StoppingTasker(child, ends=False)
+            tasker = self.StoppingTasker(child, ends=False)  # a click stalled between DOWN and UP (ADB wedged)
+            ended = []
+
+            def unwedge():  # the click finishes well after the bound
+                time.sleep(0.6)
+                ended.append(time.monotonic())
+                tasker.ends = True
+            worker = threading.Thread(target=unwedge)
             record = {}
             with patch.object(runner, "STOP_TOUCH_WAIT", 0.05), patch.object(runner, "STOP_TASKER_WAIT", 0.2), \
-                    patch.object(runner, "STOP_TASKER_POLL", 0.01), patch("sys.stderr"):
-                self.assertFalse(runner.stop_tasker(tasker, root, record, child, Mock()))
-            self.assertEqual(record["stop_path"], "agent terminated; tasker still running")
+                    patch.object(runner, "STOP_TASKER_POLL", 0.01), patch.object(runner, "STOP_NOTICE_INTERVAL", 0.15), \
+                    patch("sys.stderr") as stderr:
+                worker.start()
+                self.assertTrue(runner.stop_tasker(tasker, root, record, child, Mock()))
+                returned = time.monotonic()
+            worker.join()
+            self.assertGreaterEqual(returned, ended[0])  # never returned (so never exited) while the tasker ran
+            self.assertEqual(record["stop_path"], "agent terminated; tasker stopped late")
+            self.assertGreaterEqual(record["tasker_stop_seconds"], 0.5)
             self.assertEqual((tasker.post_stops, child.killed), (0, True))
+            notices = [call for call in stderr.write.call_args_list if "没有自己停下" in str(call)]
+            self.assertGreaterEqual(len(notices), 2)  # a periodic notice while it waits
 
     def test_a_stale_stop_request_is_removed_before_the_agent_starts(self):
         import tempfile
@@ -392,6 +411,109 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(results, [130])
         self.assertEqual(len(records), 1)
         self.assertIs(records[0]["interrupted_during_cleanup"], True)
+
+    def test_a_second_signal_during_the_stop_handshake_does_not_end_the_runner(self):
+        import _thread
+        import signal
+        # The first Ctrl-C interrupts the task; a second Ctrl-C and a SIGTERM arrive while the stop handshake is running
+        # (interrupt_main delivers each to the main thread's Python handler on every OS).
+        modules, calls, children, Child = self.fake_framework(interrupt_runs={1})
+        tasker_class = modules["maa.tasker"].Tasker
+        original = tasker_class.post_stop
+        handshake = []
+
+        def post_stop(self):
+            _thread.interrupt_main(signal.SIGINT)
+            _thread.interrupt_main(signal.SIGTERM)
+            time.sleep(0.05)
+            handshake.append("post_stop")
+            return original(self)
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp, patch.object(tasker_class, "post_stop", post_stop):
+            calls["data_root"] = Path(tmp) / "data"
+            results, records = self.run_fakes(tmp, modules, Child)
+        self.assertEqual(results, [2])  # the interrupted run's own error, not the signal's exit
+        self.assertEqual(handshake, ["post_stop"])
+        self.assertEqual((records[0]["status"], records[0]["stop_path"]), ("interrupted", "post_stop"))
+        self.assertIs(records[0]["stop_requested"], True)
+        self.assertIs(records[0]["interrupted_during_cleanup"], True)
+        self.assertEqual(children[0].calls[:1], ["wait"])  # the agent is still reaped
+        self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)  # restored
+        self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+
+    def test_a_sigterm_while_the_task_runs_stops_it_through_the_handshake(self):
+        import _thread
+        import signal
+        import tempfile
+        import types
+        modules, calls, children, Child = self.fake_framework()
+        tasker_class = modules["maa.tasker"].Tasker
+
+        def post_task(self, entry, override):
+            def wait():
+                _thread.interrupt_main(signal.SIGTERM)  # delivered to the main thread while it waits for the task
+                time.sleep(0.2)
+                return job
+            job = types.SimpleNamespace(succeeded=True, wait=wait, get=lambda: None)
+            return job
+        with tempfile.TemporaryDirectory() as tmp, patch.object(tasker_class, "post_task", post_task):
+            calls["data_root"] = Path(tmp) / "data"
+            results, records = self.run_fakes(tmp, modules, Child)
+        self.assertEqual(results, [2])
+        self.assertEqual((records[0]["status"], records[0]["stop_path"]), ("interrupted", "post_stop"))
+        self.assertEqual(calls["stop_request_at_post_stop"], [True])
+        self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+
+    def test_a_device_another_process_drives_is_refused_before_the_runner_touches_it(self):
+        import tempfile
+        self.assertEqual(runner.device_lock_path("127.0.0.1:5555", Path("/t")).name,
+                         "maanikki-android-127.0.0.1_5555.lock")  # the client's name (android_input::device_lock_path)
+        self.assertEqual(runner.device_lock_path("emulator-5554/x y", Path("/t")).name,
+                         "maanikki-android-emulator-5554_x_y.lock")
+        try:
+            import fcntl
+        except ImportError:  # no flock (Windows): the runner refuses rather than run unlocked
+            with self.assertRaises(runner.RunnerError):
+                runner.take_device_lock("127.0.0.1:5555")
+            return
+        modules, calls, children, Child = self.fake_framework()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = runner.device_lock_path("127.0.0.1:5555", Path(tmp))
+            holder = open(path, "a+b")  # the client (or another runner) drives the emulator
+            fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            adb = Mock()
+            with patch.object(runner, "adb_alive", adb), patch.object(runner, "device_lock_dir", lambda: Path(tmp)), \
+                    patch.dict(sys.modules, modules), patch.object(runner.subprocess, "Popen", Child), \
+                    patch.object(runner, "LOG_ROOT", Path(tmp) / "logs"), patch("sys.stderr") as stderr:
+                result = runner.main(["run", "MaaNikki_AndroidCheck", "--purpose", "t",
+                                      "--data-root", str(Path(tmp) / "data")])
+            self.assertEqual(result, 2)
+            self.assertIn(runner.DEVICE_BUSY, "".join(str(call) for call in stderr.write.call_args_list))
+            adb.assert_not_called()  # nothing touches the device
+            self.assertEqual(children, [])
+            holder.close()
+            # Free again: the run holds the lock while it runs and releases it when it returns.
+            seen = []
+            original = Child.__init__
+
+            def spawned(child, *args, **kwargs):
+                seen.append(self._locked(path))
+                original(child, *args, **kwargs)
+            with patch.object(Child, "__init__", spawned):
+                results, _records = self.run_fakes(tmp, modules, Child)
+            self.assertEqual((results, seen), ([0], [True]))
+            self.assertFalse(self._locked(path))
+            self.assertTrue(path.exists())  # never removed
+
+    @staticmethod
+    def _locked(path):
+        import fcntl
+        with open(path, "a+b") as probe:
+            try:
+                fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            return False
 
     def test_an_agent_that_cannot_be_reaped_fails_the_run(self):
         import tempfile

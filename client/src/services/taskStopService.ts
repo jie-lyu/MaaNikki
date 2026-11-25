@@ -66,15 +66,48 @@ function selectsAdb(instanceId: string): boolean {
   return state.projectInterface?.controller.find((c) => c.name === controllerName)?.type === 'Adb';
 }
 
-export async function stopInstanceTasks(instanceId: string): Promise<boolean> {
-  if (selectsAdb(instanceId)) {
+export interface StopOptions {
+  /**
+   * Android emulator only (ignored for other controllers): send a new backend stop even while an earlier stop of this
+   * instance is still pending. The toolbar's compensating stop after a start response uses it: the earlier stop may
+   * have reached the backend while its run slot was still idle (so it stopped nothing) and its reply may still be on
+   * the way; joining it would never reach the run the start has just admitted.
+   */
+  fresh?: boolean;
+}
+
+export async function stopInstanceTasks(instanceId: string, options: StopOptions = {}): Promise<boolean> {
+  const adb = selectsAdb(instanceId);
+  if (adb) {
     stopGenerations.set(instanceId, stopGeneration(instanceId) + 1);
   }
   const existing = stopPromises.get(instanceId);
+  if (existing && adb && options.fresh) {
+    return stopAgainWhilePending(instanceId, existing);
+  }
   if (existing) {
     return existing;
   }
+  return startStop(instanceId);
+}
 
+/**
+ * The fresh stop of an Adb instance while an earlier stop is pending: the backend stop is sent now; once the earlier
+ * stop has settled, the usual stop (wait until the run ended, stop the agent, clear the state) follows, joining one
+ * that has begun meanwhile.
+ */
+async function stopAgainWhilePending(instanceId: string, earlier: Promise<boolean>): Promise<boolean> {
+  log.info(`[task-stop#${instanceId}] 再次发送停止（之前的停止还没返回）`);
+  try {
+    await maaService.stopTask(instanceId);
+  } catch (error) {
+    log.warn(`[task-stop#${instanceId}] 再次发送停止失败:`, error);
+  }
+  await earlier.catch(() => false);
+  return stopPromises.get(instanceId) ?? startStop(instanceId);
+}
+
+function startStop(instanceId: string): Promise<boolean> {
   const stopPromise = (async () => {
     log.info(`[task-stop#${instanceId}] 停止任务`);
 

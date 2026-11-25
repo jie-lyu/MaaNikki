@@ -44,9 +44,14 @@ test('macos registers no names rather than guessing by position without the mapp
 function loadStopService(controllers, selected) {
   const source = readFileSync(resolve(__dirname, '..', 'client/src/services/taskStopService.ts'), 'utf8');
   const sent = [];
-  const stop = { release: null };
+  // Every backend stop's reply waits until stop.release(); after that, later replies come at once.
+  const pending = [];
+  const stop = { released: false, release() { stop.released = true; pending.splice(0).forEach((done) => done()); } };
   const maaService = {
-    stopTask: (id) => { sent.push(['stopTask', id]); return new Promise((done) => { stop.release = done; }); },
+    stopTask: (id) => {
+      sent.push(['stopTask', id]);
+      return stop.released ? Promise.resolve() : new Promise((done) => { pending.push(done); });
+    },
     isRunning: async () => false,
     stopAgent: async (id) => { sent.push(['stopAgent', id]); },
   };
@@ -115,4 +120,42 @@ test('Win32 and native Mac starts in the toolbar do not read the Android stop ge
   const calls = toolbar.split('\n').filter((line) => line.includes('stopGeneration(') && !line.includes('import '));
   assert.ok(calls.length >= 2);
   for (const line of calls) assert.match(line, /androidStart (\?|&&) .*stopGeneration\(/, line.trim());
+});
+
+test('the compensating stop after an Android start reaches the backend even while an earlier stop is pending', async () => {
+  // The first stop reached the backend while its run slot was idle and its reply is delayed; the start then claimed the
+  // slot. The toolbar's compensating stop (fresh) must send a new backend stop, not join the pending one.
+  const { service, sent, stop } = loadStopService(CONTROLLERS, { A: 'nikki_android', W: 'win' });
+  const first = service.stopInstanceTasks('A');
+  await Promise.resolve();
+  assert.deepEqual(sent, [['stopTask', 'A']]);
+  const compensating = service.stopInstanceTasks('A', { fresh: true });
+  await Promise.resolve();
+  assert.deepEqual(sent, [['stopTask', 'A'], ['stopTask', 'A']], 'the backend receives the second stop at once');
+  assert.equal(service.stopGeneration('A'), 2);
+  stop.release();
+  assert.equal(await first, true);
+  assert.equal(await compensating, true);
+  // After the earlier stop settled, the compensating one also goes through the usual stop (wait, then clean up).
+  assert.equal(sent.filter(([kind]) => kind === 'stopTask').length, 3);
+
+  // Desktop paths are unchanged: a second stop of a Win32 instance joins the pending one, fresh or not.
+  const desktop = loadStopService(CONTROLLERS, { W: 'win' });
+  const pendingStop = desktop.service.stopInstanceTasks('W');
+  const joined = desktop.service.stopInstanceTasks('W', { fresh: true });
+  desktop.stop.release();
+  assert.equal(await pendingStop, true);
+  assert.equal(await joined, true);
+  assert.deepEqual(desktop.sent, [['stopTask', 'W']]);
+  assert.equal(desktop.generations.size, 0);
+});
+
+test('the toolbar sends its compensating Android stop fresh, inside the Android branch only', () => {
+  const toolbar = readFileSync(resolve(__dirname, '..', 'client/src/components/Toolbar.tsx'), 'utf8');
+  const fresh = toolbar.split('\n').filter((line) => line.includes('{ fresh: true }'));
+  assert.equal(fresh.length, 1);
+  const at = toolbar.indexOf('{ fresh: true }');
+  const before = toolbar.slice(toolbar.lastIndexOf('if (stoppedSinceStart())', at), at);
+  assert.ok(before.length > 0 && before.length < 400, 'the fresh stop is the stoppedSinceStart() branch');
+  assert.match(toolbar, /const stoppedSinceStart = \(\) => androidStart && /);
 });

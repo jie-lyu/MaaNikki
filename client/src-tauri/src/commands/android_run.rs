@@ -44,6 +44,9 @@ pub const NO_RESOURCE: &str = "资源还没有加载，请等资源加载完成�
 pub const DESKTOP_RUN_ACTIVE: &str = "这个实例还有别的任务在运行，请先停止。";
 pub const DIRECT_CLICK_REFUSED: &str = "安卓模拟器上不提供直接点击：触摸只由 agent 在核对画面并记录之后发送。";
 pub const NOTHING_POSTED: &str = "安卓任务一个也没能提交（模拟器可能已经断开），这一轮已结束；请检查连接后重新开始。";
+pub const QUITTING: &str = "MaaNikki 正在退出，不再开始安卓任务。";
+pub const DEVICE_BUSY: &str =
+    "另一个 MaaNikki 进程正在驱动这台模拟器（例如开发用的运行器，或另一个 MaaNikki 客户端），请等它结束后再开始。";
 
 /// 运行中被拒绝的操作。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,6 +240,20 @@ struct SlotInner {
     next_token: u64,
     /// The finishing worker of the run being finished (None once it is done).
     worker: Option<WorkerProgress>,
+    /// Set when the client starts quitting (kill_on_exit): no Android start is admitted or committed any more.
+    closed: bool,
+    /// The host-wide device lock (android_input::take_device_lock) of the emulator this run drives, taken at the claim
+    /// and held until the slot is Idle again: the developer runner (scripts/android/runner.py) and other clients take
+    /// the same lock, so only one MaaNikki process drives an emulator at a time.
+    device_lock: Option<std::fs::File>,
+}
+
+impl SlotInner {
+    /// Back to Idle; the device lock is released with it.
+    fn to_idle(&mut self) {
+        self.phase = Phase::Idle;
+        self.device_lock = None;
+    }
 }
 
 /// 整个进程唯一的安卓运行槽（放在 `MaaState` 里）。
@@ -244,6 +261,8 @@ pub struct AndroidRunSlot {
     inner: Arc<Mutex<SlotInner>>,
     /// `owner.lock` 所在目录；None 时用数据目录下的 config/android-input（测试里指向临时目录）。
     lock_dir: Option<PathBuf>,
+    /// Where the device lock lives; None: the system temporary directory (a test directory in the unit tests).
+    device_lock_dir: Option<PathBuf>,
     timing: Timing,
     /// 取得槽时对实例连接的检查（单元测试没有原生的控制器句柄，换成只看配置的检查）。
     connection_check: fn(&MaaState, &str) -> Result<(), String>,
@@ -254,6 +273,7 @@ impl Default for AndroidRunSlot {
         AndroidRunSlot {
             inner: Arc::default(),
             lock_dir: None,
+            device_lock_dir: None,
             timing: Timing::default(),
             connection_check: instance_is_connected_adb,
         }
@@ -272,7 +292,13 @@ impl AndroidRunSlot {
         timing: Timing,
         connection_check: fn(&MaaState, &str) -> Result<(), String>,
     ) -> Self {
-        AndroidRunSlot { inner: Arc::default(), lock_dir: Some(lock_dir), timing, connection_check }
+        AndroidRunSlot {
+            inner: Arc::default(),
+            device_lock_dir: Some(lock_dir.clone()),
+            lock_dir: Some(lock_dir),
+            timing,
+            connection_check,
+        }
     }
 
     fn lock_dir(&self) -> Result<PathBuf, String> {
@@ -304,7 +330,7 @@ impl AndroidRunSlot {
             && self.lock_dir().is_ok_and(|dir| super::android_input::owner_lock_free(&dir) == Ok(true))
         {
             info!("[android_run] owner.lock is free again; the slot is idle");
-            inner.phase = Phase::Idle;
+            inner.to_idle();
         }
     }
 }
@@ -361,13 +387,16 @@ pub fn stop_if_busy(state: &MaaState, instance_id: &str) -> Option<Result<(), St
                     }
                     Err(e) => warn!("[android_run] instances lock poisoned while stopping: {}", e),
                 }
-                super::telemetry::on_run_cancelled(instance_id);
                 Some(job)
             }
             Phase::Finishing { .. } | Phase::Idle => None,
         }
     };
     if let Some(job) = job {
+        // A stop request that could not be written does not keep the agent from reserving another touch: the agent
+        // child is killed here, before Stop returns and before any statistics I/O (outside the slot lock).
+        job.kill_agent_if_unrequested();
+        super::telemetry::on_run_cancelled(instance_id);
         job.spawn();
     }
     Some(Ok(()))
@@ -703,12 +732,15 @@ fn post_tasks(
     ids
 }
 
-/// 取得槽：只有在空闲、这个实例没有进行中的连接、它当前的控制器是已连接的 Adb、而且 `owner.lock` 此刻能拿到
-/// （拿到后立即放开）时。取得之后删掉上一轮留下的停止请求（此刻没有这个数据目录的 agent 在运行：槽空闲、锁空着）。
+/// 取得槽：只有在空闲、客户端没有在退出、这个实例没有进行中的连接、它当前的控制器是已连接的 Adb、`owner.lock` 此刻
+/// 能拿到（拿到后立即放开），而且这台模拟器的设备锁能拿到（一直拿着，直到槽回到空闲）时。取得之后删掉上一轮留下的停止请求（此刻没有这个数据目录的 agent 在运行：槽空闲、锁空着）。
 /// 同步执行，开始的路径在任何等待之前调用它。
 fn claim(state: &Arc<MaaState>, instance_id: &str) -> Result<StartClaim, String> {
     let slot = &state.android_run;
     let mut inner = lock(&slot.inner);
+    if inner.closed {
+        return Err(QUITTING.to_string());
+    }
     slot.heal(&mut inner);
     match &inner.phase {
         Phase::Idle => {}
@@ -727,11 +759,30 @@ fn claim(state: &Arc<MaaState>, instance_id: &str) -> Result<StartClaim, String>
         Ok(false) => return Err(OWNER_LOCK_BUSY.to_string()),
         Err(e) => return Err(format!("无法检查安卓模拟器的输入锁：{}", e)),
     }
+    // The host-wide device lock: refused while another MaaNikki process (the developer runner, another client) drives
+    // this emulator. Held until the slot is Idle again.
+    let serial = adb_serial(state, instance_id).ok_or(NOT_CONNECTED)?;
+    let device_dir = slot.device_lock_dir.clone().unwrap_or_else(std::env::temp_dir);
+    let device_lock = match super::android_input::take_device_lock(&device_dir, &serial) {
+        Ok(Some(file)) => file,
+        Ok(None) => return Err(DEVICE_BUSY.to_string()),
+        Err(e) => return Err(format!("无法独占这台安卓模拟器：{}", e)),
+    };
     super::android_input::clear_stop_request(&dir)?;
+    inner.device_lock = Some(device_lock);
     inner.next_token += 1;
     let token = inner.next_token;
     inner.phase = Phase::Starting { token, instance_id: instance_id.to_string(), cancelled: false };
     Ok(StartClaim { state: Arc::clone(state), instance_id: instance_id.to_string(), token })
+}
+
+/// The ADB serial (address) of the instance's Adb controller configuration.
+fn adb_serial(state: &MaaState, instance_id: &str) -> Option<String> {
+    let instances = state.instances.lock().ok()?;
+    match &instances.get(instance_id)?.controller_config {
+        Some(ControllerConfig::Adb { address, .. }) => Some(address.clone()),
+        _ => None,
+    }
 }
 
 /// 实例当前的控制器是已连接、没有因停止而待重连的 Adb 控制器（配置和句柄在同一把锁里一起发布）。
@@ -755,7 +806,8 @@ struct StartClaim {
 
 impl StartClaim {
     fn cancelled(&self) -> bool {
-        matches!(lock(&self.state.android_run.inner).phase, Phase::Starting { cancelled: true, .. })
+        let inner = lock(&self.state.android_run.inner);
+        inner.closed || matches!(inner.phase, Phase::Starting { cancelled: true, .. })
     }
 
     /// 提交前最后一步：在槽锁里确认这次开始仍属于这一轮、没有被停止，再在实例锁里调用 `post` 提交任务。
@@ -768,8 +820,9 @@ impl StartClaim {
     ) -> (Result<Vec<i64>, String>, Option<FinishJob>) {
         let slot = &self.state.android_run;
         let mut inner = lock(&slot.inner);
-        let owned = matches!(&inner.phase,
-            Phase::Starting { token, cancelled: false, .. } if *token == self.token);
+        // A client that started quitting meanwhile (kill_on_exit) admits no commit either.
+        let owned = !inner.closed
+            && matches!(&inner.phase, Phase::Starting { token, cancelled: false, .. } if *token == self.token);
         if !owned {
             info!("[android_run] start on {} was cancelled before posting", self.instance_id);
             return (Err(CANCELLED.to_string()), Some(self.finish_with(&mut inner, handles, "task-stopped")));
@@ -810,7 +863,7 @@ impl Drop for StartClaim {
     fn drop(&mut self) {
         let mut inner = lock(&self.state.android_run.inner);
         if matches!(&inner.phase, Phase::Starting { token, .. } if *token == self.token) {
-            inner.phase = Phase::Idle;
+            inner.to_idle();
         }
     }
 }
@@ -1079,6 +1132,15 @@ impl FinishJob {
         }
     }
 
+    /// When stop.request could not be written, kills the agent child now (the worker would otherwise do it only after
+    /// retiring the statistics). A no-op when the request was written or not attempted yet.
+    fn kill_agent_if_unrequested(&self) {
+        if matches!(self.stop_request, Some(Err(_))) {
+            warn!("[android_run] run {}: the stop request was not written; killing the agent now", self.token);
+            kill_agent(&self.agent);
+        }
+    }
+
     fn spawn(self) {
         let name = format!("android-finish-{}", self.token);
         if let Err(e) = std::thread::Builder::new().name(name).spawn(move || self.run()) {
@@ -1198,7 +1260,7 @@ impl FinishJob {
             if let Phase::Finishing { token: current, released, .. } = &mut inner.phase {
                 if *current == token {
                     if lock_free {
-                        inner.phase = Phase::Idle;
+                        inner.to_idle();
                     } else {
                         *released = true;
                     }
@@ -1245,27 +1307,43 @@ fn reap_child(agent: &Mutex<Option<Child>>, timing: Timing) {
 /// finishing as a Stop (stop request first, then one of the two ways above); until its worker reaches the point where
 /// no touch can be cut (`touch.json` gone after the stop request, or the agent gone and the Tasker stopped), this waits,
 /// bounded by `exit_wait`, then kills the agent child and lets the exit proceed. It never calls `post_stop` and never
-/// drops the Tasker or the AgentClient (the worker owns them). A run still starting is not handled here (risk 24).
+/// drops the Tasker or the AgentClient (the worker owns them).
+///
+/// Quitting also closes Android start admission (no claim, no commit from now on) and cancels a run still starting, so
+/// a start whose agent handshake is still pending can never post its tasks after Quit; the exit waits (within the same
+/// bound) for such a start to give its slot back or hand its agent to a finishing worker. Past the bound an agent of a
+/// start still in its handshake is not reached here (risk 24).
 pub fn kill_on_exit(state: &MaaState) {
     let slot = &state.android_run;
     let job = {
         let mut inner = lock(&slot.inner);
-        match inner.phase.clone() {
+        inner.closed = true;
+        match &mut inner.phase {
+            Phase::Starting { token, instance_id, cancelled } => {
+                info!("[android_run] exiting while run {} on {} is starting: the start is cancelled", token, instance_id);
+                *cancelled = true;
+                None
+            }
             Phase::Running { token, instance_id } => {
+                let token = *token;
                 info!("[android_run] exiting while run {} on {} is running: finishing it first", token, instance_id);
                 Some(begin_finishing(slot, &mut inner, token, "task-stopped"))
             }
-            _ => None,
+            Phase::Finishing { .. } | Phase::Idle => None,
         }
     };
     if let Some(job) = job {
+        job.kill_agent_if_unrequested();
         job.spawn();
     }
     let deadline = Instant::now() + slot.timing.exit_wait;
     loop {
-        let (settled, agent) = match lock(&slot.inner).worker.as_ref() {
-            Some(worker) => (worker.settled, Some(Arc::clone(&worker.agent))),
-            None => (true, None),
+        let (settled, agent) = {
+            let inner = lock(&slot.inner);
+            match inner.worker.as_ref() {
+                Some(worker) => (worker.settled, Some(Arc::clone(&worker.agent))),
+                None => (!matches!(inner.phase, Phase::Starting { .. }), None),
+            }
         };
         if settled || Instant::now() >= deadline {
             if !settled {

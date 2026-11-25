@@ -142,6 +142,44 @@ pub fn touch_reserved(dir: &Path) -> bool {
     !matches!(std::fs::symlink_metadata(dir.join("touch.json")), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
+/// The host-wide lock file for one emulator: `<dir>/maanikki-android-<serial>.lock`, the serial with every character
+/// outside `[A-Za-z0-9._-]` replaced by `_` (scripts/android/runner.py's device_lock_path builds the same name; `dir` is
+/// the system temporary directory, `std::env::temp_dir()` there and `tempfile.gettempdir()` in the runner, both
+/// following TMPDIR).
+#[cfg(target_os = "macos")]
+pub fn device_lock_path(dir: &Path, serial: &str) -> std::path::PathBuf {
+    let name: String = serial
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .collect();
+    dir.join(format!("maanikki-android-{}.lock", name))
+}
+
+/// Takes the device lock without blocking: Ok(Some(file)) holds it until the file is dropped; Ok(None) when another
+/// process (or another open handle) holds it. The lock file is never removed.
+#[cfg(target_os = "macos")]
+pub fn take_device_lock(dir: &Path, serial: &str) -> Result<Option<std::fs::File>, String> {
+    use std::os::unix::io::AsRawFd;
+    let path = device_lock_path(dir, serial);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .open(&path)
+        .map_err(|e| format!("无法打开 {}：{}", path.display(), e))?;
+    // SAFETY: flock on a file descriptor owned by `file` for the duration of the call.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        return Ok(Some(file));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        Ok(None)
+    } else {
+        Err(format!("无法锁定 {}：{}", path.display(), error))
+    }
+}
+
 /// 启动时调用并记录结果。
 pub fn clear_at_startup(data_dir: &Path) {
     match clear_touch_marker(data_dir) {
@@ -230,6 +268,29 @@ mod tests {
         drop(holder);
         assert_eq!(owner_lock_free(&dir), Ok(true));
         assert_eq!(owner_lock_free(&dir), Ok(true));  // the check itself does not keep the lock
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_device_lock_is_exclusive_per_serial_and_its_file_is_kept() {
+        let _serial = serial_fd_tests();
+        let dir = temp_dir("device");
+        // The same name as scripts/android/runner.py's device_lock_path (scripts/test_android_runner.py checks it too).
+        assert_eq!(
+            device_lock_path(&dir, "127.0.0.1:5555").file_name().unwrap(),
+            "maanikki-android-127.0.0.1_5555.lock"
+        );
+        assert_eq!(device_lock_path(&dir, "emulator-5554/x y").file_name().unwrap(), "maanikki-android-emulator-5554_x_y.lock");
+        let held = take_device_lock(&dir, "127.0.0.1:5555").unwrap().expect("free at first");
+        // flock locks belong to the open file description: a second handle (as another process would) is refused.
+        assert!(take_device_lock(&dir, "127.0.0.1:5555").unwrap().is_none());
+        assert!(take_device_lock(&dir, "127.0.0.1:5556").unwrap().is_some());  // another emulator is not affected
+        drop(held);
+        let again = take_device_lock(&dir, "127.0.0.1:5555").unwrap();
+        assert!(again.is_some());
+        drop(again);
+        assert!(device_lock_path(&dir, "127.0.0.1:5555").exists());  // never removed
         let _ = std::fs::remove_dir_all(&dir);
     }
 

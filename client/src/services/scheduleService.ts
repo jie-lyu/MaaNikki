@@ -68,6 +68,13 @@ class ScheduleService {
   private checking = false;
   private triggerFn: ScheduleTriggerCallback | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Android emulator (macOS only): slot keys of due Adb instances waiting for the Android task tiers outside `checking`
+   * (decideAfterAndroidTiers). A check meanwhile leaves them to that wait. Only Adb slot keys ever enter it.
+   */
+  private androidWaits = new Set<string>();
+  /** Bumped whenever decideAfterAndroidTiers saves a slot, so a check running meanwhile merges instead of overwriting. */
+  private androidSlotSaves = 0;
 
   private getTriggeredSlots(): Set<string> {
     try {
@@ -196,6 +203,7 @@ class ScheduleService {
   async check() {
     if (this.checking || !this.triggerFn) return;
     this.checking = true;
+    let deferredWait: Promise<void> | null = null;
 
     try {
       const now = new Date();
@@ -219,6 +227,7 @@ class ScheduleService {
 
       this.cleanupOldSlots();
       const triggeredSlots = this.getTriggeredSlots();
+      const androidSavesAtRead = this.androidSlotSaves;
       let slotsModified = false;
 
       const { instances } = useAppStore.getState();
@@ -251,8 +260,8 @@ class ScheduleService {
             break;
           }
 
-          if (androidTaskTiersPendingFor(freshInst.id)) {
-            deferred.push(inst.id);
+          if (this.androidWaits.has(slotKey) || androidTaskTiersPendingFor(freshInst.id)) {
+            if (!this.androidWaits.has(slotKey)) deferred.push(inst.id);
             break;
           }
 
@@ -274,43 +283,59 @@ class ScheduleService {
         }
       }
 
-      // The deferred Adb instances wait for the Android tiers once. Stopped meanwhile: the slots recorded so far
-      // are saved and the deferred ones are not. Otherwise each is decided again from the store as it is now (its
-      // policies, enabled flags and running state may have changed during the wait), without waiting again.
-      if (deferred.length > 0) {
-        await waitForAndroidTaskTiers();
-        if (!this.intervalId || !this.triggerFn) {
-          if (slotsModified) this.setTriggeredSlots(triggeredSlots);
-          return;
+      if (slotsModified) {
+        if (this.androidSlotSaves !== androidSavesAtRead) {
+          // An Android tier wait saved a slot during this check: keep it.
+          for (const key of this.getTriggeredSlots()) triggeredSlots.add(key);
         }
-        for (const id of deferred) {
-          const inst = useAppStore.getState().instances.find((i) => i.id === id);
-          const policy = inst?.schedulePolicies?.find(
-            (p) => p.enabled && p.weekdays.includes(weekday) && p.times?.includes(timeStr),
-          );
-          if (!inst || !policy) continue;
-          const slotKey = buildTriggeredSlotKey(inst.id, slotStr);
-          if (triggeredSlots.has(slotKey)) continue;
-          triggeredSlots.add(slotKey);
-          slotsModified = true;
-          if (inst.isRunning) {
-            log.info(`[调度器] 实例 "${inst.name}" 正在运行，跳过时间槽 ${slotStr} 策略 "${policy.name}"`);
-            continue;
-          }
-          log.info(`[调度器] 准时触发: 时间槽 ${slotStr}, 实例 "${inst.name}", 策略 "${policy.name}"`);
-          try {
-            await this.triggerFn(inst, policy.name, timeStr);
-          } catch (err) {
-            log.error(`[调度器] 触发失败:`, err);
-          }
-        }
+        this.setTriggeredSlots(triggeredSlots);
       }
 
-      if (slotsModified) {
-        this.setTriggeredSlots(triggeredSlots);
+      // The deferred Adb instances wait for the Android tiers once, without holding `checking`: a check in the next
+      // minute (a native Mac instance due then, say) runs meanwhile.
+      if (deferred.length > 0) {
+        const keys = deferred.map((id) => buildTriggeredSlotKey(id, slotStr));
+        for (const key of keys) this.androidWaits.add(key);
+        deferredWait = this.decideAfterAndroidTiers(deferred, weekday, timeStr, slotStr).finally(() => {
+          for (const key of keys) this.androidWaits.delete(key);
+        });
       }
     } finally {
       this.checking = false;
+    }
+    if (deferredWait) await deferredWait;
+  }
+
+  /**
+   * Decides due Adb instances once the Android tiers settled. Stopped meanwhile: nothing is recorded or started.
+   * Otherwise each is decided again from the store as it is now (its policies, enabled flags and running state may
+   * have changed during the wait), and its slot is saved before it is started, so no other check starts it again.
+   */
+  private async decideAfterAndroidTiers(deferred: string[], weekday: number, timeStr: string, slotStr: string) {
+    await waitForAndroidTaskTiers();
+    if (!this.intervalId || !this.triggerFn) return;
+    for (const id of deferred) {
+      const inst = useAppStore.getState().instances.find((i) => i.id === id);
+      const policy = inst?.schedulePolicies?.find(
+        (p) => p.enabled && p.weekdays.includes(weekday) && p.times?.includes(timeStr),
+      );
+      if (!inst || !policy) continue;
+      const slotKey = buildTriggeredSlotKey(inst.id, slotStr);
+      const triggeredSlots = this.getTriggeredSlots();
+      if (triggeredSlots.has(slotKey)) continue;
+      triggeredSlots.add(slotKey);
+      this.setTriggeredSlots(triggeredSlots);
+      this.androidSlotSaves += 1;
+      if (inst.isRunning) {
+        log.info(`[调度器] 实例 "${inst.name}" 正在运行，跳过时间槽 ${slotStr} 策略 "${policy.name}"`);
+        continue;
+      }
+      log.info(`[调度器] 准时触发: 时间槽 ${slotStr}, 实例 "${inst.name}", 策略 "${policy.name}"`);
+      try {
+        await this.triggerFn(inst, policy.name, timeStr);
+      } catch (err) {
+        log.error(`[调度器] 触发失败:`, err);
+      }
     }
   }
 }

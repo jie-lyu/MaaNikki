@@ -26,9 +26,11 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -183,7 +185,78 @@ def agent_environment(controller: dict, data_root: Path) -> dict:
     return env
 
 
+DEVICE_BUSY = "另一个 MaaNikki 进程正在驱动这台模拟器（MaaNikki 客户端，或另一个运行器），请等它结束后再运行。"
+
+
+def device_lock_dir() -> Path:
+    """The system temporary directory (follows TMPDIR, like the client's std::env::temp_dir())."""
+    return Path(tempfile.gettempdir())
+
+
+def device_lock_path(serial: str, directory: Path | None = None) -> Path:
+    """The host-wide lock file for one emulator, the same name the client uses (android_input::device_lock_path):
+    maanikki-android-<serial>.lock with every character outside [A-Za-z0-9._-] replaced by _."""
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", serial)
+    return (device_lock_dir() if directory is None else directory) / f"maanikki-android-{name}.lock"
+
+
+def take_device_lock(serial: str):
+    """An open handle holding an exclusive, non-blocking flock on the emulator's device lock, held for the whole run:
+    the client takes the same lock while its Android run slot is busy, so the runner and the client (whose data roots
+    and owner locks differ) never drive one emulator at the same time. RunnerError when it cannot be taken. The lock file
+    is never removed."""
+    try:
+        import fcntl
+    except ImportError:
+        raise RunnerError("这台电脑上无法独占模拟器（没有 flock），运行器不运行。") from None
+    path = device_lock_path(serial)
+    try:
+        handle = open(path, "a+b")
+    except OSError as error:
+        raise RunnerError(f"无法打开 {path}：{error}") from None
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        raise RunnerError(f"{DEVICE_BUSY}（{path}）") from None
+    except OSError as error:
+        handle.close()
+        raise RunnerError(f"无法锁定 {path}：{error}") from None
+    return handle
+
+
+class SignalDeferral:
+    """Once started, SIGINT and SIGTERM are recorded instead of acting, until restore(): from the first signal of a stop
+    until the stop handshake, the agent's reaping and the run record are done. Main thread only (elsewhere a no-op)."""
+
+    def __init__(self):
+        self.signals: list[int] = []
+        self.previous: dict[int, object] | None = None
+
+    def start(self) -> None:
+        if self.previous is not None or threading.current_thread() is not threading.main_thread():
+            return
+        self.previous = {}
+        for number in (signal.SIGINT, signal.SIGTERM):
+            self.previous[number] = signal.signal(number, lambda signum, _frame: self.signals.append(signum))
+
+    def restore(self) -> None:
+        if self.previous is not None:
+            for number, handler in self.previous.items():
+                signal.signal(number, handler)
+            self.previous = None
+
+
 def run(args) -> int:
+    """One task run, holding the emulator's device lock from before the runner touches the device until it returns."""
+    device_lock = take_device_lock(args.serial)
+    try:
+        return _run(args)
+    finally:
+        device_lock.close()
+
+
+def _run(args) -> int:
     from maa.agent_client import AgentClient
     from maa.controller import AdbController
     from maa.resource import Resource
@@ -232,6 +305,15 @@ def run(args) -> int:
                              env=agent_environment(controller_def, data_root), stdout=agent_log,
                              stderr=subprocess.STDOUT)
     tasker = None
+    # From the first SIGINT or SIGTERM on, further ones are deferred (SignalDeferral): the stop handshake, which may wait
+    # for an in-flight click, is never cut short. While the task runs, SIGTERM stops it the way Ctrl-C does.
+    deferral = SignalDeferral()
+    before_run = None  # the handlers to restore at the end, when this run installed its own
+    if threading.current_thread() is threading.main_thread():
+        def stop_signal(_signum, _frame):
+            deferral.start()
+            raise KeyboardInterrupt
+        before_run = {number: signal.signal(number, stop_signal) for number in (signal.SIGINT, signal.SIGTERM)}
     try:
         if not within(60, "连接 agent", client.connect):
             raise RunnerError(f"agent 没有连上；见 {log_dir / 'agent.log'}")
@@ -243,20 +325,23 @@ def run(args) -> int:
         record["status"] = "succeeded" if job.succeeded else "failed"
         record["nodes"] = [getattr(node, "name", None) for node in (getattr(detail, "nodes", None) or [])][-10:]
     except KeyboardInterrupt:
+        deferral.start()  # before the handshake: a second signal must not cut it short
         record["status"] = "interrupted"
         record["stop_requested"] = stop_tasker(tasker, data_root, record, child, client)
-        raise RunnerError("运行被中断（Ctrl-C）；已请求停止任务。") from None
+        raise RunnerError("运行被中断（Ctrl-C 或 SIGTERM）；已请求停止任务。") from None
     except RunnerError as error:
+        deferral.start()
         record["status"] = "error"
         record["error"] = str(error)
         record["stop_requested"] = stop_tasker(tasker, data_root, record, child, client)
         raise
     finally:
-        # Once the agent exists, a Ctrl-C during cleanup is deferred until the child is reaped and the run record is
-        # written and printed.
-        deferred = []
-        previous = signal.signal(signal.SIGINT, lambda *_: deferred.append(True)) \
-            if threading.current_thread() is threading.main_thread() else None
+        # Once the agent exists, a signal during cleanup is deferred until the child is reaped and the run record is
+        # written and printed (and, on a stop, already during the handshake above).
+        deferral.start()
+        if before_run is not None and deferral.previous is not None:
+            deferral.previous = before_run  # restored at the end, not the stop handler installed while the task ran
+        deferred = deferral.signals
         try:
             try:
                 within(15, "断开 agent", client.disconnect)
@@ -279,8 +364,7 @@ def run(args) -> int:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
             print(json.dumps(record, ensure_ascii=False, indent=1))
         finally:
-            if previous is not None:
-                signal.signal(signal.SIGINT, previous)
+            deferral.restore()
         if deferred:
             record["interrupted_during_cleanup"] = True
     if record.get("interrupted_during_cleanup"):
@@ -448,6 +532,7 @@ def request_stop(data_root: Path, seconds: float | None = None, poll: float | No
 
 STOP_TASKER_WAIT = 10.0
 STOP_TASKER_POLL = 0.1
+STOP_NOTICE_INTERVAL = 30.0
 
 
 def stop_tasker(tasker, data_root: Path | None = None, record: dict | None = None, child=None, client=None) -> bool:
@@ -462,8 +547,10 @@ def stop_tasker(tasker, data_root: Path | None = None, record: dict | None = Non
       DOWN). The agent child is killed instead: its touches run in this process's controller (context.run_action_direct
       through the AgentClient), so a click already handed over finishes whole here and no new one can start once the
       agent is gone; the client's timeout is bounded so the pending custom action returns, and the task, whose entry
-      node has no next node, ends by itself. If it is still running after STOP_TASKER_WAIT, record["stop_path"] says
-      "agent terminated; tasker still running" and False is returned (the run ends with an error, without post_stop).
+      node has no next node, ends by itself. If it is still running after STOP_TASKER_WAIT the runner keeps waiting,
+      printing a notice every STOP_NOTICE_INTERVAL, and does not exit while the tasker runs: this process's controller
+      executes the click, and exiting between its DOWN and UP would leave a contact held. record["stop_path"] then says
+      "agent terminated; tasker stopped late". Still no post_stop.
     """
     if tasker is None:
         return False
@@ -496,16 +583,26 @@ def _stop_by_terminating_agent(tasker, touch: str, record: dict | None, child, c
             client.set_timeout(5000)  # a pending custom action call then returns instead of waiting forever
         except Exception:
             pass
-    deadline = time.monotonic() + STOP_TASKER_WAIT
+    started = time.monotonic()
+    deadline = started + STOP_TASKER_WAIT
     while _running(tasker) and time.monotonic() < deadline:
         time.sleep(STOP_TASKER_POLL)
-    stopped = not _running(tasker)
+    late = _running(tasker)
+    next_notice = time.monotonic()
+    while _running(tasker):
+        # Never exit while the tasker runs: a click stalled between DOWN and UP (ADB wedged) finishes only in this
+        # process; exiting would leave the contact held.
+        if time.monotonic() >= next_notice:
+            print(f"结束 agent 之后任务已经 {time.monotonic() - started:.0f} 秒没有自己停下；运行器不调用框架的停止，也不在任务停下之前退出"
+                  "（正在进行的点击要在这个进程里做完，否则会留下按住的触点）。ADB 可能卡住了：检查模拟器和 ADB；一直停不下来才强制结束"
+                  "（kill -9），之后下一次运行在发送前读设备的触点状态。", file=sys.stderr)
+            next_notice = time.monotonic() + STOP_NOTICE_INTERVAL
+        time.sleep(STOP_TASKER_POLL)
     if record is not None:
-        record["stop_path"] = "agent terminated" if stopped else "agent terminated; tasker still running"
-    if not stopped:
-        print(f"结束 agent 之后任务 {STOP_TASKER_WAIT:g} 秒内没有自己停下；没有调用框架的停止（它可能切断一次正在进行的点击），"
-              "请检查模拟器上是否留下按住的触点。", file=sys.stderr)
-    return stopped
+        record["stop_path"] = "agent terminated; tasker stopped late" if late else "agent terminated"
+        if late:
+            record["tasker_stop_seconds"] = round(time.monotonic() - started, 1)
+    return True
 
 
 def _running(tasker) -> bool:

@@ -1381,7 +1381,9 @@ export function Toolbar({ showAddPanel, onToggleAddPanel, className }: ToolbarPr
         );
         if (stoppedSinceStart()) {
           log.info(`实例 ${targetInstance.name}: 开始请求发出后按了停止，停止这一轮安卓任务`);
-          void stopInstanceTasks(targetId);
+          // A fresh backend stop, never joining the earlier one: it may have reached the backend before this run
+          // claimed its slot, with its reply still pending.
+          void stopInstanceTasks(targetId, { fresh: true });
         }
 
         // macOS 和安卓模拟器会跳过未开放的任务，返回的 ID 不再与提交顺序一一对应：按后端记录的
