@@ -42,6 +42,14 @@
   - 结论可行，已报给协调者。
   - 待协调者裁定：HUD 完整、不用点的环境旁白（测量时出现过「起风了」），我建议的规则是暂停输入、等它消失后继续；会话里仍照原规则执行。
 - **进行中**：手势基础设施（只在安卓上），子代理在 `gesture-work` 工作目录、`phase-e-gesture` 分支上做（基于 `2046da62`），离线、有测试，**还没审查**。之后：Codex 审查 → 设备上验证一次 `joystick_step` → 移动后端（模拟摇杆，每步按（角度、幅度、时长）走，按镜头朝向换算角度，基本不转镜头；每步等小地图停稳或做预测；第一次定位用传送点坐标作为提示）→ 星海路线（大地图传送点到 `星梦群屿·主岛`，按铃单独 4 秒）。
+- **手势基础设施的状态（第五任停下时）**：
+  - `c515ef75`，在 `phase-e-gesture` 分支、`gesture-work` 工作目录，没推送。
+  - 接口：`Runtime.gesture(g, source_frame=…)`；`agent/host/android/gesture.py` 里有 `joystick_step(rt, frame, angle_deg, magnitude, duration_s, jump_at_s=None)`、`camera_drag`、`bell_press`。角度是屏幕角度：0 向右、90 向下。
+  - **改了共用的 `runtime.py`**：`_dispatch_touch` 改成接收一个 `send` 函数。审查要重点确认 Windows 和原生 Mac 的点击、滑动不变。
+  - 离线测试 15 项。
+  - Codex 第一轮已经在跑：提示词 `.build/android/reviews/e1-gesture-r1.md`，结果写到 `e1-gesture-r1.out.md`，下一任从读这个结果开始。
+  - 子代理留下的开放问题：`post_touch_*().wait()` 在 agent 里是否阻塞；两个触点之后，设备确认需要一次「没有按住的 UP」，这在设备上还没见过，也不确定 10 条的 `RecentQueue` 会不会把它挤掉；只有 tasker 标志、没有 stop.request 的停止在手势进行中看不到。
+  - 审完要在设备上验证一次 `joystick_step`（开阔平地，遵守阶段 E 一节的安全规则）。
 - **工作目录**：另有 `dig-work`（已合并）、`gesture-work`（`phase-e-gesture`）。
 
 ### 更新：截至 2026-11-26 08:30（第五任主开发交接）
