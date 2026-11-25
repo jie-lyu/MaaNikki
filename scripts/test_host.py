@@ -1308,7 +1308,7 @@ class MacTextGateTests(unittest.TestCase):
             with self.subTest(platform=platform), \
                     patch("daily.runtime.active_session", return_value=session), \
                     patch("daily.runtime.game_backend", return_value=platform), \
-                    patch("daily.runtime.capabilities", return_value=SimpleNamespace(pointer_hover=False)), \
+                    patch("daily.runtime.capabilities", return_value=host.Capabilities(platform, pointer_hover=False)), \
                     patch("daily.runtime.native_key_fields", side_effect=lambda action, fields: fields), \
                     patch.object(Runtime, "pause", return_value=True), \
                     patch.object(Runtime, "ui", SimpleNamespace(unhover=lambda: True), create=True):
