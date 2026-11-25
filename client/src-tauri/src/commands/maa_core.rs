@@ -1446,6 +1446,10 @@ pub fn run_task_impl(
     if matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. })) {
         return Err(MACOS_APPEND_REFUSED.to_string());
     }
+    // 安卓模拟器上不在运行中追加任务（与 Mac 相同）。
+    if matches!(instance.controller_config, Some(ControllerConfig::Adb { .. })) {
+        return Err(super::utils::ANDROID_APPEND_REFUSED.to_string());
+    }
     instance.start_generation = instance.start_generation.wrapping_add(1);
 
     let resource = instance.resource.as_ref().ok_or("Resource not loaded")?;
@@ -2088,6 +2092,10 @@ pub fn override_pipeline_impl(
 ) -> Result<bool, String> {
     let instances = state.instances.lock().map_err(|e| e.to_string())?;
     let instance = instances.get(instance_id).ok_or("Instance not found")?;
+    // 安卓模拟器上运行中不能修改任务选项。
+    if matches!(instance.controller_config, Some(ControllerConfig::Adb { .. })) {
+        return Err(super::utils::ANDROID_LIVE_OVERRIDE_REFUSED.to_string());
+    }
     let tasker = instance.tasker.as_ref().ok_or("Tasker not created")?;
 
     tasker

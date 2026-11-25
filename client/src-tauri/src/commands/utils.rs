@@ -333,6 +333,8 @@ const MACOS_DATA_DIR_NAME: &str = "MaaNikki";
 /// macOS 测试预览版允许运行的任务入口清单（与 agent 共用一份）。
 #[cfg(target_os = "macos")]
 const MACOS_PREVIEW_TASKS: &str = "agent/host/macos/preview_tasks.json";
+/// 安卓模拟器目标的任务档位清单（与 agent/host/android 的准入相同）。
+const ANDROID_TASKS: &str = "agent/host/android/tasks.json";
 
 /// 开发专用开关：逗号分隔的任务入口，只在开发构建的 macOS 客户端里额外放行（agent 侧同名变量）。
 /// 发布构建既不读取，也会从 agent 的环境里去掉，已验证的白名单仍是 preview_tasks.json。
@@ -518,6 +520,24 @@ pub fn macos_task_tiers() -> TaskTiersView {
     }
 }
 
+/// 安卓模拟器目标的任务档位（桌面命令 get_android_task_tiers 与 GET /api/android/task-tiers 返回）：macOS 上读取
+/// agent/host/android/tasks.json；其他系统不开放安卓目标，返回全空。
+pub fn android_task_tiers() -> TaskTiersView {
+    #[cfg(target_os = "macos")]
+    {
+        match get_exe_directory()
+            .and_then(|root| std::fs::read_to_string(root.join(ANDROID_TASKS)).map_err(|e| e.to_string()))
+        {
+            Ok(json) => task_tiers_view(&json),
+            Err(e) => TaskTiersView::unreadable(&e),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        TaskTiersView::default()
+    }
+}
+
 /// 该入口在 macOS 上是否可以运行（已验证或试用）；清单无效时报错。
 pub fn preview_task_allowed(manifest_json: &str, entry: &str) -> Result<bool, String> {
     let tiers = parse_task_tiers(manifest_json)?;
@@ -572,6 +592,37 @@ pub fn platform_refuses_task(entry: &str) -> Option<String> {
         let _ = entry;
         None
     }
+}
+
+/// 安卓模拟器目标不能运行该任务入口时返回原因；能运行时返回 None。只放行 agent/host/android/tasks.json 中
+/// 已验证或试用的入口，清单缺失或无法解析时一律拒绝。安卓目标只在 macOS 上开放（其他系统在控制器这一步就拒绝）。
+pub fn android_refuses_task(entry: &str) -> Option<String> {
+    let tiers = get_exe_directory()
+        .and_then(|root| std::fs::read_to_string(root.join(ANDROID_TASKS)).map_err(|e| e.to_string()))
+        .and_then(|json| parse_task_tiers(&json));
+    match tiers {
+        Ok(tiers) if tiers.verified.iter().chain(tiers.experimental.iter()).any(|e| e == entry) => None,
+        Ok(tiers) => Some(match tiers.excluded.get(entry) {
+            Some(reason) => format!("{} 不在安卓模拟器上开放：{}已跳过。", entry, reason),
+            None => format!("{} 暂不支持安卓模拟器，已跳过。", entry),
+        }),
+        Err(e) => Some(format!("无法读取安卓任务清单（{}），已跳过 {}。", e, entry)),
+    }
+}
+
+/// 安卓模拟器上不应用任务选项：提交和追加时管线覆盖一律换成空的 "{}"（只读的安卓检查不需要选项；带覆盖可以
+/// 把它换成别的动作，或经 next 接上别的节点），运行中修改选项一律拒绝。原来的覆盖不为空时返回提示。
+pub const ANDROID_PIPELINE_OVERRIDE: &str = "{}";
+pub const ANDROID_LIVE_OVERRIDE_REFUSED: &str = "安卓模拟器上运行中不能修改任务选项。";
+
+pub fn android_override_notice(entry: &str, pipeline_override: &str) -> Option<String> {
+    let empty = match serde_json::from_str::<serde_json::Value>(pipeline_override.trim()) {
+        Ok(serde_json::Value::Null) => true,
+        Ok(serde_json::Value::Object(map)) => map.is_empty(),
+        Ok(serde_json::Value::Array(items)) => items.iter().all(|item| item.as_object().is_some_and(|m| m.is_empty())),
+        _ => pipeline_override.trim().is_empty(),
+    };
+    (!empty).then(|| format!("安卓模拟器上暂不应用任务选项，{} 按默认设置运行。", entry))
 }
 
 /// 本次运行的游戏目标：由控制器类型（interface 中 controller.type）决定，与 agent 的 host.game_backend 规则相同。
@@ -672,7 +723,7 @@ fn controller_refusal(host: Option<GameTarget>, target: Option<GameTarget>) -> O
 }
 
 /// 一批任务的准入：以已连接的控制器为准，提交的控制器与它的类型不一致时整批拒绝；控制器本身不能运行时
-/// 整批拒绝（即使没有任务）；否则逐个入口按当前系统的规则判断。
+/// 整批拒绝（即使没有任务）；否则逐个入口判断：安卓模拟器目标按安卓清单，其他按当前系统的规则。
 fn admit_batch_on(
     host: Option<GameTarget>,
     connected: Option<&ControllerKind>,
@@ -680,13 +731,28 @@ fn admit_batch_on(
     entries: &[&str],
     host_rules: impl Fn(&str) -> Option<String>,
 ) -> Result<Vec<Option<String>>, String> {
+    admit_batch_with(host, connected, submitted, entries, host_rules, android_refuses_task)
+}
+
+fn admit_batch_with(
+    host: Option<GameTarget>,
+    connected: Option<&ControllerKind>,
+    submitted: Option<&ControllerKind>,
+    entries: &[&str],
+    host_rules: impl Fn(&str) -> Option<String>,
+    android_rules: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<Option<String>>, String> {
     if let (Some(connected), Some(submitted)) = (connected, submitted) {
         if connected != submitted {
             return Err("所选的控制器与当前连接的不一致，请重新连接后再运行。".to_string());
         }
     }
-    if let Some(reason) = controller_refusal(host, connected.or(submitted).and_then(GameTarget::from_kind)) {
+    let target = connected.or(submitted).and_then(GameTarget::from_kind);
+    if let Some(reason) = controller_refusal(host, target) {
         return Err(reason);
+    }
+    if target == Some(GameTarget::Adb) {
+        return Ok(entries.iter().map(|entry| android_rules(entry)).collect());
     }
     Ok(entries.iter().map(|entry| host_rules(entry)).collect())
 }
@@ -698,6 +764,39 @@ pub fn admit_tasks(
     entries: &[&str],
 ) -> Result<Vec<Option<String>>, String> {
     admit_batch_on(GameTarget::host(), connected, submitted, entries, platform_refuses_task)
+}
+
+pub const ANDROID_APPEND_REFUSED: &str = "安卓模拟器上暂不在运行中追加任务，请等这一轮结束后再开始。";
+
+/// 安卓模拟器上的一批任务在通过准入之后还要满足的条件（调用方在准入成功、目标确定是 Adb 之后检查，
+/// 绑定控制器时在那把锁里按当时的连接再查一次；其他系统和桌面控制器的提示不变）：只能整批开始（不在
+/// 运行中追加）、至少一个任务、配置了 agent，而且 agent 的环境里要有 PI_CONTROLLER（agent 按它决定
+/// 目标，没有时会按电脑的目标拒绝任务）。
+pub fn android_start_refusal(
+    reset_state: bool,
+    pi_envs: Option<&std::collections::HashMap<String, String>>,
+    task_count: usize,
+    has_agent: bool,
+) -> Option<String> {
+    if !reset_state {
+        return Some(ANDROID_APPEND_REFUSED.to_string());
+    }
+    if task_count == 0 {
+        return Some("没有要在安卓模拟器上运行的任务。".to_string());
+    }
+    if !has_agent {
+        // 安卓任务都由 agent 执行（例如 nikki.gameplay），没有 agent 时任务会提交上去再失败。
+        return Some("缺少 agent 配置，无法在安卓模拟器上开始任务。".to_string());
+    }
+    if pi_envs.and_then(|envs| envs.get("PI_CONTROLLER")).is_none() {
+        return Some("缺少所选控制器的定义，无法在安卓模拟器上开始任务，请重新选择控制器后再运行。".to_string());
+    }
+    None
+}
+
+/// 准入时本次运行的目标是否是安卓模拟器。
+pub fn targets_android(connected: Option<&ControllerKind>, submitted: Option<&ControllerKind>) -> bool {
+    connected.or(submitted).and_then(GameTarget::from_kind) == Some(GameTarget::Adb)
 }
 
 /// 运行中追加单个任务的准入：只看已连接的控制器。
@@ -1059,7 +1158,7 @@ mod preview_task_tests {
         assert_eq!(super::macos_task_tiers(), super::task_tiers_view(manifest));
     }
 
-    use super::{admit_batch_on, admit_tasks, submitted_controller_kind, target_refuses_task, ControllerKind, GameTarget};
+    use super::{android_override_notice, admit_batch_on, admit_batch_with, admit_tasks, submitted_controller_kind, target_refuses_task, ControllerKind, GameTarget};
 
     fn kind(t: &str) -> Option<ControllerKind> {
         Some(ControllerKind::Type(t.to_string()))
@@ -1188,6 +1287,55 @@ mod preview_task_tests {
         assert_eq!(submitted_controller_kind(None, Some("")), None);
         assert_eq!(submitted_controller_kind(None, None), None);
         assert!(target_refuses_task(kind("Adb").as_ref(), "X").unwrap().contains("已跳过 X"));
+    }
+
+    /// The Android rules are in place but not reachable yet: every host refuses an emulator controller before any
+    /// entry is looked at (the client opens Adb admission in its own later step).
+    #[test]
+    fn android_tiers_are_prepared_while_admission_stays_closed() {
+        let host_rules = |_: &str| None;
+        let android_rules = |_: &str| None;
+        let adb = kind("Adb");
+        for host in [GameTarget::Win32, GameTarget::MacOS] {
+            let reason = admit_batch_with(Some(host), adb.as_ref(), adb.as_ref(), &["MaaNikki_AndroidCheck"],
+                                          host_rules, android_rules).unwrap_err();
+            assert!(reason.contains("安卓"), "{}", reason);
+        }
+        let manifest = include_str!("../../../../agent/host/android/tasks.json");
+        assert_eq!(preview_task_allowed(manifest, "MaaNikki_AndroidCheck"), Ok(true));
+        assert_eq!(preview_task_allowed(manifest, "MaaNikki_Mailbox"), Ok(false));
+    }
+
+    #[test]
+    fn android_runs_apply_no_task_options() {
+        assert_eq!(super::ANDROID_PIPELINE_OVERRIDE, "{}");  // MaaFramework accepts it (an empty "" or null is refused)
+        for empty in ["", "  ", "null", "{}", "[]", "[{}]", "[{},{}]"] {
+            assert_eq!(android_override_notice("MaaNikki_AndroidCheck", empty), None, "{}", empty);
+        }
+        for given in [r#"[{"MaaNikki_FocusLost":{"custom_action_param":{"mode":"pause"}}}]"#,
+                      r#"{"MaaNikki_AndroidCheck":{"next":["X"]}}"#, "not json"] {
+            let notice = android_override_notice("MaaNikki_AndroidCheck", given).unwrap();
+            assert!(notice.contains("不应用任务选项"), "{}", notice);
+        }
+    }
+
+    #[test]
+    fn android_runs_start_whole_and_with_the_controller_definition() {
+        let pi = envs(ADB);
+        assert_eq!(super::android_start_refusal(true, Some(&pi), 1, true), None);
+        assert_eq!(super::android_start_refusal(false, Some(&pi), 1, true).as_deref(),
+                   Some(super::ANDROID_APPEND_REFUSED));
+        // Telemetry metadata alone is not enough: the agent decides by its own PI_CONTROLLER.
+        assert!(super::android_start_refusal(true, None, 1, true).unwrap().contains("缺少所选控制器的定义"));
+        assert!(super::android_start_refusal(true, Some(&std::collections::HashMap::new()), 1, true).is_some());
+        assert!(super::android_start_refusal(true, Some(&pi), 0, true).is_some());  // an empty batch
+        assert!(super::android_start_refusal(true, Some(&pi), 1, false).unwrap().contains("agent"));
+        let adb = kind("Adb");
+        assert!(super::targets_android(adb.as_ref(), None));
+        assert!(super::targets_android(None, adb.as_ref()));
+        assert!(!super::targets_android(kind("Win32").as_ref(), None));
+        assert!(!super::targets_android(kind("MacOS").as_ref(), kind("MacOS").as_ref()));
+        assert!(!super::targets_android(None, None));
     }
 
     #[test]

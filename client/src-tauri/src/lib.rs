@@ -123,6 +123,8 @@ pub fn run() {
             match commands::utils::get_app_data_dir() {
                 Ok(data_dir) => {
                     app_config.load_config(&data_dir);
+                    // 安卓模拟器输入的恢复边界：在任何任务能开始之前（macOS 以外什么都不做）。
+                    commands::android_input::clear_at_startup(&data_dir);
                 }
                 Err(e) => {
                     log::warn!("AppConfigState: could not get data dir: {}", e);
@@ -364,6 +366,7 @@ pub fn run() {
             commands::system::get_arch,
             commands::system::get_os,
             commands::system::get_macos_task_tiers,
+            commands::system::get_android_task_tiers,
             commands::system::get_system_info,
             commands::system::get_web_server_port,
             commands::system::get_local_lan_ip,

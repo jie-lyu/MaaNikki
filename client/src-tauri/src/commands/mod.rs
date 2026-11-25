@@ -19,6 +19,7 @@ pub mod utils;
 
 pub mod account_state;
 pub mod adventure_report;
+pub mod android_input;
 pub mod app_config;
 pub mod data_update;
 mod diagnostic_images;

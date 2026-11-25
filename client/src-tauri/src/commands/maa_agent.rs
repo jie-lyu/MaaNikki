@@ -666,6 +666,16 @@ pub async fn start_tasks_impl(
             return Err(reason);
         }
     };
+    // 安卓模拟器：通过准入之后才查的开始条件（客户端放开 Adb 准入之前不会走到这里）。
+    if super::utils::targets_android(connected.as_ref(), submitted.as_ref()) {
+        let has_agent = agent_configs.as_ref().is_some_and(|configs| !configs.is_empty());
+        if let Some(reason) =
+            super::utils::android_start_refusal(reset_state, pi_envs.as_ref(), tasks.len(), has_agent)
+        {
+            emit_agent_output(&app, &instance_id, "stderr", &reason);
+            return Err(reason);
+        }
+    }
     // 绑定控制器之前按新的连接重新准入时用（见下方）。
     let admitted_names: Vec<String> = entries.iter().map(|e| e.to_string()).collect();
     let admitted_entries: Vec<&str> = admitted_names.iter().map(String::as_str).collect();

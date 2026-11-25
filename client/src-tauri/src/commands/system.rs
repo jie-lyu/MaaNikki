@@ -1009,6 +1009,12 @@ pub fn get_macos_task_tiers() -> super::utils::TaskTiersView {
     super::utils::macos_task_tiers()
 }
 
+/// 安卓模拟器目标的任务档位（macOS 以外全空）。
+#[tauri::command]
+pub fn get_android_task_tiers() -> super::utils::TaskTiersView {
+    super::utils::android_task_tiers()
+}
+
 /// 获取系统信息
 #[tauri::command]
 pub fn get_system_info() -> SystemInfo {
