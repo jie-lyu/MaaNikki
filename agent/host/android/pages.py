@@ -504,6 +504,14 @@ def tap_on_layer(rt, what: str, accept, point, *, delay: float = .5) -> bool:
 TEXT_ACTION = "InputText"  # how a text input is named in logs/android-input.jsonl
 
 
+def held_contact(rt):
+    """Before a text input: the source frame showed a contact held (or no readable touch state): all input halts."""
+    from host import InputUnconfirmed
+    rt._halt_unconfirmed()
+    raise InputUnconfirmed("安卓模拟器上还有按住的触点（或读不出设备的触摸状态），文字没有输入，已停止所有输入；"
+                           "请检查模拟器后重新启动 MaaNikki。")
+
+
 def input_text_on_screen(rt, text: str, what: str, accept) -> bool:
     """Type ``text`` into the focused field of a recognised screen through the framework's text input (MaaTouch: it
     puts the text on the device's clipboard and sends a paste key; never the host clipboard, `input text` or an
@@ -547,7 +555,7 @@ def send_text(rt, text: str, source_frame) -> bool:
     then Controller.post_input_text and its outcome logged. A text input has no lift to confirm (it is a paste key,
     no contact): the reservation is removed once the framework reports it done. A failure or an exception halts all
     input and leaves the reservation (as an unconfirmed touch does): what reached the field is unknown."""
-    from host import InputUnconfirmed, UnsupportedInput, device_input
+    from host import InputUnconfirmed, UnsupportedInput, android_user_stop, device_input
     from task_control import ForegroundChanged
     rt.check_focus()
     state = device_input()
@@ -571,12 +579,19 @@ def send_text(rt, text: str, source_frame) -> bool:
             if not state.record_touch(TEXT_ACTION, fields, "sending"):
                 raise UnsupportedInput("无法写入安卓模拟器的输入记录，这次文字输入没有发送。")
             intent = True
+            # In the order of Runtime._dispatch_touch: a contact seen held is reported first; an unreadable touch
+            # reading with the user's stop already published is cancelled as a stop; a stop published by now frees
+            # the reservation before any focus/ADB I/O.
+            if before is not None and before.state != "none":
+                held_contact(rt)
             if state.halted or rt.stopped:
                 return False
-            if before is None or before.state != "none":
-                rt._halt_unconfirmed()
-                raise InputUnconfirmed("安卓模拟器上还有按住的触点（或读不出设备的触摸状态），文字没有输入，已停止所有输入；"
-                                       "请检查模拟器后重新启动 MaaNikki。")
+            if before is None and android_user_stop(ask_tasker=False):
+                return False
+            if before is None:
+                held_contact(rt)
+            if state.halted or rt.stopped or android_user_stop(ask_tasker=False):
+                return False
             if not rt._device_focus_now():
                 raise ForegroundChanged("设备上游戏不在前台，已取消本次文字输入，等待重新核对")
             if state.marks_of(source_frame) != (rt._focus_generation, state.epoch):

@@ -65,9 +65,14 @@ USE_FACE = (545, 482, 190, 36)
 USE_GOLD = .4  # saved frames: 0.862 with a code in the field, 0.000 empty
 STRIP = (0, 672, 1280, 46)
 STRIP_WHITE = .8  # saved frames: 1.000 and 0.975 with the field focused, at most 0.168 on any other frame
-# The result banner's pink band left of its text (device run 1: 0.995 of this box; 0.000 on every modal frame).
+# The result banner's pink band left of its text (device run 1: 0.995 of this box; 0.000 on every modal frame). A
+# banner is read only at BANNER_PINK or more; it counts as gone only below BANNER_GONE (in between: still fading, so
+# nothing is tapped on the modal and the frame is waited through), whatever OCR reads.
 BANNER_BAND = (330, 196, 230, 34)
 BANNER_PINK = .6
+BANNER_GONE = .3
+MODAL_CLOSE_BOX = (929, 177, 36, 36)  # where the 兑换奖励 modal's ✕ matches (saved modal frames)
+PRICES = "[¥￥]|购买|充值|开通|兑换钻石"  # text of a paid popup: never under a result banner
 USE_COOLDOWN_SECONDS = 3.2  # the PC spacing between two submits (daily/redeem_codes.py)
 OPEN_WAIT = 5
 TRANSITION_ALLOWANCE = 1.5
@@ -168,9 +173,14 @@ def _centre_y(box) -> float:
     return box[1] + box[3] / 2
 
 
+def settings_page(screen) -> bool:
+    """The 设置 page with exactly that title (every saved 设置 frame reads exactly 「设置」)."""
+    return screen is not None and screen.kind == "page" and screen.title == SETTINGS
+
+
 def other_view(screen, recognize) -> bool:
     """The 设置 page showing the 其他 tab's content (its 兑换码 section: no other tab has a 「兑换码」 label)."""
-    return pages.is_page(screen, SETTINGS) and actions._hit(recognize(ROW_LABEL))
+    return settings_page(screen) and actions._hit(recognize(ROW_LABEL))
 
 
 def _other(screen, frame, recognize) -> bool:
@@ -183,7 +193,7 @@ def image_content(recognize) -> bool:
 
 
 def image_view(screen, recognize) -> bool:
-    return pages.is_page(screen, SETTINGS) and image_content(recognize)
+    return settings_page(screen) and image_content(recognize)
 
 
 def row_use(recognize):
@@ -230,15 +240,47 @@ def banner_text(frame, recognize):
     return text or None
 
 
-def banner(screen, frame, recognize):
-    """banner_text on a frame that is not the quit dialog (both quit checks ran and found nothing)."""
+def quiet(frame) -> bool:
+    """No result banner on the frame, by its colour alone (independent of OCR): the pink band clearly below a banner's."""
+    return banner_pink(frame) < BANNER_GONE
+
+
+def _not_quit(screen, recognize) -> bool:
     if screen is None or screen.kind not in ("unknown", "modal"):
-        return None
+        return False
     for node in (actions.QUIT_TITLE, actions.QUIT_CANCEL):
         result = recognize(node)
         if result is None or actions._hit(result):
-            return None
-    return banner_text(frame, recognize)
+            return False
+    return True
+
+
+def banner_fading(screen, frame, recognize) -> bool:
+    """A frame of the modal (its body: 使用 and the field) with the pink band not yet gone (a banner appearing, showing
+    or fading, read or not): waited through, never tapped on."""
+    return (_not_quit(screen, recognize) and not quiet(frame) and actions._hit(recognize(USE))
+            and (actions._hit(recognize(PLACEHOLDER)) or actions._hit(recognize(CLEAR))))
+
+
+def foreign(screen, recognize):
+    """What else a result frame shows that is not the 兑换奖励 modal under its banner, or None: a close mark away from
+    the modal's ✕ (another popup), or prices (a paid popup)."""
+    close = recognize(actions.MODAL_CLOSE)
+    if close is None:
+        return "弹窗的检查没能完成"
+    if actions._hit(close) and not actions._near(actions._box(close), list(MODAL_CLOSE_BOX)):
+        return "画面上还有别的弹窗的关闭标记"
+    prices = recognize(pages.FORBIDDEN, {"expected": PRICES})
+    if prices is None:
+        return "价格的检查没能完成"
+    if actions._hit(prices):
+        return f"画面上有价格或购买的字样（{_rows(prices)[0][0]}）"
+    return None
+
+
+def banner(screen, frame, recognize):
+    """banner_text on a frame that is not the quit dialog (both quit checks ran and found nothing)."""
+    return banner_text(frame, recognize) if _not_quit(screen, recognize) else None
 
 
 def classify(text):
@@ -296,7 +338,7 @@ def _modal_field(state=None, *, focused=None):
     """``done``/``source`` for wait_until: the modal with its field in ``state`` (and focused or not, when given);
     returns the field's ``(state, text)``."""
     def check(screen, frame, recognize):
-        if not is_modal(screen):
+        if not is_modal(screen) or not quiet(frame):
             return None
         field = read_field(frame, recognize)
         if state is not None and field[0] != state:
@@ -308,7 +350,7 @@ def _modal_field(state=None, *, focused=None):
 
 
 def _banner_shown(screen, frame, recognize) -> bool:
-    return banner(screen, frame, recognize) is not None
+    return banner(screen, frame, recognize) is not None or banner_fading(screen, frame, recognize)
 
 
 # ---- the way in and out ----
@@ -356,14 +398,17 @@ def to_hud(rt, what, *, any_page=False, attempts=6) -> bool:
             return True
         if step == attempts:
             break
-        if banner(screen, frame, recognize) is not None:
-            found = wait_until(rt, f"{what}：等兑换结果的提示条消失", lambda s, f, r: is_modal(s), _banner_shown,
-                               seconds=BANNER_WAIT)
+        if _banner_shown(screen, frame, recognize):
+            found = wait_until(rt, f"{what}：等兑换结果的提示条消失", lambda s, f, r: is_modal(s) and quiet(f),
+                               _banner_shown, seconds=BANNER_WAIT)
         elif is_modal(screen):
-            if not pages.tap_on_page(rt, MODAL, actions.MODAL_CLOSE, kind="modal", retry=False):
+            if not pages.tap_on_page(rt, MODAL, actions.MODAL_CLOSE, kind="modal", retry=False,
+                                     accept=lambda f, r: quiet(f)):
                 return False
             found = wait_until(rt, f"{what}：关闭兑换奖励弹窗", _other, lambda s, f, r: is_modal(s))
-        elif pages.is_page(screen, SETTINGS) and screen.title == SETTINGS:
+        elif pages.is_page(screen, SETTINGS):
+            if screen.title != SETTINGS:  # e.g. 「设置 控制」: which tab this is cannot be told from the title
+                raise Stop(f"{what}时设置页面的标题读成了「{screen.title}」，认不准是哪个页签", [frame])
             if not other_view(screen, recognize):
                 raise Stop(f"{what}时设置页面不在「其他」页签", [frame])
             if not pages.tap_on_page(rt, SETTINGS, actions.BACK_ARROW, retry=False, exact=True,
@@ -391,22 +436,23 @@ def open_settings(rt) -> bool:
         return False
     if not pages.tap_on_page(rt, MENU, MENU_SETTINGS, retry=False, exact=True):
         return False
-    return wait_until(rt, "打开设置", lambda s, f, r: pages.is_page(s, SETTINGS),
-                      lambda s, f, r: s.kind == "page" and s.title == MENU) is not None
+    found = wait_until(rt, "打开设置", lambda s, f, r: pages.is_page(s, SETTINGS),
+                      lambda s, f, r: s.kind == "page" and s.title == MENU)
+    return found is not None and open_other(rt, found)
 
 
-def open_other(rt) -> bool:
-    """The 其他 tab: already showing, or switched to from 图像 (the tab 设置 opens on), identified on both tap frames
-    and on every frame waited through; any other tab stops on its first frame."""
-    found = wait_until(rt, "确认设置页面", lambda s, f, r: pages.is_page(s, SETTINGS))
-    if found is None:
-        return False
+def open_other(rt, found) -> bool:
+    """The 其他 tab: already showing, or switched to from 图像 (the tab 设置 opens on), judged on ``found``, the first
+    设置 frame after the gear, then on both tap frames and on every frame waited through; any other tab, or a title
+    that is not exactly 「设置」, stops on its first frame."""
     _value, screen, frame, recognize = found
+    if not settings_page(screen):
+        raise Stop(f"设置页面的标题读成了「{screen.title}」，认不准是哪个页签", [frame])
     if other_view(screen, recognize):
         return True
     if not image_view(screen, recognize):
         raise Stop("设置页面打开在认不出的页签上", [frame])
-    if not pages.tap_on_page(rt, SETTINGS, OTHER_TAB, retry=False, accept=lambda f, r: image_content(r)):
+    if not pages.tap_on_page(rt, SETTINGS, OTHER_TAB, retry=False, exact=True, accept=lambda f, r: image_content(r)):
         return False
     return wait_until(rt, "切换到「其他」", _other, lambda s, f, r: image_view(s, r)) is not None
 
@@ -434,7 +480,7 @@ def open_modal(rt) -> bool:
         if swiped and wait_until(rt, "滑动设置列表", lambda s, f, r: other_view(s, r) and row_use(r) is not None,
                                  lambda s, f, r: other_view(s, r) and faded_row(r), seconds=3) is None:
             return False
-    if not pages.tap_on_page(rt, SETTINGS, ROW_USE, retry=False,
+    if not pages.tap_on_page(rt, SETTINGS, ROW_USE, retry=False, exact=True,
                              accept=lambda f, r: row_use(r) is not None):
         return False
     return wait_until(rt, "打开兑换奖励弹窗", lambda s, f, r: is_modal(s), _other) is not None
@@ -445,7 +491,7 @@ def open_modal(rt) -> bool:
 def _modal_accept(state, focused=None):
     def accept(frame, recognize):
         field = read_field(frame, recognize)
-        return field[0] == state and (focused is None or strip_open(frame) == focused)
+        return quiet(frame) and field[0] == state and (focused is None or strip_open(frame) == focused)
     return accept
 
 
@@ -497,7 +543,7 @@ def submit(rt, code):
     使用 gold), then ``(outcome, banner text, frame)`` from the first banner whose text the PC's classification knows.
     Never repeated; anything else stops with its frame."""
     def accept(frame, recognize):
-        return (read_field(frame, recognize) == ("filled", code) and use_gold(frame) >= USE_GOLD
+        return (quiet(frame) and read_field(frame, recognize) == ("filled", code) and use_gold(frame) >= USE_GOLD
                 and banner_text(frame, recognize) is None)
     if not pages.tap_on_page(rt, MODAL, USE, kind="modal", retry=False, accept=accept):
         return None
@@ -507,16 +553,23 @@ def submit(rt, code):
         if frame is None:
             return None
         if rt._frame_still_valid(frame):
+            if is_reward_layer(screen, recognize):  # also under a banner: the layer wins
+                raise Stop(f"提交兑换码「{code}」之后出现了奖励层；兑换成功的画面还没在设备上见过，没有记录，也没有点",
+                           [frame])
             text = banner(screen, frame, recognize)
             if text is not None:
+                other = foreign(screen, recognize)
+                if other is not None:
+                    raise Stop(f"提交兑换码「{code}」之后的提示条旁边{other}，没有记录", [frame])
+                field = read_field(frame, recognize)
+                if field != ("filled", code):
+                    raise Stop(f"提示条出现时输入框读到的是「{field[1]}」，不是刚提交的「{code}」，没有记录", [frame])
                 kind = classify(text)
                 if kind is None:
                     raise Stop(f"提交兑换码「{code}」之后的提示条认不出：「{text}」", [frame])
                 return kind, text, frame
-            if is_reward_layer(screen, recognize):
-                raise Stop(f"提交兑换码「{code}」之后出现了奖励层；兑换成功的画面还没在设备上见过，没有记录，也没有点",
-                           [frame])
-            if not (is_modal(screen) or pages.nothing_recognised(screen, recognize)):
+            if not (is_modal(screen) or banner_fading(screen, frame, recognize)
+                    or pages.nothing_recognised(screen, recognize)):
                 raise Stop(f"提交兑换码「{code}」之后出现了认不出的画面", [frame])
             if time.monotonic() - start >= RESULT_WAIT:
                 break
@@ -593,7 +646,7 @@ def run(rt, collected=None) -> bool:
         return guarded(rt, lambda: to_hud(rt, "确认已回到大世界", any_page=True))
     rt.log(f"兑换码领取：待尝试 {len(pending)} 个兑换码。")
     done = guarded(rt, lambda: to_hud(rt, "开始前回到大世界", any_page=True) and open_settings(rt)
-                   and open_other(rt) and open_modal(rt) and redeem_all(rt, record, pending))
+                   and open_modal(rt) and redeem_all(rt, record, pending))
     # The way back only after a successful result: after a stop, a guard refusal or a fatal error nothing more is sent.
     if not done or rt.stopped:
         return False
@@ -601,6 +654,7 @@ def run(rt, collected=None) -> bool:
 
 
 def fail(rt, reason) -> bool:
-    if not rt.stopped:
+    from host import android_user_stop
+    if not rt.stopped and not android_user_stop():  # a user stop is no failure
         rt.log(f"兑换码领取：{reason}，本项未完成。")
     return False
