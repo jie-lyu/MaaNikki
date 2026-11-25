@@ -72,8 +72,10 @@ class Game:
         self.touches, self.rt = [], None
 
     def snapshot(self, where, **changes):
-        """``(screen, frame, recognize)`` at ``where``, with ``count``/``harvest``/``busy_slots`` changed if given."""
-        state = {"count": self.count, "harvest": self.harvest, "busy_slots": self.busy_slots, **changes}
+        """``(screen, frame, recognize)`` at ``where``, with ``count``/``harvest``/``busy_slots`` changed if given;
+        ``layer=True``: the reward layer's texts read too, over a screen that still reads."""
+        state = {"count": self.count, "harvest": self.harvest, "busy_slots": self.busy_slots, "layer": False,
+                 **changes}
         frame = np.zeros((720, 1280, 3), np.uint8)
         if where in ("dig", "stuck"):
             for slot in state["busy_slots"]:
@@ -95,10 +97,11 @@ class Game:
             return result([row("退出游戏", [560, 200, 160, 40])]) if where == "quit" else MISS
         if node == actions.MODAL_CLOSE:
             return result([row("", CLOSE)]) if where == "popup" else MISS
+        layer = where == "layer" or state["layer"]
         if node == dig.LAYER_TITLE:
-            return result([row("恭喜获得", [560, 170, 160, 40])]) if where == "layer" else MISS
+            return result([row("恭喜获得", [560, 170, 160, 40])]) if layer else MISS
         if node == dig.LAYER_HINT:
-            return result([row("点击空白区域继续", [540, 640, 200, 30])]) if where == "layer" else MISS
+            return result([row("点击空白区域继续", [540, 640, 200, 30])]) if layer else MISS
         if node == actions.HUD_DUCK:
             return result([row("", DUCK)]) if where == "hud" else MISS
         if node == actions.BACK_ARROW:
@@ -302,7 +305,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(rt.logs, [f"美鸭梨挖掘：{pages.GUARD_TAP}，本项未完成。"])
 
     def test_a_quit_dialog_on_a_duck_tap_frame_stops_with_that_frame(self):
-        for name, before in (("deciding", 1), ("confirming", 2)):
+        for name, before in (("the duck's own look", 1), ("deciding", 2), ("confirming", 3)):
             with self.subTest(name):
                 game = Game()
                 quit_ = game.snapshot("quit")
@@ -310,6 +313,7 @@ class FlowTests(unittest.TestCase):
                 game.screens = {0: [game.snapshot("hud")] * before + [quit_]}
                 outcome, rt = play(game)
                 self.assertFalse(outcome)
+                self.assertEqual(game.screens[0], [])  # the quit frame was read where it was meant to be
                 self.assertEqual(game.touches, [])
                 self.assertEqual(len(stops(rt)), 1)
                 self.assertIs(stops(rt)[0].kwargs["image"], quit_[1])
@@ -437,6 +441,8 @@ class FlowTests(unittest.TestCase):
         clean = Game().snapshot("dig")
         # Two empty reads, then the way back's deciding frame; or a frame waited through after the back arrow.
         for name, at, changes in (("deciding frame, counter", 2, {"count": "(1/4)"}),
+                                  ("deciding frame, occupied slot", 2, {"busy_slots": (1,)}),
+                                  ("deciding frame, another total", 2, {"count": "(0/8)"}),
                                   ("tap frame, harvest text", 2, {"harvest": ("确认收获",)}),
                                   ("frame waited through", 3, {"count": "(1/4)"})):
             with self.subTest(name):
@@ -478,6 +484,45 @@ class FlowTests(unittest.TestCase):
                 self.assertEqual(len(rt.logs), 1)
                 self.assertIn(words, rt.logs[0])
                 self.assertNotIn("画面已保存" if words != "画面已保存" else "画面没能保存", rt.logs[0])
+
+    def test_a_reward_layer_over_a_readable_screen_is_neither_accepted_nor_tapped(self):
+        game = Game()
+        hud, menu = game.snapshot("hud"), game.snapshot("menu")
+        cases = {  # touches before, the frames shown then, the touches expected
+            "the duck's confirming frame": (0, [hud, hud, hud], []),
+            "the menu awaited after the duck": (1, [], ["duck"]),
+            "the entry's confirming frame": (1, [menu, menu], ["duck"]),
+            "the dig page's back arrow": (2, [game.snapshot("dig")] * 4, ["duck", "entry"]),
+            "the HUD reached at the end": (4, [], WAY),
+        }
+        for name, (at, before, touches) in cases.items():
+            with self.subTest(name):
+                game = Game()
+                where = {0: "hud", 1: "menu", 2: "dig", 4: "hud"}[at]
+                layered = game.snapshot(where, layer=True)
+                game.screens = {at: [*before, layered]}
+                outcome, rt = play(game)
+                self.assertFalse(outcome)
+                self.assertEqual(game.screens[at], [])
+                self.assertEqual(game.touches, touches)
+                self.assertEqual(len(stops(rt)), 1)
+                self.assertIs(stops(rt)[0].kwargs["image"], layered[1])
+                self.assertNotIn("没有可收获的挖掘", " ".join(rt.logs))
+                self.assertTrue(rt.logs and rt.logs[-1].endswith("本项未完成。"), rt.logs)
+
+    def test_later_evidence_is_saved_when_seen_even_if_the_way_back_then_fails(self):
+        game = Game()
+        clean, busy, mail = game.snapshot("dig"), game.snapshot("dig", count="(1/4)"), game.snapshot("mail")
+        game.screens = {2: [clean, clean, busy], 3: [mail]}
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.touches, ["duck", "entry", "back"])
+        queue = [c for c in rt.diagnostic.call_args_list if c.args[0] == "android_dig_queue"]
+        self.assertEqual(len(queue), 1)
+        self.assertIs(queue[0].kwargs["image"], busy[1])
+        self.assertEqual(len(stops(rt)), 1)
+        self.assertIs(stops(rt)[0].kwargs["image"], mail[1])
+        self.assertNotIn("没有可收获的挖掘", " ".join(rt.logs))
 
     def test_the_dig_words_check_that_cannot_run_refuses(self):
         game = Game()
@@ -596,7 +641,7 @@ class ResourceTests(unittest.TestCase):
         self.assertEqual(set(nodes), set(dig.NODES))
         words = re.compile(nodes[dig.DIG_WORDS]["expected"])
         for text in ("挖掘", "挖 掘", "挖掘！", "挖掘!", "挖掘。", "！挖掘", "再次挖掘", "！选择物资", "选择物资", "消耗", "小时",
-                     "4小时", "加速", "立即完成", "确认收获", "一键收获"):
+                     "4小时", "加速", "立即完成", "确认收获", "一键收获", "开始挖掘", "领取", "一键领取"):
             self.assertTrue(words.search(text), text)
         for text in ("美鸭梨挖掘", "挖掘队列", "美鸭梨挖掘！", "美鸭梨", "(0/4)", "返回", "心愿原野", "采集物资：32/56"):
             self.assertFalse(words.search(text), text)

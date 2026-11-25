@@ -512,14 +512,15 @@ def tap_shortcut(rt, action: str, *, delay: float = .35) -> bool:
     raise PageMismatch(f"连续 {rt.TOUCH_KEY_ATTEMPTS} 次没能在稳定的画面上确认「{name}」快捷入口（焦点在变）")
 
 
-def tap_duck(rt, *, words=None) -> bool:
+def tap_duck(rt, *, words=None, check=None) -> bool:
     """The 美鸭梨 menu from the HUD by one strict tap on the duck (tap_on_layer: the HUD with the duck in the same
     place on both tap frames, no forbidden label within FORBIDDEN_MARGIN of the whole duck on either, read as the
     named action reads it, forbidden_word_near). Unlike the shared named action (Runtime.key("menu"), which
     cancels a quit dialog and decides again, architecture decision 2), a quit dialog or any other screen on any
     frame stops with that frame (FrameMismatch); there is no second attempt. False when the run stopped.
     ``words(recognize, box)``, when given, is a task's own danger-word check, run around the whole duck on both
-    frames after the shared one; the label it returns refuses the tap (GuardRefusal) as a forbidden one does."""
+    frames after the shared one; the label it returns refuses the tap (GuardRefusal) as a forbidden one does.
+    ``check(screen, recognize)``, when given, must also hold on both frames (else LayerMismatch with that frame)."""
     from host.android import touch_point
     screen, frame, recognize = screen_now(rt)
     if frame is None:
@@ -528,8 +529,9 @@ def tap_duck(rt, *, words=None) -> bool:
         raise FrameMismatch("要打开美鸭梨菜单时画面不是大世界", screen, frame, recognize)
     point = touch_point(screen.targets["duck"])
 
-    def accept(screen_, _recognize_):
-        return screen_.kind == "hud" and actions._near(screen_.targets.get("duck"), point)
+    def accept(screen_, recognize_):
+        return screen_.kind == "hud" and actions._near(screen_.targets.get("duck"), point) \
+            and (check is None or bool(check(screen_, recognize_)))
 
     def guard(screen_, recognize_):  # around the whole duck as recognised on that frame, as the named action
         duck = screen_.targets["duck"]

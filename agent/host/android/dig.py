@@ -92,10 +92,11 @@ def dig_word_near(recognize, box) -> str | None:
 
 def guarded(node, check=None):
     """``accept(frame, recognize)`` for pages.tap_on_page: no DIG_WORDS label near the target ``node`` (refused as a
-    guard, with that frame) and, when given, ``check(frame, recognize)``."""
+    guard, with that frame), no reward layer read over the page (layer_evidence: the tap frame does not agree, so
+    tap_on_page with retry=False stops with it) and, when given, ``check(frame, recognize)``."""
     def accept(frame, recognize):
         result = recognize(node)
-        if not actions._hit(result):
+        if not actions._hit(result) or layer_evidence(recognize):
             return False
         word = dig_word_near(recognize, actions._box(result))
         if word:  # the label read goes to the diagnostic only (pages.diagnostic_reason)
@@ -173,9 +174,11 @@ def read_view(screen, frame, recognize) -> View | None:
     harvest = recognize(HARVEST_LIKE)
     if counted is None or harvest is None:
         return None
-    texts = _texts(harvest)
-    busy = tuple(index + 1 for index, centre in enumerate(SLOTS) if _bright(frame, centre) > SLOT_PLAIN)
-    return View(*counted, texts, busy)
+    return View(*counted, _texts(harvest), busy_slots(frame))
+
+
+def busy_slots(frame) -> tuple:
+    return tuple(index + 1 for index, centre in enumerate(SLOTS) if _bright(frame, centre) > SLOT_PLAIN)
 
 
 def _texts(result) -> tuple:
@@ -184,21 +187,24 @@ def _texts(result) -> tuple:
 
 
 class Later:
-    """Queue evidence on dig-page frames seen on the way back, after the queue was read empty: the first frame whose
-    counter reads above 0 or on which harvest-like text is read (``view``, ``frame``). Called with ``(frame,
+    """Queue evidence on dig-page frames seen on the way back, after the queue was read empty: the first frame that
+    does not read empty by the same rules (a counter that reads other than 0 of 4, harvest-like text, a slot that
+    does not look plain; a counter not read yet is no evidence by itself) gives ``view`` and ``frame``, saved at once
+    (``saved``: the save succeeded), so that a way back that fails afterwards keeps it too. Called with ``(frame,
     recognize)`` of frames already known to be the dig page."""
 
-    def __init__(self):
-        self.view = self.frame = None
+    def __init__(self, rt):
+        self.rt, self.view, self.frame, self.saved = rt, None, None, False
 
     def __call__(self, frame, recognize):
         if self.frame is not None:
             return
         counted = read_count(recognize)
-        texts = _texts(recognize(HARVEST_LIKE))
-        if (counted is not None and counted[0] > 0) or texts:
-            self.view = View(*(counted or (None, None)), texts, ())
-            self.frame = frame
+        view = View(*(counted or (None, None)), _texts(recognize(HARVEST_LIKE)), busy_slots(frame))
+        if (counted is not None and not (view.count == 0 and view.total == len(SLOTS))) or view.harvest \
+                or view.busy_slots:
+            self.view, self.frame = view, frame
+            self.saved = save_queue(self.rt, view, frame)
 
 
 def dig_ready(frame, recognize) -> bool:
@@ -215,14 +221,24 @@ def stopped(rt) -> bool:
     return rt.stopped or android_user_stop()
 
 
-def evidence(recognize) -> bool:
-    """Something positive on a frame that is therefore no mere transition: the 「恭喜获得」 layer's title or hint, or
-    harvest-like text (确认收获, 再次挖掘, ...); a check that could not run counts as evidence."""
-    for node in (LAYER_TITLE, LAYER_HINT, HARVEST_LIKE):
+def _any(recognize, nodes) -> bool:
+    for node in nodes:
         result = recognize(node)
         if result is None or actions._hit(result):
             return True
     return False
+
+
+def layer_evidence(recognize) -> bool:
+    """The 「恭喜获得」 layer's title or hint read on the frame (a check that could not run counts): over a page that
+    still reads, too. No page is accepted and no tap sent on such a frame."""
+    return _any(recognize, (LAYER_TITLE, LAYER_HINT))
+
+
+def evidence(recognize) -> bool:
+    """Something positive on a frame that is therefore no mere transition: the reward layer (layer_evidence) or
+    harvest-like text (确认收获, 再次挖掘, ...); a check that could not run counts as evidence."""
+    return layer_evidence(recognize) or _any(recognize, (HARVEST_LIKE,))
 
 
 def wait_until(rt, what, done, source=lambda s, f, r: False, transitional=lambda s, f, r: False,
@@ -239,6 +255,8 @@ def wait_until(rt, what, done, source=lambda s, f, r: False, transitional=lambda
         if frame is None:
             return None
         if rt._frame_still_valid(frame):
+            if layer_evidence(recognize):  # neither the screen expected nor one being left, whatever reads beneath
+                raise Stop(f"{what}时出现了奖励层", [frame])
             value = done(screen, frame, recognize)
             if value is not None and value is not False:
                 return value, screen, frame, recognize
@@ -267,8 +285,9 @@ def _unsettled_dig(screen, frame, recognize) -> bool:
 def tap_duck(rt) -> bool:
     """The 美鸭梨 menu from the HUD by the shared strict duck tap (pages.tap_duck: the duck in the same place on both
     tap frames, no forbidden label near the whole duck, a quit dialog or any other screen on any frame stops with
-    that frame, no second attempt), with this task's words checked around the whole duck on both frames too."""
-    return pages.tap_duck(rt, words=dig_word_near)
+    that frame, no second attempt), with this task's words checked around the whole duck on both frames too and no
+    reward layer read on either (layer_evidence; LayerMismatch with that frame)."""
+    return pages.tap_duck(rt, words=dig_word_near, check=lambda _screen, recognize: not layer_evidence(recognize))
 
 
 # Where a known page's back arrow may lead: the dig page back to the menu (or straight to the HUD), the menu to the HUD.
@@ -304,6 +323,8 @@ def to_hud(rt, what, *, any_page=False, watch=None) -> bool:
             if not rt._frame_still_valid(frame):
                 rt.pause(.4)
                 continue
+        if layer_evidence(recognize):  # a reward layer over the HUD or a page: neither is reached nor tapped
+            raise Stop(f"{what}时出现了奖励层", [frame])
         if screen.kind == "hud":
             return True
         if left_known is not None and not any(pages.is_exactly(screen, name) for name in LEADS_TO[left_known]):
@@ -397,7 +418,7 @@ def run(rt) -> bool:
     view, frame = seen
     # Saved before anything else is sent: a non-empty queue on this client, never seen yet, for the survey.
     saved = False if view.empty else save_queue(rt, view, frame)
-    later = Later() if view.empty else None
+    later = Later(rt) if view.empty else None
     back = attempt(rt, lambda: to_hud(rt, "返回大世界", watch=later))
     # A stop (also one only requested so far) reports nothing: neither the outcome nor a failure.
     if back is None or stopped(rt):
@@ -405,7 +426,7 @@ def run(rt) -> bool:
     if not back:
         return fail(rt, "没能回到大世界")
     if later is not None and later.frame is not None:  # the way back saw a queue that is not empty after all
-        view, saved = later.view, save_queue(rt, later.view, later.frame)
+        view, saved = later.view, later.saved  # saved when it was seen
     if stopped(rt):
         return False
     if view.empty:
