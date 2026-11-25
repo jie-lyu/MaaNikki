@@ -122,6 +122,15 @@ class DevHomeTests(unittest.TestCase):
             second = tmp / "second"
             self.assertEqual(build(second, first / "maafw"), 0)
             self.assertEqual(build(first, second / "maafw"), 0)  # and back again: no links pointing at each other
+            (runtime / ".DS_Store").write_text("")
+            (first / "maafw/.DS_Store").write_text("")
+            self.assertEqual(build(first, runtime), 0)  # Finder metadata on both sides
+            (runtime / "libExtra.dylib").write_text("")
+            (first / "maafw/libExtra.dylib").write_text("")  # a regular file where a new link would go
+            with self.assertRaises(SystemExit):
+                build(first, runtime)
+            (runtime / "libExtra.dylib").unlink()
+            (first / "maafw/libExtra.dylib").unlink()
             for home in (first, second):
                 for name in ("libMaaFramework.dylib", "libMaaAdbControlUnit.dylib"):
                     self.assertEqual((home / "maafw" / name).resolve(), (runtime / name).resolve())

@@ -46,7 +46,7 @@ def runtime_entries(runtime: Path, home: Path) -> dict:
     never points back through links that a later rebuild replaces."""
     entries = {}
     for entry in runtime.iterdir():
-        if entry.name in ("MaaAgentBinary", RUNTIME_MARKER):
+        if entry.name in ("MaaAgentBinary", RUNTIME_MARKER, ".DS_Store"):  # .DS_Store: Finder metadata
             continue
         resolved = entry.resolve()
         if not resolved.exists():
@@ -64,6 +64,11 @@ def runtime_dir(target: Path, entries: dict, agent_binary: Path) -> None:
     elif target.exists() and not (target / RUNTIME_MARKER).exists():
         sys.exit(f"{target} exists and was not written by this script")
     target.mkdir(exist_ok=True)
+    # A regular file where a link goes would make the build fail half-way: refuse before removing anything.
+    clashes = [name for name in (*entries, "MaaAgentBinary")
+               if (target / name).exists() and not (target / name).is_symlink()]
+    if clashes:
+        sys.exit(f"{target} holds files that are not links where runtime links go: {', '.join(clashes)}")
     for entry in target.iterdir():
         if entry.is_symlink():
             entry.unlink()
