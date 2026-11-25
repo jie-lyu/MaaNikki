@@ -708,11 +708,39 @@ pub fn target_refuses_task(connected: Option<&ControllerKind>, entry: &str) -> O
     }
 }
 
-/// 准入之后、真正绑定控制器下发任务之前（在同一把锁里）再核对一次：连接的控制器种类必须与准入时相同。
+/// 准入之后、真正绑定控制器下发任务之前（在同一把锁里）再核对一次：连接的控制器种类变了（包括准入时
+/// 还没有连接、之后才连上）就按新的连接重新准入，结果必须与原来相同，否则拒绝。这样「请求 Win32、
+/// 第一次连接在准入后才完成」照常运行，而换成别的控制器（例如 Adb）会被拒绝。
 pub const CONNECTION_CHANGED: &str = "开始之前当前连接的控制器发生了变化，请重新开始。";
 
-pub fn connection_unchanged(admitted: Option<&ControllerKind>, now: Option<&super::types::ControllerConfig>) -> bool {
-    admitted == ControllerKind::of_instance(now).as_ref()
+pub fn readmit_on_connection(
+    admitted: Option<&ControllerKind>,
+    now: Option<&super::types::ControllerConfig>,
+    submitted: Option<&ControllerKind>,
+    entries: &[&str],
+    refusals: &[Option<String>],
+) -> Result<(), String> {
+    readmit_on(GameTarget::host(), admitted, now, submitted, entries, refusals, platform_refuses_task)
+}
+
+fn readmit_on(
+    host: Option<GameTarget>,
+    admitted: Option<&ControllerKind>,
+    now: Option<&super::types::ControllerConfig>,
+    submitted: Option<&ControllerKind>,
+    entries: &[&str],
+    refusals: &[Option<String>],
+    host_rules: impl Fn(&str) -> Option<String>,
+) -> Result<(), String> {
+    let now = ControllerKind::of_instance(now);
+    if now.as_ref() == admitted {
+        return Ok(());
+    }
+    match admit_batch_on(host, now.as_ref(), submitted, entries, host_rules) {
+        Ok(again) if again == refusals => Ok(()),
+        Ok(_) => Err(CONNECTION_CHANGED.to_string()),
+        Err(reason) => Err(reason),
+    }
 }
 
 /// 获取应用数据目录
@@ -1165,17 +1193,29 @@ mod preview_task_tests {
     #[test]
     fn the_connection_is_rechecked_before_binding() {
         use super::super::types::ControllerConfig;
+        use super::readmit_on;
         let win32 = ControllerConfig::Win32 { handle: 1, screencap_method: 1, screencap_fallbacks: vec![],
                                               mouse_method: 1, keyboard_method: 1, display_short_side: None };
         let adb = ControllerConfig::Adb { adb_path: "adb".into(), address: "127.0.0.1:5555".into(),
                                           screencap_methods: "8".into(), input_methods: "4".into(),
                                           config: "{}".into(), display_short_side: None };
-        assert!(super::connection_unchanged(kind("Win32").as_ref(), Some(&win32)));
-        assert!(!super::connection_unchanged(kind("Win32").as_ref(), Some(&adb)));
-        assert!(!super::connection_unchanged(None, Some(&adb)));  // connected after admission
-        assert!(!super::connection_unchanged(kind("Win32").as_ref(), None));
-        assert!(super::connection_unchanged(None, None));
+        let admit_all = |_: &str| None;
+        let host = Some(GameTarget::Win32);
+        let ok = vec![None];
+        // Unchanged connection.
+        assert!(readmit_on(host, kind("Win32").as_ref(), Some(&win32), kind("Win32").as_ref(), &["A"], &ok, admit_all).is_ok());
+        // Windows as before: the request named Win32 and the first connection completed after admission.
+        assert!(readmit_on(host, None, Some(&win32), kind("Win32").as_ref(), &["A"], &ok, admit_all).is_ok());
+        assert!(readmit_on(host, None, Some(&win32), None, &["A"], &ok, admit_all).is_ok());
+        // Switched to (or first connected as) an emulator: refused.
+        assert!(readmit_on(host, kind("Win32").as_ref(), Some(&adb), kind("Win32").as_ref(), &["A"], &ok, admit_all).is_err());
+        assert!(readmit_on(host, None, Some(&adb), None, &["A"], &ok, admit_all).is_err());
+        // Admission results that differ under the new connection also refuse.
+        let refusing = |_: &str| Some("no".to_string());
+        assert_eq!(readmit_on(host, None, Some(&win32), None, &["A"], &ok, refusing).unwrap_err(),
+                   super::CONNECTION_CHANGED);
     }
+
 
     #[test]
     fn a_broken_manifest_is_an_error() {

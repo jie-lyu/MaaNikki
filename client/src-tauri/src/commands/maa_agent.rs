@@ -666,6 +666,10 @@ pub async fn start_tasks_impl(
             return Err(reason);
         }
     };
+    // 绑定控制器之前按新的连接重新准入时用（见下方）。
+    let admitted_names: Vec<String> = entries.iter().map(|e| e.to_string()).collect();
+    let admitted_entries: Vec<&str> = admitted_names.iter().map(String::as_str).collect();
+    let admitted_refusals = refusals.clone();
     if refusals.iter().any(Option::is_some) {
         if refusals.iter().all(Option::is_some) {
             let reason = refusals.into_iter().flatten().next().unwrap_or_default();
@@ -767,11 +771,15 @@ pub async fn start_tasks_impl(
             .clone();
         debug!("[start_tasks] Controller acquired");
 
-        // 准入看的是开始时的连接；在绑定控制器、改动任何状态之前，在这把锁里确认它没有换成别的控制器。
-        // 同一份配置的重连（上面的刷新）种类不变，不受影响。
-        if !super::utils::connection_unchanged(connected.as_ref(), instance.controller_config.as_ref()) {
-            return Err(super::utils::CONNECTION_CHANGED.to_string());
-        }
+        // 准入看的是开始时的连接；在绑定控制器、改动任何状态之前，在这把锁里核对：连接变了就按新的连接
+        // 重新准入，结果相同才继续（同一份配置的刷新、准入后才完成的第一次 Win32 连接都照常运行）。
+        super::utils::readmit_on_connection(
+            connected.as_ref(),
+            instance.controller_config.as_ref(),
+            submitted.as_ref(),
+            &admitted_entries,
+            &admitted_refusals,
+        )?;
 
         // Mac：重连期间用户已停止这次启动，不能清掉停止标记把新的代数当作自己的。
         if mac_token.is_some_and(|token| !super::mac_connection::start_owned(instance.macos_run, token)) {

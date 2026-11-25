@@ -1432,10 +1432,15 @@ pub fn run_task_impl(
     }
     let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
     let instance = instances.get_mut(instance_id).ok_or("Instance not found")?;
-    // 判断在锁外做的：下发之前在这把锁里确认连接的控制器没有换成别的。
-    if !super::utils::connection_unchanged(connected.as_ref(), instance.controller_config.as_ref()) {
-        return Err(super::utils::CONNECTION_CHANGED.to_string());
-    }
+    // 判断在锁外做的：下发之前在这把锁里核对，连接变了就按新的连接重新准入，结果相同才继续。
+    let admitted = vec![None];
+    super::utils::readmit_on_connection(
+        connected.as_ref(),
+        instance.controller_config.as_ref(),
+        None,
+        &[entry],
+        &admitted,
+    )?;
     // Mac 测试预览不在运行中追加单个任务：Mac 上每一轮运行由 start_tasks 取得并独占（重连、新建
     // Tasker、启动 agent），追加的任务不属于任何一轮。拒绝时不改变代数，以免取消正在进行的释放。
     if matches!(instance.controller_config, Some(ControllerConfig::MacOS { .. })) {
