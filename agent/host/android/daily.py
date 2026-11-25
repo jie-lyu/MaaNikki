@@ -33,10 +33,11 @@ Every tap is decided and confirmed on two fresh focus-confirmed frames showing t
 helpers with retry=False), never next to a forbidden word (pages.FORBIDDEN) or a DAILY_WORDS word; a claim tap is
 never repeated. After a claim, the frames must show the same view with that circle still lit (not yet), that circle
 claimed (success once settled), the 「恭喜获得」 layer with 每日灵感 on that tab beneath it (one tap at DISMISS_POINT;
-layer_over_tab on the frame that shows it and on both tap frames) or, briefly, nothing recognised; the first frame
-that is anything else (a reward layer over anything else among them) stops the task with that frame saved and nothing
-more sent. On the way back, the 每日灵感 back arrow needs that tab on both tap frames, and the frame that shows the page
-gone must itself be 奇想日历 or the HUD.
+layer_over_tab on every frame that shows the layer, before and after that tap, and on both tap frames) or, briefly,
+nothing recognised; the first frame that is anything else (a reward layer over anything else among them) stops the
+task with that frame saved and nothing more sent. On the way back, the 每日灵感 back arrow needs that tab on the frame
+that decides and on both tap frames; while it takes effect, another tab or a reward layer stops; and the frame that
+shows the page gone must itself be 奇想日历 or the HUD.
 """
 from __future__ import annotations
 
@@ -446,10 +447,11 @@ def claim(rt, mode, index, before) -> View | None:
             settled_at, settled_frames, last = None, 0, view
         elif kind == "layer":
             settled_at, settled_frames = None, 0
+            if not layer_over_tab(frame, mode):  # every layer frame, before and after the one tap
+                raise Stop(f"领取{what}之后出现的「恭喜获得」奖励层下面认不出每日灵感的「{NAMES[mode]}」页签"
+                           + ("" if dismissed else "，没有点"), [frame])
             if dismissed:
                 pass  # still the layer after the one tap: waited for until the deadline
-            elif not layer_over_tab(frame, mode):
-                raise Stop(f"领取{what}之后出现的「恭喜获得」奖励层下面认不出每日灵感的「{NAMES[mode]}」页签，没有点", [frame])
             else:
                 dismissed = True
                 if not dismiss_layer(rt, mode, (pending, done)):
@@ -475,12 +477,40 @@ def claim(rt, mode, index, before) -> View | None:
     raise Stop(f"领取{what}之后没有看到它变成已领取", [frame])
 
 
+def left_page(rt, mode, title, seconds: float = pages.LEAVE_PAGE_WAIT, step: float = .3):
+    """pages.left_page for this task's back arrows, with two more positive mismatches: a frame of 每日灵感 showing
+    another tab than ``mode``'s, and the 「恭喜获得」 layer's texts (over any page), are ``("other", frame, screen)``
+    at once instead of frames waited through. ``("left", frame, screen)`` on the first valid frame that shows the HUD
+    or a page with another title; frames of the page still showing (每日灵感 on ``mode``'s tab or not settled on a
+    tab) and frames on which nothing at all is recognised are waited through; ``("timeout", frame, screen)`` with
+    the last valid frame; ``(None, None, None)`` when the run stopped."""
+    deadline, last = time.monotonic() + seconds, (None, None)
+    while not rt.stopped:
+        screen, frame, recognize = pages.screen_now(rt)
+        if frame is None:
+            return None, None, None
+        if rt._frame_still_valid(frame):
+            last = frame, screen
+            if screen.kind == "hud" or (screen.kind == "page" and screen.title != title):
+                return "left", frame, screen
+            if screen.kind == "page":
+                if title == TITLE and shown_tab(frame, recognize) not in (None, mode):
+                    return "other", frame, screen
+            elif is_reward_layer(screen, recognize) or not pages.nothing_recognised(screen, recognize):
+                return "other", frame, screen
+        if time.monotonic() >= deadline:
+            return ("timeout", *last) if last[0] is not None else ("timeout", frame, screen)
+        rt.pause(step)
+    return None, None, None
+
+
 def back_home(rt, mode, attempts: int = 3) -> bool:
     """The way back after the task: the back arrow, one attempt each, only on a page titled exactly 每日灵感 showing
-    ``mode``'s tab (shown_tab) or 奇想日历 (tap_on_page with retry=False: a tap frame that is not raises FrameMismatch
-    with that frame), and no other back arrow until fresh frames show that page gone (pages.left_page). The very frame
-    that shows it gone must be the HUD or, after 每日灵感, 奇想日历; any other page there (商城, ...), 每日灵感 again
-    once it was left, or anything else stops with that frame."""
+    ``mode``'s tab (shown_tab, on the frame that decides which page this is and on both tap frames) or 奇想日历
+    (tap_on_page with retry=False: a tap frame that is not raises FrameMismatch with that frame), and no other back
+    arrow until fresh frames show that page gone (left_page: another tab or a reward layer meanwhile stops). The very
+    frame that shows it gone must be the HUD or, after 每日灵感, 奇想日历; any other page there (商城, ...), 每日灵感
+    again once it was left, or anything else stops with that frame."""
     titles = (TITLE, CALENDAR)
 
     def on_tab(frame_, recognize_):
@@ -496,10 +526,12 @@ def back_home(rt, mode, attempts: int = 3) -> bool:
         if screen.kind != "page" or screen.title not in titles:
             raise Stop("回大世界时出现了不该出现的画面", [frame])
         title = screen.title
+        if title == TITLE and shown_tab(frame, _recognize) != mode:
+            raise Stop(f"回大世界时每日灵感不在「{NAMES[mode]}」页签上", [frame])
         if not pages.tap_on_page(rt, title, actions.BACK_ARROW, accept=on_tab if title == TITLE else None,
                                  retry=False, exact=True):
             return False
-        state, frame, after = pages.left_page(rt, title)
+        state, frame, after = left_page(rt, mode, title)
         if state is None:
             return False
         if state != "left":

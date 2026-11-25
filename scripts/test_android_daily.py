@@ -151,16 +151,17 @@ class Game:
     page shown (a ``daily_page`` tuple); ``after_claim``: the frames shown after the claim tap, one per capture, before
     the claimed page ("layer": the layer over this tab stays until the blank tap); ``claimed``: the page after the
     claim; ``dismiss_closes``: whether the blank tap closes the layer; ``after_card``: frames before the page opens;
-    ``after_back``: frames shown after the first back arrow, one per capture, before the page it leads to."""
+    ``after_back``: frames shown after the first back arrow, one per capture, before the page it leads to;
+    ``after_dismiss``: frames shown after the blank tap, one per capture, before the page (or the layer) again."""
 
     def __init__(self, tab=daily.ZHAOXI, *, page=None, claimed=None, after_claim=(), dismiss_closes=True,
-                 after_card=(), start=None, opens_on=None, after_back=None):
+                 after_card=(), start=None, opens_on=None, after_back=None, after_dismiss=()):
         self.where, self.tab, self.taps = "hud", tab, []
         self.page, self.claimed = page or daily_page("zhaoxi lit", 100), claimed or daily_page("zhaoxi claimed", 100)
         self.other = daily_page("xinghai", 0) if tab == daily.ZHAOXI else daily_page("zhaoxi claimed", 100)
         self.opens_on = opens_on or tab
         self.after_claim, self.after_card, self.dismiss_closes = list(after_claim), list(after_card), dismiss_closes
-        self.after_back = after_back
+        self.after_back, self.after_dismiss = after_back, list(after_dismiss)
         self.queue = [start] if start else []
 
     def screen_now(self, rt):
@@ -186,6 +187,7 @@ class Game:
             self.taps.append("dismiss")
             if self.dismiss_closes:
                 self.where = "page"
+            self.queue = list(self.after_dismiss)
             return True
         if target == BACK:
             self.taps.append("back")
@@ -377,6 +379,43 @@ class FlowTests(unittest.TestCase):
                 self.assertIs(saved(rt)[0], frames[-1][1])
                 self.assertTrue(any("认不出每日灵感" in text for text in rt.logs), rt.logs)
 
+    def test_a_reward_layer_over_another_page_after_the_dismissal_stops(self):
+        # Review round 2: the real 奇迹之旅 layer frame right after the dismissal tap, then the claimed page: that
+        # frame stops the task (saved), no back arrow is tapped.
+        game = Game(after_claim=["layer"], after_dismiss=[LAYER_SCREENS["monthly"]])
+        result, rt = play(game)
+        self.assertFalse(result)
+        self.assertEqual(game.taps, ["calendar", f"card {daily.ZHAOXI}", "claim", "dismiss"])
+        self.assertIs(saved(rt)[0], LAYER_FRAMES["monthly"])
+        self.assertEqual(len(saved(rt)), 1)
+        self.assertTrue(any("认不出每日灵感的「朝夕心愿」页签" in text for text in rt.logs), rt.logs)
+        # The layer over 朝夕心愿 still showing after the tap is waited for (the page follows): success.
+        game = Game(after_claim=["layer"], after_dismiss=[LAYER, LAYER])
+        result, rt = play(game)
+        self.assertTrue(result, rt.logs)
+        self.assertEqual(game.taps, ["calendar", f"card {daily.ZHAOXI}", "claim", "dismiss", "back", "back"])
+
+    def test_a_frame_shown_while_the_back_arrow_takes_effect_is_checked(self):
+        # Review round 2: after the 朝夕心愿 back arrow, one capture of the 星海拾光 page (still titled 每日灵感) or of
+        # the 奇迹之旅 layer (its texts read, nothing else recognised), then 奇想日历: that capture stops (saved), no
+        # calendar back arrow.
+        for frames, stop in (([daily_page("xinghai", 0), CALENDAR], FRAMES["xinghai"]),
+                             ([LAYER_SCREENS["monthly"], CALENDAR], LAYER_FRAMES["monthly"])):
+            with self.subTest(first=frames[0][0].kind):
+                game = Game(page=daily_page("zhaoxi claimed", 100), after_back=frames)
+                result, rt = play(game)
+                self.assertFalse(result)
+                self.assertEqual(game.taps, ["calendar", f"card {daily.ZHAOXI}", "back"])
+                self.assertIs(saved(rt)[0], stop)
+                self.assertEqual(len(saved(rt)), 1)
+        # 每日灵感 on 朝夕心愿 or not settled on a tab (a blank frame too) is waited through: success.
+        unsettled = (Screen("page", {"back": BACK}, title=daily.TITLE), FRAMES["mixed"], page_recognizer("mixed", 0))
+        game = Game(page=daily_page("zhaoxi claimed", 100),
+                    after_back=[daily_page("zhaoxi claimed", 100), unsettled, BLANK, CALENDAR])
+        result, rt = play(game)
+        self.assertTrue(result, rt.logs)
+        self.assertEqual(game.taps, ["calendar", f"card {daily.ZHAOXI}", "back", "back"])
+
     def test_the_frame_the_back_arrow_leads_to_is_checked(self):
         # Review round 1: 商城 on the frame that shows 每日灵感 gone stops with that frame (no second back arrow), and
         # so does 每日灵感 again once 奇想日历 showed.
@@ -406,6 +445,13 @@ class FlowTests(unittest.TestCase):
                     daily.back_home(rt, daily.ZHAOXI)
                 self.assertIs(caught.exception.frame, xinghai[1])
                 rt.action.assert_not_called()
+        # Review round 2: the frame that decides the way back already shows 星海拾光: stop with it, no tap.
+        rt = runtime()
+        with patch.object(pages, "screen_now", side_effect=[xinghai] + [zhaoxi] * 5), \
+                self.assertRaises(daily.Stop) as caught:
+            daily.back_home(rt, daily.ZHAOXI)
+        self.assertIs(caught.exception.frames[0], xinghai[1])
+        rt.action.assert_not_called()
         # The expected tab on both tap frames: both arrows are tapped.
         rt, hud = runtime(), (HUD, np.zeros((720, 1280, 3), np.uint8), lambda node, override=None: MISS)
         with patch.object(pages, "screen_now", side_effect=[zhaoxi] * 3 + [CALENDAR] * 4 + [hud]):
