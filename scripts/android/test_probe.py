@@ -249,14 +249,25 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(probe.covered_fraction((0, 0, 80, 80), [(-10, -10, 200, 200)]), 1.0)
         self.assertAlmostEqual(probe.covered_fraction((0, 0, 80, 80), [(0, 0, 40, 80), (20, 0, 20, 80)]), 0.5)
 
-    def _background(self, *, hud=True, opened=True):
-        device, controller = self.device()
+    def _background(self, *, hud=True, opened=True, quit_dialog=False, calendar=True, fail=()):
+        device, controller = self.device(fail=set(fail))
         frames = iter([np.zeros((720, 1280, 3), np.uint8), np.full((720, 1280, 3), 3, np.uint8)])
         device.capture = lambda: next(frames)
 
         class Recognizer:
             def run_many(self, names, adhoc=None):
-                return [{"node": names[0], "hit": hud}]
+                hits = {"AndroidProbe_HudLabels": (hud, [1204, 63, 37, 23]),
+                        "AndroidProbe_QuitDialog": (quit_dialog, [585, 180, 110, 30]),
+                        "AndroidProbe_QuitCancel": (quit_dialog, [466, 468, 60, 30])}
+                out = []
+                for n in names:
+                    if n.startswith("AndroidProbe_CalendarLabel"):
+                        out.append({"node": n, "hit": calendar, "box": [905, 65, 70, 18] if calendar else None,
+                                    "detail": {"text": "奇想日历"}})
+                    else:
+                        out.append({"node": n, "hit": hits[n][0], "box": hits[n][1] if hits[n][0] else None,
+                                    "detail": {}})
+                return out
 
             def run(self, name):
                 return {"node": name, "hit": opened}
@@ -266,13 +277,63 @@ class ProbeTests(unittest.TestCase):
 
     def test_background_sample_sends_back_only_after_the_calendar_is_recognised(self):
         sample, controller = self._background()
-        self.assertEqual(controller.events, [("click", 938, 50, 0), ("key", 4)])
+        self.assertEqual(controller.events, [("click", 940, 50, 0), ("key", 4)])  # tap above the located label
         self.assertEqual(sample["change_1s"], 3.0)
         sample, controller = self._background(opened=False)
-        self.assertEqual(controller.events, [("click", 938, 50, 0)])
+        self.assertEqual(controller.events, [("click", 940, 50, 0)])
         self.assertFalse(sample["calendar_opened"])
-        sample, controller = self._background(hud=False)
-        self.assertEqual(controller.events, [])
+        for kwargs in ({"hud": False}, {"calendar": False}):
+            sample, controller = self._background(**kwargs)
+            self.assertEqual(controller.events, [], kwargs)
+
+    def test_calendar_shortcut_needs_windows_that_agree(self):
+        def recognizer(boxes):
+            class Recognizer:
+                def run_many(self, names, adhoc=None):
+                    windows = iter(boxes)
+                    out = []
+                    for n in names:
+                        box = next(windows, None) if n.startswith("AndroidProbe_CalendarLabel") else None
+                        hit = n == "AndroidProbe_HudLabels" or box is not None
+                        out.append({"node": n, "hit": hit, "box": box or ([1204, 63, 37, 23] if hit else None),
+                                    "detail": {"text": "厅奇想日历" if box else ""}})
+                    return out
+            return Recognizer()
+        # "厅奇想日历": the label starts one character in, so its centre is 3/5 of the way along the box
+        state = probe.hud_state(recognizer([[880, 65, 100, 18], [885, 65, 100, 18]]))
+        self.assertTrue(935 <= state["calendar_icon"][0] <= 945, state)
+        self.assertNotIn("calendar_icon", probe.hud_state(recognizer([[880, 65, 100, 18], [1100, 65, 100, 18]])))
+        self.assertNotIn("calendar_icon", probe.hud_state(recognizer([[880, 65, 100, 18]])))  # one window is not enough
+
+    def test_background_sample_cancels_the_quit_dialog_and_sends_nothing_else(self):
+        sample, controller = self._background(quit_dialog=True)  # the HUD labels show behind the dialog
+        self.assertFalse(sample["hud"])
+        self.assertEqual(controller.events, [("click", 496, 483, 0)])  # 取消 only
+        self.assertTrue(sample["quit_cancelled"])
+
+    def test_background_sample_stops_after_a_failed_tap(self):
+        sample, controller = self._background(fail={"click"})
+        self.assertFalse(sample["tap_ok"])
+        self.assertNotIn(("key", 4), controller.events)
+
+    def test_bgcheck_fails_when_a_release_cannot_be_confirmed(self):
+        device, controller = self.device(fail={"up"})
+
+        def sample(device_, recognizer):
+            device_.held.add(0)  # e.g. an interrupted click
+            return {"time": "t", "window": {}}
+        args = probe.build_parser().parse_args(["bgcheck", "--purpose", "t", "--out", str(Path(self.tmp.name) / "b.jsonl"),
+                                                "--samples", "3", "--interval", "0"])
+        with mock.patch.object(probe, "connect", return_value=device), mock.patch.object(probe, "Recognizer"), \
+                mock.patch.object(probe, "background_sample", side_effect=sample), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(probe.cmd_bgcheck(args), 2)
+        self.assertEqual(len((Path(self.tmp.name) / "b.jsonl").read_text().splitlines()), 1)  # stopped after one
+
+    def test_bgcheck_refuses_raw_frames(self):
+        args = probe.build_parser().parse_args(["--raw", "bgcheck", "--purpose", "t", "--out", "x"])
+        with self.assertRaises(probe.ProbeError):
+            probe.cmd_bgcheck(args)
 
     def test_custom_recognition_errors_are_kept(self):
         class Reco:

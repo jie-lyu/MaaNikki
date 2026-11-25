@@ -3,8 +3,9 @@
 Never imported by the agent or the client; it exists to survey what the emulator route can do
 (docs/android-support-plan.md). Every input it sends is appended to an input log (JSON lines,
 default .build/android/input-log.jsonl) with the time, the command, its arguments and a required
---purpose. Before any input it checks that the game's activity is the focused window and refuses
-otherwise, so a tap never lands in the launcher or another app.
+--purpose. Before an input it checks that the game's activity is the focused window and refuses
+otherwise. That narrows, but cannot rule out, input reaching something else: focus can change between
+the check and the dispatch, and a touchable overlay can take a tap while the game keeps focus.
 
     python -I scripts/android/probe.py info
     python -I scripts/android/probe.py capture --out DIR [--count N] [--raw]
@@ -739,9 +740,48 @@ def load_steps(path: Path) -> list:
 
 # ---------------------------------------------------------------- background check
 
-# The mobile HUD's shortcut row carries text labels; 换装 sits at the right end of it.
-HUD_CHECK = {"AndroidProbe_HudLabels": {"recognition": {"type": "OCR", "param": {
-    "roi": [600, 55, 680, 40], "expected": ["换装"]}}}}
+# The mobile HUD's shortcut row carries text labels (换装 at its right end, 奇想日历 among them). The quit
+# confirmation (opened by BACK in the open world) leaves that row visible behind it, so it is vetoed on the same frame.
+HUD_CHECK = {
+    "AndroidProbe_HudLabels": {"recognition": {"type": "OCR", "param": {"roi": [600, 55, 680, 40], "expected": ["换装"]}}},
+    "AndroidProbe_QuitDialog": {"recognition": {"type": "OCR", "param": {
+        "roi": [440, 160, 400, 80], "expected": ["退出游戏"]}}},
+    "AndroidProbe_QuitCancel": {"recognition": {"type": "OCR", "param": {
+        "roi": [380, 440, 240, 80], "expected": ["^取消$"]}}},
+}
+# OCR merges the densely packed HUD labels into one box over the whole row, so 奇想日历 is looked for in narrow
+# overlapping windows along it. In each window that reads the label, its centre is estimated from its position in the
+# (short) text; the median over those windows gives the shortcut's position.
+CALENDAR_LABEL_WINDOWS = {
+    f"AndroidProbe_CalendarLabel{x}": {"recognition": {"type": "OCR", "param": {
+        "roi": [x, 55, 90, 40], "expected": ["奇想日历"]}}}
+    for x in range(600, 1191, 10)}
+
+
+def hud_state(recognizer) -> dict:
+    """On one frame: whether the open-world HUD shows with no quit dialog, where 奇想日历's shortcut is, and the
+    quit dialog's 取消 button if that dialog is open."""
+    checks = {**HUD_CHECK, **CALENDAR_LABEL_WINDOWS}
+    results = recognizer.run_many(list(checks), adhoc=checks)  # one capture for all of them
+    labels, quit_dialog, cancel = results[:3]
+    state = {"hud": bool(labels["hit"] and not quit_dialog["hit"]), "quit_dialog": bool(quit_dialog["hit"])}
+    centres, tops = [], []
+    for result in results[3:]:
+        text = str((result.get("detail") or {}).get("text") or "")
+        at = text.find("奇想日历")
+        if result["hit"] and result["box"] and at >= 0:
+            x, y, w, _h = result["box"]
+            centres.append(x + w * (at + 2) / len(text))
+            tops.append(y)
+    if len(centres) >= 2:
+        centres.sort()
+        median = centres[len(centres) // 2]
+        if all(abs(c - median) <= 25 for c in centres):  # the windows agree on where the label is
+            state["calendar_icon"] = [round(median), max(0, min(tops) - 15)]  # the icon sits just above its label
+    if quit_dialog["hit"] and cancel["hit"] and cancel["box"]:
+        x, y, w, h = cancel["box"]
+        state["quit_cancel"] = [x + w // 2, y + h // 2]
+    return state
 EMULATOR_OWNERS = ("BlueStacks",)
 
 
@@ -755,6 +795,8 @@ def _window_rows(option: int) -> list[dict]:
     cf, cg = q._cf(), q._cg()
     rows = []
     array = cg.CGWindowListCopyWindowInfo(option, 0)
+    if not array:  # the window server can return NULL (e.g. no session); report the state as unknown
+        return []
     try:
         for index in range(cf.CFArrayGetCount(array)):
             entry = cf.CFArrayGetValueAtIndex(array, index)
@@ -766,7 +808,8 @@ def _window_rows(option: int) -> list[dict]:
             if not bounds or not cg.CGRectMakeWithDictionaryRepresentation(bounds, ctypes.byref(rect)):
                 continue
             on_screen = get("kCGWindowIsOnscreen")
-            rows.append({"owner": q._string(get("kCGWindowOwnerName")), "layer": int(q._number(get("kCGWindowLayer")) or 0),
+            rows.append({"id": int(q._number(get("kCGWindowNumber")) or 0),
+                         "owner": q._string(get("kCGWindowOwnerName")), "layer": int(q._number(get("kCGWindowLayer")) or 0),
                          "on_screen": bool(on_screen and cf.CFBooleanGetValue(on_screen)),
                          "bounds": (rect.origin.x, rect.origin.y, rect.size.width, rect.size.height)})
     finally:
@@ -792,6 +835,8 @@ def mac_window_state() -> dict:
     from host.macos import quartz as q  # noqa: F401  (sys.path is set by _window_rows)
 
     on_screen = _window_rows(1 | 16)  # kCGWindowListOptionOnScreenOnly | ExcludeDesktopElements, front to back
+    if not on_screen:
+        return {"available": False, "reason": "the window server returned no windows"}
     front = q.front_pid() if "host.macos.quartz" in sys.modules else -1
     state = {"available": True, "front_app": Path(q.process_path(front)).name if front > 0 else None}
     index = next((i for i, row in enumerate(on_screen) if _is_emulator_window(row)), None)
@@ -803,8 +848,11 @@ def mac_window_state() -> dict:
     window = on_screen[index]
     above = [row for row in on_screen[:index] if row["owner"] not in EMULATOR_OWNERS]
     covering = [row for row in above if row["layer"] in COVERING_LAYERS]
-    state["window"] = {"on_screen": True, "bounds": [round(v) for v in window["bounds"]]}
-    state["covered"] = round(covered_fraction(window["bounds"], [row["bounds"] for row in covering]), 3)
+    # The first large emulator window; with one BlueStacks instance this is the one ADB drives (not checked).
+    state["window"] = {"id": window["id"], "on_screen": True, "bounds": [round(v) for v in window["bounds"]]}
+    # Rectangle overlap only: transparent parts of covering windows count as opaque, opaque windows above layer 19
+    # are not counted, and the grid rounds edges up. An estimate, not what is visible.
+    state["covered_estimate"] = round(covered_fraction(window["bounds"], [row["bounds"] for row in covering]), 3)
     state["covered_by"] = sorted({row["owner"] for row in covering
                                   if covered_fraction(window["bounds"], [row["bounds"]]) > 0})
     state["overlays_above"] = sorted({row["owner"] for row in above if row["layer"] not in COVERING_LAYERS})
@@ -833,33 +881,48 @@ def frame_change(a, b) -> float:
     return float(cv2.absdiff(a, b).mean())
 
 
-CALENDAR_ICON = (938, 50)  # 奇想日历 on this account's HUD layout (the HUD is customisable)
-
-
 def background_sample(device: Device, recognizer) -> dict:
     """One measurement: window state, frame freshness, and (from the HUD only) a harmless input with an unambiguous
-    result: open 奇想日历 by its icon, and close it with BACK only once the calendar page is recognised."""
+    result: open 奇想日历 by its shortcut, and close it with BACK only once the calendar page is recognised. The quit
+    dialog is a guard: wherever it is seen, its 取消 is tapped and nothing else is sent. Stops sending at the first
+    input that fails."""
     sample = {"time": dt.datetime.now().astimezone().isoformat(timespec="seconds"), "window": mac_window_state()}
     first = device.capture()
     time.sleep(1)
     second = device.capture()
     if first is None or second is None:
         return {**sample, "capture": "failed"}
-    # A stale frame repeats pixel for pixel; the live scene (water, foliage, idle animation) never does.
+    # A stale frame repeats pixel for pixel; a live scene with motion (water, foliage) does not. A static scene would
+    # also repeat, so a zero here is a question, not proof of staleness.
     sample["change_1s"] = round(frame_change(first, second), 2)
-    if not recognizer.run_many(list(HUD_CHECK), adhoc=HUD_CHECK)[0]["hit"]:
-        return {**sample, "hud": False, "input": "skipped: the open-world HUD is not showing"}
-    sample["hud"] = True
-    sample["tap_ok"] = device.tap(*CALENDAR_ICON)
+    state = hud_state(recognizer)
+    sample.update(hud=state["hud"], quit_dialog=state["quit_dialog"])
+    if state["quit_dialog"]:
+        return {**sample, **_cancel_quit(device, state)}
+    if not state["hud"] or "calendar_icon" not in state:
+        return {**sample, "input": "skipped: the open-world HUD or its 奇想日历 shortcut is not showing"}
+    sample["tap"] = state["calendar_icon"]
+    sample["tap_ok"] = device.tap(*state["calendar_icon"])
+    if not sample["tap_ok"]:
+        return {**sample, "input": "the tap failed; nothing else sent"}
     time.sleep(1.5)
-    opened = recognizer.run("MaaNikki_CalendarReady")
-    sample["calendar_opened"] = opened["hit"]
-    if not opened["hit"]:
+    sample["calendar_opened"] = recognizer.run("MaaNikki_CalendarReady")["hit"]
+    if not sample["calendar_opened"]:
         return {**sample, "input": "the tap did not open the calendar; nothing else sent"}
     sample["back_ok"] = device.key(4)
     time.sleep(1.5)
-    sample["hud_after"] = recognizer.run_many(list(HUD_CHECK), adhoc=HUD_CHECK)[0]["hit"]
+    after = hud_state(recognizer)
+    sample.update(hud_after=after["hud"], quit_dialog_after=after["quit_dialog"])
+    if after["quit_dialog"]:
+        sample.update(_cancel_quit(device, after))
+    sample["window_after"] = mac_window_state()
     return sample
+
+
+def _cancel_quit(device: Device, state: dict) -> dict:
+    if "quit_cancel" not in state:
+        return {"input": "quit dialog open but 取消 not found; nothing sent", "stop": True}
+    return {"quit_cancelled": device.tap(*state["quit_cancel"])}
 
 
 # ---------------------------------------------------------------- commands
@@ -969,23 +1032,43 @@ def cmd_steps(args) -> int:
 
 
 def cmd_bgcheck(args) -> int:
-    """Sample the emulator window's state over time, with freshness and a harmless input each time (JSON lines)."""
+    """Sample the emulator window's state over time, with freshness and a harmless input each time (JSON lines).
+
+    Stops, with a failing exit status, when a contact may still be held, an input failed, or the quit dialog could
+    not be cancelled."""
+    if args.raw:
+        raise ProbeError("bgcheck works on the 720p frame its coordinates and checks assume; drop --raw")
     device = connect(args)
     recognizer = Recognizer(device.controller)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    for index in range(args.samples):
-        if index:
-            time.sleep(args.interval)
-        try:
-            sample = background_sample(device, recognizer)
-        except ProbeError as error:  # e.g. focus left the game: record it and keep sampling without input
-            sample = {"time": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-                      "window": mac_window_state(), "error": str(error)}
-        with out.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(sample, ensure_ascii=False, default=_jsonable) + "\n")
-        print(json.dumps(sample, ensure_ascii=False, default=_jsonable), flush=True)
-    return 0
+    status = 0
+    try:
+        for index in range(args.samples):
+            if index:
+                time.sleep(args.interval)
+            try:
+                sample = background_sample(device, recognizer)
+            except ProbeError as error:  # e.g. focus left the game: record it and stop sending
+                sample = {"time": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                          "window": mac_window_state(), "error": str(error), "stop": True}
+            if device.held:
+                sample["held_after_sample"] = sorted(device.held)
+            with out.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(sample, ensure_ascii=False, default=_jsonable) + "\n")
+            print(json.dumps(sample, ensure_ascii=False, default=_jsonable), flush=True)
+            failed_input = sample.get("tap_ok") is False or sample.get("back_ok") is False \
+                or sample.get("quit_cancelled") is False
+            if sample.get("stop") or failed_input or device.held:
+                status = 1
+                break
+    finally:
+        failed = device.release_all()
+        if failed:
+            print(f"ERROR: could not lift contacts {failed}; check the device before sending more input",
+                  file=sys.stderr, flush=True)
+            status = 2
+    return status
 
 
 def cmd_reco(args) -> int:
