@@ -1,5 +1,5 @@
 {
- "source": "Windows CI run 45159836136 (phase 1 at 1039b44, PR merge commit b6e98fc): every suite present then produced exactly these outcomes on Windows. Added after 1039b44 and so far recorded on macOS only: test_app_paths.py, test_host.py, test_host_imports.py, test_window_layout.py, test_file_io.py, test_launcher_discovery.py, test_game_target.cjs, test_mac_task_tiers.cjs and the selector test in test_windows_contract.cjs; HostImportTests.test_win32_overlay_backend_imports is skipped off Windows and recorded with its Windows outcome (pass in runs on 06c9c07 and 00d5531), so a Windows-only regression there cannot hide behind a skip. Refresh from the offline-test-results artifact when Windows outcomes change.",
+ "source": "Windows CI run 45159836136 (phase 1 at 1039b44, PR merge commit b6e98fc): every suite present then produced exactly these outcomes on Windows. Added after 1039b44 and so far recorded on macOS only: test_app_paths.py, test_host.py, test_host_imports.py, test_window_layout.py, test_file_io.py, test_launcher_discovery.py, test_game_target.cjs, test_mac_task_tiers.cjs, test_task_tiers.cjs and the selector test in test_windows_contract.cjs; HostImportTests.test_win32_overlay_backend_imports is skipped off Windows and recorded with its Windows outcome (pass in runs on 06c9c07 and 00d5531), so a Windows-only regression there cannot hide behind a skip. Refresh from the offline-test-results artifact when Windows outcomes change.",
  "suites": {
   "test_agent_pause.py": {
    "tests": [
@@ -50,7 +50,6 @@
     "CapabilityTests.test_no_desktop_window_services",
     "DeviceFocusCaptureTests.test_a_focus_loss_seen_elsewhere_during_the_capture_discards_the_frame",
     "DeviceFocusCaptureTests.test_a_frame_whose_focus_was_lost_by_the_end_is_discarded",
-    "DeviceFocusCaptureTests.test_a_left_marker_is_looked_at_before_the_frame_is_captured",
     "DeviceFocusCaptureTests.test_a_frame_with_focus_before_and_after_is_kept",
     "DeviceFocusCaptureTests.test_a_loss_before_validation_skips_the_validator",
     "DeviceFocusCaptureTests.test_a_loss_between_the_focus_check_and_the_capture_discards_the_frame",
@@ -84,9 +83,8 @@
     "NoKeyboardOrMouseTests.test_a_touch_counts_as_confirmed_only_once_the_device_shows_its_own_lift",
     "NoKeyboardOrMouseTests.test_nothing_is_sent_while_the_device_reports_a_contact_held_or_cannot_be_read",
     "NoKeyboardOrMouseTests.test_a_touch_whose_lift_check_raises_halts_and_keeps_the_marker",
-    "NoKeyboardOrMouseTests.test_a_left_marker_is_never_recovered_at_the_touch_itself",
-    "NoKeyboardOrMouseTests.test_a_left_marker_is_cleared_only_for_this_very_device_reporting_no_contact_held",
-    "NoKeyboardOrMouseTests.test_recovery_needs_its_log_line_skips_a_halted_process_and_halts_when_the_read_raises",
+    "NoKeyboardOrMouseTests.test_a_left_marker_halts_the_agent_even_on_a_settled_device",
+    "NoKeyboardOrMouseTests.test_the_pre_send_reading_comes_before_the_last_focus_check_and_a_raise_halts",
     "NoKeyboardOrMouseTests.test_each_touch_is_on_disk_before_it_is_sent_and_cleared_once_confirmed",
     "NoKeyboardOrMouseTests.test_edge_rectangles_tap_a_pixel_inside_them",
     "NoKeyboardOrMouseTests.test_every_key_is_refused",
@@ -114,6 +112,7 @@
     "TargetTests.test_connect_target_reads_the_device",
     "TargetTests.test_focus_parsing_counts_only_the_current_focus",
     "TargetTests.test_touch_state_reads_only_the_forms_seen_on_the_device",
+    "TargetTests.test_the_recovery_reading_needs_every_part_from_one_output",
     "TargetTests.test_input_primitives_send_nothing_and_there_is_no_window_geometry",
     "TargetTests.test_only_an_adb_connection_is_accepted",
     "TargetTests.test_process_state_needs_a_confirmed_answer",
@@ -181,7 +180,8 @@
     "RunnerTests.test_a_ctrl_c_during_teardown_is_deferred_until_the_agent_is_reaped",
     "RunnerTests.test_a_ctrl_c_while_the_record_is_collected_still_writes_it",
     "RunnerTests.test_a_left_unconfirmed_touch_stops_the_runner_until_cleared_by_its_fingerprint",
-    "RunnerTests.test_a_left_marker_naming_this_device_is_cleared_when_the_device_reports_no_contact_held",
+    "RunnerTests.test_a_left_marker_is_cleared_only_when_one_reading_shows_this_guest_settled",
+    "RunnerTests.test_a_recovery_that_cannot_be_logged_keeps_the_marker",
     "RunnerTests.test_a_malformed_touch_line_is_flagged_not_hiding_later_rows",
     "RunnerTests.test_an_agent_that_cannot_be_reaped_fails_the_run",
     "RunnerTests.test_an_intent_without_an_outcome_is_flagged",
@@ -976,6 +976,20 @@
     "stop in progress blocks; restart succeeds after framework stops",
     "unknown backend state blocks startup and releases lock"
    ],
+   "skips": []
+  },
+  "test_task_tiers.cjs": {
+   "tests": [
+    "the tier list follows the controller: Adb on macOS gets the Android tiers, everything else the Mac tiers",
+    "Mac marks, wording and start gate are exactly the macTaskTiers ones",
+    "Android marks use the Android manifest and wording",
+    "an Adb instance on macOS waits for and checks the Android tiers only",
+    "whenSettled resolves at once, on the change that settles it, or at the timeout",
+    "the Android loader reads its own command and route and words its errors for Android",
+    "the scheduler waits for the Android tiers only on macOS with an Adb instance",
+    "a controller attach_resource_path loads after the resource paths; none adds nothing"
+   ],
+   "known_failures": [],
    "skips": []
   },
   "test_window_layout.py": {

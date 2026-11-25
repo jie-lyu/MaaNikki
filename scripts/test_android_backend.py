@@ -21,7 +21,8 @@ os.environ.setdefault("MAAFW_BINARY_PATH", str(ROOT / "maafw"))
 import host  # noqa: E402
 from host import android  # noqa: E402
 from host.android.target import (AndroidTarget, NoInput, TouchSnapshot, check_controller_info,  # noqa: E402
-                                 focused_package, process_state, recent_events, touch_snapshot, touch_state)
+                                 focused_package, process_state, recent_events, recovery_reading, touch_snapshot,
+                                 touch_state)
 from navigation.models import NavigationError  # noqa: E402
 
 ADB_CONTROLLER = {"name": "nikki_android", "type": "Adb", "display_short_side": 720}
@@ -215,8 +216,11 @@ class TargetTests(FreshAndroidState):
                 self.assertIsNone(touch_state(output))
         self.assertEqual(recent_events(RECENT), [(-1, 47558010000000, "DOWN"), (-1, 47558064000000, "UP")])
         self.assertEqual(recent_events("  RecentQueue: <empty>\n"), [])
-        for output in (None, "", TOUCH_NONE, RECENT + RECENT, "  RecentQueue: something\n"):
-            self.assertIsNone(recent_events(output))
+        cut = RECENT.split("    MotionEvent(deviceId=-1, eventTime=47558064000000")[0]  # the newest entry missing
+        for output in (None, "", TOUCH_NONE, RECENT + RECENT, "  RecentQueue: something\n", cut,
+                       "  RecentQueue: length=10\n  PendingEvent: <none>\n"):
+            with self.subTest(output=output):
+                self.assertIsNone(recent_events(output))  # incl. a queue shorter than its advertised length
         snapshot = touch_snapshot(TOUCH_NONE + RECENT)
         self.assertEqual((snapshot.state, snapshot.latest, snapshot.injected_up),
                          ("none", 47558064000000, 47558064000000))
@@ -232,10 +236,32 @@ class TargetTests(FreshAndroidState):
         target = AndroidTarget(INFO, controller)
         self.assertEqual(target.touch_snapshot().state, "injected")
         self.assertEqual(target.identity(), {"serial": INFO["adb_serial"], "boot_id": boot})
-        self.assertEqual(target.identity(), {"serial": INFO["adb_serial"], "boot_id": boot})
-        self.assertEqual(controller.commands, ["dumpsys input", "cat /proc/sys/kernel/random/boot_id"])  # read once
+        self.assertEqual(controller.commands, ["dumpsys input", "cat /proc/sys/kernel/random/boot_id"])
         unreadable = AndroidTarget(INFO, FakeShellController({"boot_id": "not a uuid\n"}))
         self.assertIsNone(unreadable.identity())
+
+    def test_the_recovery_reading_needs_every_part_from_one_output(self):
+        boot = "992f1bef-d353-4a1b-b401-b9867f884164"
+        queues = "  PendingEvent: <none>\n  InboundQueue: <empty>\n"
+        from host.android.target import RECOVERY_READING
+        ps = f"ARGS\n/system/bin/surfaceflinger\nsh -c {RECOVERY_READING}\n"  # the reading's own command line
+        helper = "app_process /data/local/tmp com.shxyke.MaaTouch.App\n"
+
+        def reading(dump=TOUCH_NONE + queues, processes=ps, booted=boot):
+            return recovery_reading(f"{booted}\n__input__\n{dump}__ps__\n{processes}")
+        self.assertEqual(reading(), {"boot_id": boot, "state": "none", "queued": False, "maatouch": False})
+        self.assertTrue(reading(processes=ps + helper)["maatouch"])
+        self.assertTrue(reading(processes=ps + 'sh -c export CLASSPATH="/data/local/tmp/x"; ' + helper)["maatouch"])
+        self.assertFalse(reading(processes=ps + "grep com.shxyke.MaaTouch.App\n")["maatouch"])
+        self.assertTrue(reading(dump=TOUCH_NONE + "  PendingEvent: <none>\n  InboundQueue: length=1\n"
+                                     "    MotionEvent(deviceId=-1, eventTime=1, action=DOWN)\n")["queued"])
+        self.assertTrue(reading(dump=TOUCH_NONE + "  PendingEvent:\n    MotionEvent(...)\n  InboundQueue: <empty>\n")
+                        ["queued"])
+        self.assertEqual(reading(dump=TOUCH_HELD + queues)["state"], "injected")
+        for broken in (reading(booted="nope"), reading(dump=TOUCH_NONE), reading(dump="  Display: 0\n" + queues),
+                       reading(processes="no header\n"), recovery_reading(None),
+                       recovery_reading(f"{boot}\n__input__\n{TOUCH_NONE}{queues}")):
+            self.assertIsNone(broken)
 
     def test_only_an_adb_connection_is_accepted(self):
         self.assertEqual(check_controller_info(INFO), "127.0.0.1:5555")
@@ -650,6 +676,28 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
                 self.assertEqual(json.loads(log[-1])["outcome"], "cancelled")
                 state._owner.close()
 
+    def test_the_pre_send_reading_comes_before_the_last_focus_check_and_a_raise_halts(self):
+        rt = self.tap_runtime()
+        order = []
+        rt._device_target.touch_snapshot.side_effect = lambda: (order.append("snapshot"), TouchSnapshot("none", 1, 1))[1]
+        rt._device_target.foreground.side_effect = lambda: (order.append("focus"), True)[1]
+        rt.context.run_action_direct.side_effect = lambda *a: (order.append("send"), SimpleNamespace(success=True))[1]
+        with android_run(), patch("daily.runtime.active_session", return_value=None), \
+                patch("daily.runtime.wall_time.sleep"), self.assertRaises(host.InputUnconfirmed):
+            rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)  # no new lift in this fake
+        self.assertEqual(order[order.index("send") - 2:order.index("send") + 1], ["snapshot", "focus", "send"])
+        with patch.object(host, "_DEVICE_INPUT", self.fresh_state(self.data_root / "raise")) as state, \
+                android_run(), patch("daily.runtime.active_session", return_value=None), \
+                self.assertRaises(host.DeviceUnreachable):
+            self.state = state
+            rt = self.tap_runtime()
+            rt._device_target.touch_snapshot.side_effect = host.DeviceUnreachable("gone")
+            rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
+        rt.context.run_action_direct.assert_not_called()
+        self.assertTrue(state.halted)
+        rt.context.tasker.post_stop.assert_called_once()
+        self.assertFalse(state.marker().exists())
+
     def test_a_touch_whose_lift_check_raises_halts_and_keeps_the_marker(self):
         with patch.object(host, "_DEVICE_INPUT", self.fresh_state(self.data_root / "raised")) as state, \
                 android_run(), patch("daily.runtime.active_session", return_value=None), \
@@ -661,9 +709,8 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
         self.assertTrue(state.halted)
         self.assertTrue(state.marker().exists())
 
-    def test_a_left_marker_is_never_recovered_at_the_touch_itself(self):
-        # A marker found when reserving halts, even on a device reporting nothing held: recovery happens only
-        # before a decision's frame is captured, so a decision made before it is never sent after it.
+    def test_a_left_marker_halts_the_agent_even_on_a_settled_device(self):
+        # The agent never clears a marker itself (only the runner, before it connects, or MaaNikki's start).
         self.state.marker().parent.mkdir(parents=True)
         self.state.marker().write_text(json.dumps({"pid": 1, "since": "x", "device": DEVICE}))
         rt = self.tap_runtime()
@@ -672,60 +719,6 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
             rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
         rt.context.run_action_direct.assert_not_called()
         self.assertTrue(self.state.halted)
-        self.assertTrue(self.state.marker().exists())
-
-    def test_a_left_marker_is_cleared_only_for_this_very_device_reporting_no_contact_held(self):
-        none, held = TouchSnapshot("none", 1, 1), TouchSnapshot("injected", 1, 1)
-        cases = (("this device, nothing held", {"device": DEVICE}, none, True),
-                 ("this device, still held", {"device": DEVICE}, held, False),
-                 ("this device, unreadable", {"device": DEVICE}, None, False),
-                 ("same address, another guest or boot", {"device": {**DEVICE, "boot_id": "0" * 8 + DEVICE["boot_id"][8:]}},
-                  none, False),
-                 ("another serial of the same emulator", {"device": {**DEVICE, "serial": "emulator-5554"}}, none, False),
-                 ("marker naming no device", {"device": None}, none, False),
-                 ("marker from before devices were recorded", {"serial": DEVICE["serial"]}, none, False),
-                 ("empty marker", None, none, False))
-        for index, (name, content, reading, cleared) in enumerate(cases):
-            with self.subTest(name), \
-                    patch.object(host, "_DEVICE_INPUT", self.fresh_state(self.data_root / str(index))) as state:
-                self.state = state
-                marker = state.marker()
-                marker.parent.mkdir(parents=True)
-                marker.write_bytes(b"" if content is None else json.dumps({"pid": 1, "since": "x", **content}).encode())
-                rt = self.tap_runtime()
-                rt._device_target.touch_snapshot.side_effect = [reading]
-                with android_run(), patch("daily.runtime.active_session", return_value=None):
-                    rt._recover_left_marker()
-                self.assertEqual(marker.exists(), not cleared)
-                self.assertFalse(state.halted)
-                log = state.root / "logs" / "android-input.jsonl"
-                lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
-                self.assertEqual([json.loads(line)["action"] for line in lines], ["RecoverMarker"] * int(cleared))
-                state._owner.close()
-
-    def test_recovery_needs_its_log_line_skips_a_halted_process_and_halts_when_the_read_raises(self):
-        def plant(state):
-            state.marker().parent.mkdir(parents=True, exist_ok=True)
-            state.marker().write_text(json.dumps({"pid": 1, "since": "x", "device": DEVICE}))
-        rt = self.tap_runtime()
-        plant(self.state)
-        with patch.object(self.state, "record_touch", return_value=False), android_run(), \
-                patch("daily.runtime.active_session", return_value=None):
-            rt._recover_left_marker()
-        self.assertTrue(self.state.marker().exists())  # not cleared without its record
-        rt._device_target.touch_snapshot.reset_mock()
-        self.state.halted = True
-        with android_run(), patch("daily.runtime.active_session", return_value=None):
-            rt._recover_left_marker()
-        rt._device_target.touch_snapshot.assert_not_called()
-        self.assertTrue(self.state.marker().exists())
-        self.state.halted = False
-        rt._device_target.touch_snapshot.side_effect = host.DeviceUnreachable("gone")
-        with android_run(), patch("daily.runtime.active_session", return_value=None), \
-                self.assertRaises(host.DeviceUnreachable):
-            rt._recover_left_marker()
-        self.assertTrue(self.state.halted)
-        rt.context.tasker.post_stop.assert_called_once()
         self.assertTrue(self.state.marker().exists())
 
     @unittest.skipUnless(HAS_FLOCK, "flock is macOS/POSIX only; Android hosts are macOS for now")
@@ -1092,16 +1085,6 @@ class DeviceFocusCaptureTests(FreshAndroidState):
         with android_run(), patch("daily.runtime.active_session", return_value=None):
             image = rt._capture()
         return image, rt, inputs
-
-    def test_a_left_marker_is_looked_at_before_the_frame_is_captured(self):
-        rt, inputs = self.runtime([True, True])
-        order = []
-        rt._recover_left_marker = Mock(side_effect=lambda: order.append("recover"))
-        post = rt.controller.post_screencap.side_effect
-        rt.controller.post_screencap.side_effect = lambda: (order.append("capture"), post())[1]
-        with android_run(), patch("daily.runtime.active_session", return_value=None):
-            self.assertIsNotNone(rt._capture())
-        self.assertEqual(order[:2], ["recover", "capture"])
 
     def test_a_frame_with_focus_before_and_after_is_kept(self):
         image, rt, inputs = self.capture([True, True])

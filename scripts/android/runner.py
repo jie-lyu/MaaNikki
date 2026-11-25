@@ -203,8 +203,7 @@ def run(args) -> int:
 
     adb_alive(args.adb, args.serial)
     record["marker_recovery"] = check_unconfirmed(data_root, args.clear_unconfirmed,
-                                                  lambda: device_touch_state(args.adb, args.serial),
-                                                  lambda: device_identity(args.adb, args.serial))
+                                                  lambda: device_reading(args.adb, args.serial), args.serial)
     Tasker.set_log_dir(str(log_dir))
     agent_binary = ROOT / ".venv" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / \
         "site-packages" / "MaaAgentBinary"
@@ -301,19 +300,12 @@ def _adb_shell(adb: str, serial: str, command: list[str], seconds: float = 10) -
     return result.stdout if result.returncode == 0 else None
 
 
-def device_touch_state(adb: str, serial: str) -> str | None:
-    """Whether a contact is held on the device, read with `dumpsys input` (read-only; host.android.target)."""
+def device_reading(adb: str, serial: str) -> dict | None:
+    """The guest's boot id, touch state, queued input and MaaTouch helpers, read in one shell invocation
+    (host.android.target.recovery_reading), or None."""
     sys.path.insert(0, str(ROOT / "agent"))
-    from host.android.target import touch_state
-    return touch_state(_adb_shell(adb, serial, ["dumpsys", "input"]))
-
-
-def device_identity(adb: str, serial: str) -> dict | None:
-    """The guest behind ``serial`` as the agent records it in a touch marker (serial and boot id), or None."""
-    sys.path.insert(0, str(ROOT / "agent"))
-    from host.android.target import boot_id
-    booted = boot_id(_adb_shell(adb, serial, ["cat", "/proc/sys/kernel/random/boot_id"]))
-    return None if booted is None else {"serial": serial, "boot_id": booted}
+    from host.android.target import RECOVERY_READING, recovery_reading
+    return recovery_reading(_adb_shell(adb, serial, [RECOVERY_READING]))
 
 
 def marker_fingerprint(raw: bytes) -> str:
@@ -323,15 +315,16 @@ def marker_fingerprint(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()[:12]
 
 
-def check_unconfirmed(data_root: Path, clear: str | None, read_touch_state=None, read_identity=None):
+def check_unconfirmed(data_root: Path, clear: str | None, read_device=None, serial: str | None = None):
     """The runner is the recovery boundary for its own data root, as MaaNikki's start is for the client's: a touch
-    marker left by an earlier run (a touch that was never confirmed released) is cleared when it names this device
-    (serial and boot id) and the device, read now under the agent's owner lock, reports no contact held. The
-    runner's own controller is not connected yet, so no command of an earlier sender can still be in flight to
-    it. Otherwise, or when a fingerprint that does not match is given, it stops the runner
-    until a person has decided (RELEASE_ADVICE). Clearing by hand names the marker by the fingerprint printed with
-    the refusal; either way the marker's bytes are checked under the owner lock, so a different, later marker is
-    never cleared. Returns what was done (None when there was no marker)."""
+    marker left by an earlier run (a touch that was never confirmed released) stops the runner until a person has
+    decided (RELEASE_ADVICE), unless the device itself shows the marker is settled. That needs, from one reading
+    taken under the agent's owner lock before the runner connects (read_device, device_reading()): the marker names
+    this very guest (serial and boot id), no contact is held, no input is queued in the dispatcher and no MaaTouch
+    helper is running, so nothing an earlier sender wrote can still arrive. The recovery is written to the input log
+    before the marker is removed. Clearing by hand names the marker by the fingerprint printed with the refusal (a
+    fingerprint that does not match refuses outright); either way the marker's bytes are checked under the owner
+    lock, so a different, later marker is never cleared. Returns what was done (None when there was no marker)."""
     marker = data_root / "config" / "android-input" / "touch.json"
     if not marker.exists():
         return None
@@ -345,29 +338,23 @@ def check_unconfirmed(data_root: Path, clear: str | None, read_touch_state=None,
     except (ValueError, UnicodeDecodeError):
         content = None
     content = content if isinstance(content, dict) else {}
-    since = content.get("since")
-    device = read_identity() if clear is None and read_identity is not None else None
-    named_device = isinstance(device, dict) and bool(device.get("serial")) and bool(device.get("boot_id")) \
-        and content.get("device") == device
-    by_device = clear is None and named_device and read_touch_state is not None
+    since, named = content.get("since"), content.get("device")
+    by_device = clear is None and read_device is not None and bool(serial) and isinstance(named, dict) \
+        and named.get("serial") == serial and bool(named.get("boot_id"))
 
-    def refuse(reading=None):
-        named = "" if clear is None else f"（给的指纹 {clear} 对不上）"
-        if by_device:
-            why = f"设备读数 {reading or '读不出'}"
-        else:
-            why = f"标记记的设备 {content.get('device') or '没有'}，现在连的是 {device or '读不出'}"
-        return RunnerError(f"上一次运行留下了没有确认抬起的触摸{named}：{marker}，时间 {since or '不明'}，指纹 {fingerprint}，"
-                           f"{why}。{RELEASE_ADVICE}")
+    def refuse(why):
+        given = "" if clear is None else f"（给的指纹 {clear} 对不上）"
+        return RunnerError(f"上一次运行留下了没有确认抬起的触摸{given}：{marker}，时间 {since or '不明'}，指纹 {fingerprint}"
+                           f"{'，' + why if why else ''}。{RELEASE_ADVICE}")
     if clear != fingerprint and not by_device:
-        raise refuse()
+        raise refuse(f"标记记的设备 {named or '没有'}，现在连的是 {serial or '不明'}" if clear is None else "")
     sys.path.insert(0, str(ROOT / "agent"))
     from host import UnsupportedInput, take_owner_lock
     try:
         handle = take_owner_lock(marker.parent / "owner.lock")
     except UnsupportedInput as error:
         raise RunnerError(f"处理触摸标记之前没能拿到 owner.lock：{error}") from None
-    reading = None
+    how = "fingerprint given by a person"
     try:
         try:
             current = marker.read_bytes()
@@ -376,15 +363,34 @@ def check_unconfirmed(data_root: Path, clear: str | None, read_touch_state=None,
         if marker_fingerprint(current) != fingerprint:
             raise RunnerError("触摸标记在检查期间换了（可能有另一次运行留下了新的），没有清除，请重跑。")
         if by_device:
-            reading = read_touch_state()  # under the owner lock: no agent can touch the device meanwhile
-            if reading != "none":
-                raise refuse(reading)
+            reading = read_device()  # one shell call, under the owner lock: no agent can touch the device meanwhile
+            settled = reading is not None and reading["boot_id"] == named["boot_id"] and reading["state"] == "none" \
+                and not reading["queued"] and not reading["maatouch"]
+            if not settled:
+                raise refuse(f"设备读数 {reading or '读不出'}（要同一台设备、没有按住的触点、没有排队的输入、没有 MaaTouch 在运行）")
+            how = "device reports this guest settled: no contact held, no queued input, no MaaTouch running"
+            if not log_recovery(data_root, fingerprint, since, named, how):
+                raise refuse("设备读数正常，但写不进输入记录，没有清除")
         marker.unlink()
     finally:
         handle.close()
-    how = "device reports no contact held" if reading == "none" else "fingerprint given by a person"
     print(f"已清除指纹 {fingerprint} 的触摸标记（{since or '时间不明'}；{how}）", file=sys.stderr)
     return {"marker": fingerprint, "since": since, "cleared_by": how}
+
+
+def log_recovery(data_root: Path, fingerprint: str, since, device, how: str) -> bool:
+    """Append the recovery to the agent's input log (logs/android-input.jsonl) before the marker goes, so it is on
+    record even when the run is interrupted right after."""
+    entry = {"time": dt.datetime.now().astimezone().isoformat(timespec="milliseconds"), "pid": os.getpid(),
+             "action": "RecoverMarker", "outcome": f"clearing marker {fingerprint} since {since} for {device}: {how}"}
+    try:
+        path = data_root / "logs" / "android-input.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        return True
+    except OSError:
+        return False
 
 
 def stop_tasker(tasker) -> bool:

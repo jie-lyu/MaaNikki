@@ -115,9 +115,9 @@ class DeviceInputState:
     - touch marker: before every touch config/android-input/touch.json is created exclusively (outside the cache
       the client can clear) and removed only after the touch is confirmed released: the framework reported it
       done and the device then showed this gesture's injected UP and no contact held (`dumpsys input`). A marker
-      already present means an earlier touch was never confirmed: nothing is sent. Before a decision's frame is
-      captured, a marker that names the connected device (serial and boot id) is cleared, and logged, when that
-      device reports no contact held (recover_marker). When MaaNikki starts
+      already present means an earlier touch was never confirmed: nothing is sent. The marker names the device
+      the touch was meant for (serial and boot id), so the headless runner can clear it by reading that device
+      before it connects (scripts/android/runner.py). When MaaNikki starts
       (phase B5) it takes the same owner lock and only then removes touch.json, never the lock file: the
       recovery boundary. Any storage error refuses the touch.
     - epoch: advanced by every observed loss of device focus (AndroidTarget records its own negative readings,
@@ -156,8 +156,7 @@ class DeviceInputState:
 
     def begin_touch(self, device=None):
         """Reserve the next touch on disk, naming the device (serial and boot id) it is meant for; raises unless the
-        reservation is there and this process owns it. A marker already present halts this process (recovery is a
-        separate step, recover_marker, taken before a decision is made)."""
+        reservation is there and this process owns it. A marker already present halts this process."""
         with self.lock:
             self.claim()
             path = self.marker()
@@ -191,41 +190,6 @@ class DeviceInputState:
                     pass
                 self.release_touch()  # nothing was sent: the half-written reservation is ours to remove
                 raise UnsupportedInput("无法记录安卓模拟器上的触摸（数据目录不可写），这一步暂不发送。") from None
-
-    def recover_marker(self, device, read_snapshot) -> bool:
-        """Remove a marker an earlier process left (this process holds the owner lock, so that process is gone) when
-        it names this very device (serial and boot id, ``device``) and the device, read now, reports no contact
-        held: the touch either completed or was never sent. Called before a decision's frame is captured, so
-        nothing decided earlier is sent afterwards. The recovery is logged before the marker is removed; anything
-        else keeps the marker. False also when there is no marker or this process is halted."""
-        with self.lock:
-            self.claim()
-            path = self.marker()
-            if self.halted or path is None or not path.exists():
-                return False
-            if not isinstance(device, dict) or not device.get("serial") or not device.get("boot_id"):
-                return False
-            try:
-                raw = path.read_bytes()
-                marker = json.loads(raw.decode("utf-8"))
-            except (OSError, ValueError, UnicodeDecodeError):
-                return False  # unreadable, empty or half-written: a person decides, as before
-            if not isinstance(marker, dict) or marker.get("device") != device:
-                return False
-            snapshot = read_snapshot()
-            if snapshot is None or snapshot.state != "none":
-                return False
-            if not self.record_touch("RecoverMarker", {}, f"clearing: device {device['serial']} (boot {device['boot_id']}) "
-                                     f"reports no contact held; marker from pid {marker.get('pid')} "
-                                     f"since {marker.get('since')}"):
-                return False
-            try:
-                if path.read_bytes() != raw:
-                    return False
-                path.unlink()
-            except OSError:
-                return False
-            return True
 
     def record_touch(self, action, fields, outcome) -> bool:
         """Append one touch to logs/android-input.jsonl under the data root (the rule: every input is logged): its

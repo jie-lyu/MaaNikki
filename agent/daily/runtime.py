@@ -539,21 +539,26 @@ class Runtime:
                 intent = True
                 if state.halted or self.stopped:
                     return False
-                if not self._device_focus_now():
-                    raise ForegroundChanged("设备上游戏不在前台，已取消本次输入，等待重新核对")
-                if state.marks_of(source_frame) != (self._focus_generation, state.epoch):
-                    raise ForegroundChanged("依据的截图已经过时（之后焦点变过），已取消本次输入，等待重新核对")
-                if self._stopped_now():  # Stop may have been pressed during the focus query
-                    return False
                 # Nothing may be held before this touch (a contact left by anything earlier stops all input), and
-                # the dispatcher's latest event is the baseline this touch's own lift must come after.
-                before = target.touch_snapshot()
+                # the dispatcher's latest event is the baseline this touch's own lift must come after. Read before
+                # the last focus and frame checks, which then come after all the I/O.
+                try:
+                    before = target.touch_snapshot()
+                except BaseException:
+                    self._halt_unconfirmed()
+                    raise
                 if before is None or before.state != "none":
                     self._halt_unconfirmed()
                     from host import InputUnconfirmed
                     raise InputUnconfirmed("安卓模拟器上还有按住的触点（或读不出设备的触摸状态），这一步没有发送，已停止所有输入；"
                                            "请检查模拟器后重新启动 MaaNikki。")
-                if self._stopped_now():
+                if state.halted or self.stopped:
+                    return False
+                if not self._device_focus_now():
+                    raise ForegroundChanged("设备上游戏不在前台，已取消本次输入，等待重新核对")
+                if state.marks_of(source_frame) != (self._focus_generation, state.epoch):
+                    raise ForegroundChanged("依据的截图已经过时（之后焦点变过），已取消本次输入，等待重新核对")
+                if self._stopped_now():  # Stop may have been pressed during the focus query
                     return False
                 sent = True
                 try:
@@ -608,21 +613,6 @@ class Runtime:
             if snapshot is not None and snapshot.released_after(baseline):
                 return True
         return snapshot
-
-    def _recover_left_marker(self):
-        """Android, before a frame is captured for a decision: clear a touch marker an earlier process left when it
-        names this device and the device reports no contact held (DeviceInputState.recover_marker). A failure to
-        read halts this process, as an unconfirmed touch would."""
-        state = device_input()
-        marker = state.marker()
-        if state.halted or marker is None or not marker.exists():
-            return
-        try:
-            target = self._sessionless_target()
-            state.recover_marker(target.identity(), target.touch_snapshot)
-        except BaseException:
-            self._halt_unconfirmed()
-            raise
 
     def escape(self, delay=0.35):
         """Back out of the current screen: Esc (``key("menu")``) on the desktop, ``leave_page`` on Android, where
@@ -931,7 +921,6 @@ class Runtime:
             self.check_focus()
             if device_focus:
                 device_input().claim()  # capture, decision and dispatch belong to one agent process
-                self._recover_left_marker()  # before this frame: no decision made earlier is sent after it
             # The epoch is read before the focus check, so a loss seen anywhere after it discards this frame.
             epoch = device_input().epoch if device_focus else None
             if device_focus and not self._device_focus_ready():

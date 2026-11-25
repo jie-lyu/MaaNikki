@@ -91,6 +91,8 @@ def touch_state(output: str | None) -> str | None:
 
 
 _EVENT = re.compile(r"^\s*MotionEvent\(deviceId=(-?\d+), eventTime=(\d+),.*\baction=([A-Z_]+)\b")
+_ENTRY = re.compile(r"^\s+\w+Event\(")
+_MAATOUCH = re.compile(r"^(sh -c .*)?app_process\b.*\bcom\.shxyke\.MaaTouch\.App\b")
 _BOOT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
@@ -121,15 +123,21 @@ def recent_events(output: str | None):
         return []
     if not header.strip().startswith("RecentQueue: length="):
         return None
+    try:
+        length = int(header.strip()[len("RecentQueue: length="):])
+    except ValueError:
+        return None
     depth = len(header) - len(header.lstrip())
-    events = []
+    entries, events = 0, []
     for line in lines[headers[0] + 1:]:
         if line.strip() and len(line) - len(line.lstrip()) <= depth:
             break
+        if _ENTRY.match(line):
+            entries += 1
         match = _EVENT.match(line)
         if match:
             events.append((int(match.group(1)), int(match.group(2)), match.group(3)))
-    return events
+    return events if entries == length else None  # a cut-off queue could hide the newest events
 
 
 def touch_snapshot(output: str | None) -> TouchSnapshot | None:
@@ -144,6 +152,32 @@ def touch_snapshot(output: str | None) -> TouchSnapshot | None:
 def boot_id(output: str | None) -> str | None:
     value = (output or "").strip()
     return value if _BOOT_ID.match(value) else None
+
+
+# One shell invocation for the runner's recovery decision: the guest's boot id, the input dispatcher and the
+# processes are read together, so they describe the same guest at (nearly) the same moment. The separators are
+# quoted apart in the command, so the command's own line in the process list does not contain them.
+RECOVERY_READING = ("cat /proc/sys/kernel/random/boot_id; echo __in''put__; dumpsys input; echo __p''s__; "
+                    "ps -A -o ARGS")
+
+
+def recovery_reading(output: str | None) -> dict | None:
+    """From RECOVERY_READING's output: the boot id, the touch state, whether any input is still queued in the
+    dispatcher (a pending event or a non-empty inbound queue) and whether a MaaTouch helper is running (it could
+    still hold commands of an earlier sender). None when any part cannot be read."""
+    if not output or output.count("__input__") != 1 or output.count("__ps__") != 1:
+        return None
+    booted, rest = output.split("__input__")
+    dump, processes = rest.split("__ps__")
+    state = touch_state(dump)
+    pending = [line.strip() for line in dump.splitlines() if line.strip().startswith("PendingEvent:")]
+    inbound = [line.strip() for line in dump.splitlines() if line.strip().startswith("InboundQueue:")]
+    if boot_id(booted) is None or state is None or len(pending) != 1 or len(inbound) != 1 \
+            or "ARGS" not in processes:
+        return None
+    return {"boot_id": boot_id(booted), "state": state,
+            "queued": pending != ["PendingEvent: <none>"] or inbound != ["InboundQueue: <empty>"],
+            "maatouch": any(_MAATOUCH.match(line.strip()) for line in processes.splitlines())}
 
 
 def check_controller_info(info) -> str:
@@ -200,7 +234,6 @@ class AndroidTarget:
         self.serial = check_controller_info(info)
         self.controller = controller
         self._shell_failures = 0
-        self._identity = None
 
     def _shell(self, command: str) -> str | None:
         # The device-input lock first, as everywhere (a tap's last checks hold it): a read that finds the device
@@ -255,13 +288,9 @@ class AndroidTarget:
 
     def identity(self) -> dict | None:
         """The connected guest: its serial and its boot id (a different guest behind the same forwarded address,
-        or the same guest rebooted, has another). Read once; None when the boot id cannot be read."""
-        if self._identity is None:
-            booted = boot_id(self._shell("cat /proc/sys/kernel/random/boot_id"))
-            if booted is None:
-                return None
-            self._identity = {"serial": self.serial, "boot_id": booted}
-        return dict(self._identity)
+        or the same guest rebooted, has another), read now; None when the boot id cannot be read."""
+        booted = boot_id(self._shell("cat /proc/sys/kernel/random/boot_id"))
+        return None if booted is None else {"serial": self.serial, "boot_id": booted}
 
     def hung(self) -> bool:
         return False

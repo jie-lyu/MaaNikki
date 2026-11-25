@@ -302,41 +302,62 @@ class RunnerTests(unittest.TestCase):
                 runner.check_unconfirmed(root, empty)
             self.assertFalse(marker.exists())
 
-    def test_a_left_marker_naming_this_device_is_cleared_when_the_device_reports_no_contact_held(self):
+    def test_a_left_marker_is_cleared_only_when_one_reading_shows_this_guest_settled(self):
         import tempfile
-        device = {"serial": "127.0.0.1:5555", "boot_id": "992f1bef-d353-4a1b-b401-b9867f884164"}
-        rebooted = {**device, "boot_id": "00000000" + device["boot_id"][8:]}
-        for content, reading, clear, cleared in (({"device": device}, "none", None, True),
-                                                 ({"device": device}, "injected", None, False),
-                                                 ({"device": device}, None, None, False),
-                                                 ({"device": rebooted}, "none", None, False),
-                                                 ({"device": {**device, "serial": "emulator-5554"}}, "none", None, False),
-                                                 ({"serial": device["serial"]}, "none", None, False),
-                                                 ({}, "none", None, False),
-                                                 # an explicit fingerprint that does not match refuses outright
-                                                 ({"device": device}, "none", "000000000000", False)):
-            with self.subTest(content=content, reading=reading, clear=clear), tempfile.TemporaryDirectory() as tmp:
+        serial = "127.0.0.1:5555"
+        boot = "992f1bef-d353-4a1b-b401-b9867f884164"
+        device = {"serial": serial, "boot_id": boot}
+        settled = {"boot_id": boot, "state": "none", "queued": False, "maatouch": False}
+        cases = (("settled", {"device": device}, settled, None, True),
+                 ("still held", {"device": device}, {**settled, "state": "injected"}, None, False),
+                 ("input still queued", {"device": device}, {**settled, "queued": True}, None, False),
+                 ("a MaaTouch helper running", {"device": device}, {**settled, "maatouch": True}, None, False),
+                 ("another guest behind the address", {"device": device}, {**settled, "boot_id": "0" * 8 + boot[8:]},
+                  None, False),
+                 ("unreadable", {"device": device}, None, None, False),
+                 ("another serial", {"device": {**device, "serial": "emulator-5554"}}, settled, None, False),
+                 ("old marker without a device", {"serial": serial}, settled, None, False),
+                 ("empty", {}, settled, None, False),
+                 ("a fingerprint that does not match", {"device": device}, settled, "000000000000", False))
+        for name, content, reading, clear, cleared in cases:
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 marker = root / "config" / "android-input" / "touch.json"
                 marker.parent.mkdir(parents=True)
                 marker.write_text(json.dumps({"pid": 1, "since": "2026-11-26T00:00:00+09:00", **content}))
                 fingerprint = runner.marker_fingerprint(marker.read_bytes())
                 read = Mock(return_value=reading)
-                eligible = content.get("device") == device and clear is None
+                eligible = content.get("device", {}).get("serial") == serial and clear is None
                 if runner.os.name == "nt" and eligible:
                     continue  # take_owner_lock needs fcntl
                 if cleared:
                     with patch("sys.stderr"):
-                        done = runner.check_unconfirmed(root, clear, read, lambda: device)
-                    self.assertEqual(done["cleared_by"], "device reports no contact held")
-                    self.assertEqual(done["marker"], fingerprint)
+                        done = runner.check_unconfirmed(root, clear, read, serial)
+                    self.assertTrue(done["cleared_by"].startswith("device reports this guest settled"))
+                    log = (root / "logs" / "android-input.jsonl").read_text(encoding="utf-8").splitlines()
+                    self.assertEqual([json.loads(line)["action"] for line in log], ["RecoverMarker"])
                 else:
                     with self.assertRaises(runner.RunnerError) as caught:
-                        runner.check_unconfirmed(root, clear, read, lambda: device)
+                        runner.check_unconfirmed(root, clear, read, serial)
                     self.assertIn(fingerprint, str(caught.exception))
                     self.assertIn("需要人来决定", str(caught.exception))
                 self.assertEqual(marker.exists(), not cleared)
-                self.assertEqual(read.call_count, int(eligible))  # the device is read only for a marker naming it
+                self.assertEqual(read.call_count, int(eligible))  # one reading, only for a marker naming the serial
+
+    @unittest.skipIf(runner.os.name == "nt", "take_owner_lock needs fcntl")
+    def test_a_recovery_that_cannot_be_logged_keeps_the_marker(self):
+        import tempfile
+        device = {"serial": "127.0.0.1:5555", "boot_id": "992f1bef-d353-4a1b-b401-b9867f884164"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / "config" / "android-input" / "touch.json"
+            marker.parent.mkdir(parents=True)
+            marker.write_text(json.dumps({"pid": 1, "device": device}))
+            (root / "logs").write_text("")  # a file where the log directory goes
+            reading = {"boot_id": device["boot_id"], "state": "none", "queued": False, "maatouch": False}
+            with self.assertRaises(runner.RunnerError):
+                runner.check_unconfirmed(root, None, lambda: reading, device["serial"])
+            self.assertTrue(marker.exists())
 
     def test_a_malformed_touch_line_is_flagged_not_hiding_later_rows(self):
         import datetime as dt
