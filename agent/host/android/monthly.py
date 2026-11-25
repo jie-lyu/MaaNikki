@@ -283,7 +283,7 @@ def run(rt) -> bool:
     claimed = None
     try:
         start = []
-        if not pages.to_hud(rt, rejected=lambda frame, reason: start.append((frame, reason))):
+        if not pages.to_hud(rt, rejected=lambda frame, reason: start.append((frame, reason)), single=True):
             for frame, reason in start:  # the screen the task would not start from (e.g. a reward layer)
                 rt.diagnostic("android_monthly_start", f"开始时不在大世界，也没法安全地回去：{reason}", image=frame)
             return fail(rt, "没能回到大世界")

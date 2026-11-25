@@ -14,15 +14,19 @@ title and 「本周限购0/1」 at its top right. The counter is what is left of
 All three gifts were sold out in that week, so a claimable card and the claim popup (商品详情) have never been seen:
 a claimable gift is only reported, never tapped.
 
-Every touch is a guarded tap or swipe decided and confirmed on fresh frames (pages.tap_on_page, pages.swipe_on_page):
-never next to a forbidden word (购买, ¥, 共鸣, 获取 ...), and the swipe points also never on or next to a price band
-(¥, bare digits, 免费: the whole band of the card, not only its text), on the 回到顶部 button, or (start point) on
-anything but empty list background: a swipe started in the narrow gap between two card columns once did not scroll,
-swipes started on empty background always did. The survey's 400 px swipes scrolled the list 480-670 px (it keeps
-moving after the lift), more than a card's height plus the visible list allows without skipping a card; these swipes
-are 250 px over 1 s (device run 1, 2026-11-26: one such swipe moved the list ~315 px, estimated from the frames,
-and its lift was confirmed on the device), and the list's measured movement is logged after every swipe; the frame
-the first list swipe was decided on is saved with the diagnostics.
+Every touch is a guarded tap or swipe decided and confirmed on fresh frames (pages.tap_shortcut from the HUD only,
+pages.tap_on_page, pages.swipe_on_page): never next to a forbidden word (购买, ¥, 共鸣, 获取 ...), and both swipe
+points also never on or next to a price band (¥, bare digits, 免费: the whole band of the card, not only its text), on
+the 回到顶部 button, or on anything but empty list background (so neither the press nor the lift is on a card): a
+swipe started in the narrow gap between two card columns once did not scroll, swipes started on empty background
+always did. The survey's 400 px swipes scrolled the list 480-670 px (it keeps moving after the lift), more than a
+card's height plus the visible list allows without skipping a card; these swipes are at most 250 px over 1 s (device
+run 1, 2026-11-26: one such swipe moved the list ~315 px, estimated from the frames, and its lift was confirmed on
+the device), shorter at the same speed where the empty background is not tall enough, and the list's measured
+movement is logged after every swipe; the frame the first list swipe was decided on is kept (keep_frame).
+
+The way to the HUD before the task taps each back arrow once and waits for that page to go before another
+(pages.to_hud with single=True).
 
 Waits forgive only frames that show nothing recognisable yet (pages.nothing_recognised, as in the monthly pass), and
 only briefly (TRANSITION_ALLOWANCE in a row); a positively recognised other screen (the quit dialog, a popup's close
@@ -71,15 +75,19 @@ LIMIT = (-20, -185, 150, 50)
 LIMIT_TEXT = re.compile(r"本周限购\s*(\d+)\s*/\s*(\d+)")
 
 # Swipe candidates: begin points on a grid over the whole list, lowest first and right to left within a row, each
-# swiped SWIPE_DISTANCE straight up; the end must stay inside the list (y >= LIST_TOP), so begins above y 310 never
-# qualify. Device run 1 stopped on a frame whose only empty background was x ~500-1180, y ~80-355 (above a section
-# header), where the old eight rows from y 360 found nothing.
+# swiped straight up by one of SWIPE_DISTANCES, the longest that fits anywhere first. Both ends must be empty list
+# background (blank), so neither the press nor the lift is on a card (review round 2: on c3-shop-gifts-00 and -02
+# the old begin-only check let 250 px strokes end inside the ¥68 and ¥198 cards). A full SWIPE_DISTANCE stroke needs
+# empty background ~310 px tall; c3-shop-gifts-02 (a row of four cards above a row of one) has only ~150 px, so a
+# shorter stroke is used there, at the same speed (SWIPE_MS per SWIPE_DISTANCE). Device run 1 stopped on a frame
+# whose only empty background was x ~500-1180, y ~80-355 (above a section header).
 SWIPE_XS = tuple(range(1150, 299, -30))
 SWIPE_BEGIN_YS = tuple(range(640, 79, -10))
 SWIPE_DISTANCE = 250
+SWIPE_DISTANCES = (250, 200, 150, 100, 80)
 SWIPE_MS = 1000
-MAX_SWIPES = 16
-# Empty list background around the begin point: a flat beige patch (saved frames: std of S and V <= 2, mean V ~235,
+MAX_SWIPES = 20
+# Empty list background around a swipe point: a flat beige patch (saved frames: std of S and V <= 2, mean V ~235,
 # mean S 36-80; cards, card images, edges and texts are far from flat).
 BLANK_HALF, BLANK_STD, BLANK_VALUE, BLANK_SATURATION = 30, 8, 190, 25
 # A price row excludes its card's whole band (cards are ~205 px wide, the text sits in the middle), plus the margin.
@@ -202,9 +210,10 @@ def blank(frame, point) -> bool:
 
 
 def points_clear(frame, recognize, begin, end, zones=None) -> bool:
-    """The begin point on empty list background, neither point in a price zone (zones read on this frame)."""
+    """Both points on empty list background (not on or within BLANK_HALF of a card) and in no price zone (zones
+    read on this frame)."""
     zones = price_zones(recognize) if zones is None else zones
-    if zones is None or not blank(frame, begin):
+    if zones is None or not (blank(frame, begin) and blank(frame, end)):
         return False
     return not any(_overlaps([px, py, 1, 1], zone) for px, py in (begin, end) for zone in zones)
 
@@ -216,25 +225,31 @@ def in_list(point) -> bool:
 
 
 def choose_swipe(frame, recognize, avoid=None):
-    """``(begin, end)`` of the first candidate whose begin is empty background, whose end is inside the list and
-    whose points are clear of every price zone and forbidden label on this frame (``avoid``: a begin point not to
-    use again, nor anything within 60 px of it), else None."""
+    """``(begin, end)`` of the first candidate (longest stroke first) whose points are both inside the list, both on
+    empty background and clear of every price zone and forbidden label on this frame (``avoid``: a begin point not
+    to use again, nor anything within 60 px of it), else None."""
     prices, forbidden = price_zones(recognize), forbidden_zones(recognize)
     if prices is None or forbidden is None:
         return None
-    for y in SWIPE_BEGIN_YS:
-        for x in SWIPE_XS:
-            begin, end = (x, y), (x, y - SWIPE_DISTANCE)
-            if not (in_list(begin) and in_list(end)):
-                continue
-            if avoid is not None and abs(x - avoid[0]) < 60 and abs(y - avoid[1]) < 60:
-                continue
-            if not points_clear(frame, recognize, begin, end, prices):
-                continue
-            if any(_overlaps([px, py, 1, 1], zone) for px, py in (begin, end) for zone in forbidden):
-                continue
-            return begin, end
+    for distance in SWIPE_DISTANCES:
+        for y in SWIPE_BEGIN_YS:
+            for x in SWIPE_XS:
+                begin, end = (x, y), (x, y - distance)
+                if not (in_list(begin) and in_list(end)):
+                    continue
+                if avoid is not None and abs(x - avoid[0]) < 60 and abs(y - avoid[1]) < 60:
+                    continue
+                if not points_clear(frame, recognize, begin, end, prices):
+                    continue
+                if any(_overlaps([px, py, 1, 1], zone) for px, py in (begin, end) for zone in forbidden):
+                    continue
+                return begin, end
     return None
+
+
+def stroke_ms(begin, end) -> int:
+    """The duration of a list stroke: SWIPE_MS per SWIPE_DISTANCE (the speed device run 1 confirmed)."""
+    return round(SWIPE_MS * abs(begin[1] - end[1]) / SWIPE_DISTANCE)
 
 
 def _grey(frame):
@@ -313,6 +328,19 @@ def read_gifts(recognize) -> dict:
 
 def on_gifts(frame, recognize) -> bool:
     return tab_state(frame, recognize) == "selected"
+
+
+def keep_frame(name, frame):
+    """Keep ``frame`` for a later look (UID masked) under debug/android_weekly, with no message and outside the
+    failure evidence (on_error), as it is taken on runs that go well too. Never raises."""
+    try:
+        from datetime import datetime
+        from app_paths import DATA_ROOT
+        from diagnostics import save_image
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        return save_image(DATA_ROOT / "debug/android_weekly" / f"{stamp}-{name}.jpg", frame)
+    except Exception:
+        return None
 
 
 def frame_now(rt):
@@ -472,13 +500,13 @@ def scan(rt):
             raise Stop("礼包列表上找不到可以安全开始滑动的空白处", [frame])
         begin, end = choice
         reference = frame
-        if swipes == 0:  # the list as the first swipe found it, for checking the start point afterwards
-            rt.diagnostic("android_weekly_before_first_swipe", f"第一次滑动礼包列表之前（{begin}→{end}）", image=frame)
+        if swipes == 0:  # the list as the first swipe found it, for checking the points afterwards
+            keep_frame("before_first_swipe", frame)
 
         def same_list(frame, recognize, reference=reference, begin=begin, end=end):
             return (on_gifts(frame, recognize) and list_diff(reference, frame) < UNCHANGED_DIFF
                     and points_clear(frame, recognize, begin, end))
-        if not swipe(rt, begin, end, SWIPE_MS, same_list):
+        if not swipe(rt, begin, end, stroke_ms(begin, end), same_list):
             return None
         swipes, last_begin = swipes + 1, begin
         what = f"每周免费礼包：第 {swipes} 次滑动礼包列表 {begin}→{end}"
@@ -520,11 +548,13 @@ def run(rt) -> bool:
     cards = None
     try:
         start = []
-        if not pages.to_hud(rt, rejected=lambda frame, reason: start.append((frame, reason))):
+        if not pages.to_hud(rt, rejected=lambda frame, reason: start.append((frame, reason)), single=True):
             for frame, reason in start:  # the screen the task would not start from (e.g. a popup)
                 rt.diagnostic("android_weekly_start", f"开始时不在大世界，也没法安全地回去：{reason}", image=frame)
             return fail(rt, "没能回到大世界")
-        if not rt.key("shop"):
+        # HUD only, one attempt: a quit dialog, a modal or any other screen on either tap frame stops (FrameMismatch,
+        # that frame saved); the named action (rt.key) would cancel a quit dialog and decide again.
+        if not pages.tap_shortcut(rt, "shop"):
             return False
         if not open_gifts(rt):
             return False
@@ -541,9 +571,10 @@ def run(rt) -> bool:
     except pages.FrameMismatch as error:  # a tap or swipe frame that was not the expected state: no retry
         return stopped(rt, str(error), [error.frame])
     except (pages.GuardRefusal, actions.ScreenUnrecognised, NavigationError) as error:
-        # Saved here: a diagnostic saved earlier in the run (the frame before the first list swipe) keeps the
-        # generic failure capture from saving this one.
-        return stopped(rt, str(error), [frame_now(rt)] if not rt.stopped else [])
+        # The refusing frame when the refusal carries it, else a fresh one (saved here, not left to the generic
+        # failure capture).
+        frame = getattr(error, "frame", None)
+        return stopped(rt, str(error), [frame] if frame is not None else [frame_now(rt)] if not rt.stopped else [])
     if claimable:
         return fail(rt, f"「{'」「'.join(claimable)}」没有领取")
     return True

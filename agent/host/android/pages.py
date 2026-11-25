@@ -36,7 +36,12 @@ class LayerMismatch(FrameMismatch):
 
 
 class GuardRefusal(PageMismatch):
-    """A forbidden word lies next to the point: the task stops all input (no navigation afterwards either)."""
+    """A forbidden word lies next to the point: the task stops all input (no navigation afterwards either).
+    ``frame``: the frame the word was read on, when known (the caller saves it)."""
+
+    def __init__(self, reason, frame=None):
+        super().__init__(reason)
+        self.frame = frame
 
 
 def screen_now(rt):
@@ -211,7 +216,7 @@ def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, 
             raise
         word = _forbidden_near(recognize, target)
         if word:
-            raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止")
+            raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止", decided)
         if (verify is not None and not verify(decided)) or (accept is not None and not accept(decided, recognize)):
             mismatch(f"「{title}」页面上要点的东西状态不对", screen, decided, recognize)
             raise PageMismatch(f"「{title}」页面上要点的东西状态不对")
@@ -230,7 +235,7 @@ def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, 
             continue
         word = _forbidden_near(recognize_b, confirmed)
         if word:
-            raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止")
+            raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止", confirming)
         if (verify is not None and not verify(confirming)) or \
                 (accept is not None and not accept(confirming, recognize_b)):
             mismatch(f"确认时「{title}」页面上要点的东西状态不对", fresh, confirming, recognize_b)
@@ -277,7 +282,7 @@ def swipe_on_page(rt, title: str, begin, end, *, duration: int, accept, delay: f
         for box in points:
             word = _forbidden_near(recognize, box)
             if word:
-                raise GuardRefusal(f"要滑动的地方旁边有「{word}」，没有滑动，任务停止")
+                raise GuardRefusal(f"要滑动的地方旁边有「{word}」，没有滑动，任务停止", decided)
         if not accept(decided, recognize):
             raise SwipeMismatch(f"「{title}」页面的状态不对，没有滑动", screen, decided, recognize)
         fresh, confirming, recognize_b = screen_now(rt)
@@ -290,7 +295,7 @@ def swipe_on_page(rt, title: str, begin, end, *, duration: int, accept, delay: f
         for box in points:
             word = _forbidden_near(recognize_b, box)
             if word:
-                raise GuardRefusal(f"要滑动的地方旁边有「{word}」，没有滑动，任务停止")
+                raise GuardRefusal(f"要滑动的地方旁边有「{word}」，没有滑动，任务停止", confirming)
         if not accept(confirming, recognize_b):
             raise SwipeMismatch(f"确认滑动时「{title}」页面的状态变了，没有滑动", fresh, confirming,
                                 recognize_b)
@@ -306,10 +311,17 @@ def swipe_on_page(rt, title: str, begin, end, *, duration: int, accept, delay: f
     raise PageMismatch(f"在「{title}」页面上连续 {rt.TOUCH_KEY_ATTEMPTS} 次没能在稳定的画面上确认要滑动的位置（焦点在变）")
 
 
-def to_hud(rt, attempts: int = 4, *, rejected=None) -> bool:
+LEAVE_PAGE_WAIT = 5  # seconds a page may stay on screen after its back arrow was tapped (single-attempt to_hud)
+
+
+def to_hud(rt, attempts: int = 4, *, rejected=None, single: bool = False) -> bool:
     """Back to the open-world HUD before a task: the back arrow, tapped through tap_on_page on the page that is
     showing (both tap frames, with the forbidden-label check); a modal, the quit dialog or an unrecognised screen
-    stops the task without a tap. ``rejected(frame, reason)``, when given, receives the frame it stopped on."""
+    stops the task without a tap. ``rejected(frame, reason)``, when given, receives the frame it stopped on.
+
+    ``single``: each back arrow is one attempt (tap_on_page with retry=False: a tap frame that is not that page
+    stops, with that frame), and no other back arrow is decided until fresh frames show the page gone (left_page):
+    a page still showing after LEAVE_PAGE_WAIT stops instead of being tapped again."""
     for _ in range(attempts):
         screen, frame, _ = screen_now(rt)
         if frame is None:
@@ -318,16 +330,100 @@ def to_hud(rt, attempts: int = 4, *, rejected=None) -> bool:
             reason = "焦点变了，这张截图作废"
         elif screen.kind == "hud":
             return True
-        elif screen.kind == "page":
+        elif screen.kind == "page" and not single:
             if tap_on_page(rt, screen.title, actions.BACK_ARROW):
                 continue
             return False
+        elif screen.kind == "page":
+            try:
+                if not tap_on_page(rt, screen.title, actions.BACK_ARROW, retry=False):
+                    return False
+            except FrameMismatch as error:
+                frame, reason = error.frame, str(error)
+            else:
+                left, frame = left_page(rt, screen.title)
+                if left:
+                    continue
+                if frame is None:
+                    return False
+                reason = f"点了「{screen.title}」的返回箭头之后，页面一直没有离开"
         else:
             reason = screen.reason or f"当前画面是{screen.kind}"
         if rejected is not None:
             rejected(frame, reason)
         return False
     return False
+
+
+def left_page(rt, title: str, seconds: float = LEAVE_PAGE_WAIT, step: float = .3):
+    """``(True, frame)`` once a fresh valid frame shows something recognised that is not the page titled exactly
+    ``title`` (frames of that page, and frames on which nothing at all is recognised yet, are waited through);
+    ``(False, frame)`` when the time runs out (the last frame looked at); ``(False, None)`` when the run stopped."""
+    import time
+    deadline, last = time.monotonic() + seconds, None
+    while not rt.stopped:
+        screen, frame, recognize = screen_now(rt)
+        if frame is None:
+            return False, None
+        if rt._frame_still_valid(frame):
+            last = frame
+            still = screen.kind == "page" and screen.title == title
+            if not still and not nothing_recognised(screen, recognize):
+                return True, frame
+        if time.monotonic() >= deadline:
+            return False, last if last is not None else frame
+        rt.pause(step)
+    return False, None
+
+
+def tap_shortcut(rt, action: str, *, delay: float = .35) -> bool:
+    """One tap on the HUD shortcut ``action`` (actions.HUD_SHORTCUTS), only from the HUD: decided on a fresh frame
+    that is the HUD with the shortcut found (actions.plan_tap), confirmed on a fresh frame (actions.confirm_tap), no
+    forbidden word near the point on either (forbidden_word_near, as the named actions), and sent with the
+    confirming frame. Unlike the named action (Runtime.key), it never cancels a quit dialog and never decides again
+    on a frame that disagrees: a tap frame that is not the HUD with the shortcut in place raises FrameMismatch with
+    that frame (nothing sent). False when the run stopped; GuardRefusal next to a forbidden word. Only a frame
+    voided by a focus change is decided again."""
+    from task_control import ForegroundChanged
+    name = actions.ACTION_NAMES[action]
+    if action not in actions.HUD_SHORTCUTS:
+        raise ValueError(action)
+    for _attempt in range(rt.TOUCH_KEY_ATTEMPTS):
+        screen, decided, recognize = screen_now(rt)
+        if decided is None:
+            return False
+        if not rt._frame_still_valid(decided):
+            continue
+        if screen is None or screen.kind != "hud":
+            raise FrameMismatch(f"要点「{name}」快捷入口时画面不是大世界", screen, decided, recognize)
+        try:
+            plan = actions.plan_tap(action, screen, recognize)
+        except actions.ScreenUnrecognised as error:
+            raise FrameMismatch(str(error), screen, decided, recognize) from error
+        word = forbidden_word_near(recognize, plan.target)
+        if word:
+            raise GuardRefusal(f"「{name}」快捷入口旁边有「{word}」，没有点，任务停止", decided)
+        fresh, confirming, recognize_b = screen_now(rt)
+        if confirming is None:
+            return False
+        if not (rt._frame_still_valid(decided) and rt._frame_still_valid(confirming)):
+            continue
+        target = actions.confirm_tap(plan, screen, recognize_b)
+        if target is None:
+            raise FrameMismatch(f"确认时画面已经不是大世界，或「{name}」快捷入口不在原处", fresh, confirming,
+                                recognize_b)
+        word = forbidden_word_near(recognize_b, target)
+        if word:
+            raise GuardRefusal(f"「{name}」快捷入口旁边有「{word}」，没有点，任务停止", confirming)
+        if not (rt._frame_still_valid(decided) and rt._frame_still_valid(confirming)):
+            continue
+        try:
+            if not rt.action("Click", target=target, source_frame=confirming):
+                return False
+        except ForegroundChanged:
+            continue
+        return rt.pause(delay)
+    raise PageMismatch(f"连续 {rt.TOUCH_KEY_ATTEMPTS} 次没能在稳定的画面上确认「{name}」快捷入口（焦点在变）")
 
 
 def back_through(rt, titles, attempts: int = 3) -> bool:
@@ -362,7 +458,7 @@ def tap_on_layer(rt, what: str, accept, point, *, delay: float = .5) -> bool:
             raise LayerMismatch(f"当前画面不是{what}", screen, decided, recognize)
         word = _forbidden_near(recognize, box)
         if word:
-            raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止")
+            raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止", decided)
         if not rt._frame_still_valid(decided):
             continue
         fresh, confirming, recognize_b = screen_now(rt)
@@ -372,7 +468,7 @@ def tap_on_layer(rt, what: str, accept, point, *, delay: float = .5) -> bool:
             raise LayerMismatch(f"确认时画面已经不是{what}", fresh, confirming, recognize_b)
         word = _forbidden_near(recognize_b, box)
         if word:
-            raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止")
+            raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止", confirming)
         if not (rt._frame_still_valid(decided) and rt._frame_still_valid(confirming)):
             continue
         try:

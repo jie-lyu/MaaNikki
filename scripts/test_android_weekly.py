@@ -27,6 +27,8 @@ GOLD = (70, 150, 200)
 TAB_BOX = [82, 335, 95, 28]
 BACK_BOX = [37, 22, 40, 40]
 HUD = Screen("hud", {"duck": [30, 18, 54, 54]})
+SHORTCUT = [655, 48]  # the 商城 shortcut on the HUD
+SHORTCUT_MARK = "test:shortcut"  # answered only by a frame of the scripted HUD with the shortcut in place
 SHOP = Screen("page", {"back": BACK_BOX}, title="商城")
 
 
@@ -82,12 +84,15 @@ class Game:
         self.stuck, self.where, self.offset = stuck, start, 0
         self.screens, self.forbidden, self.prices = dict(screens or {}), list(forbidden), list(prices)
         self.touches, self.swipes, self.tab_error = [], 0, tab_error
+        self.shortcuts = 0  # shortcut taps (kept out of ``touches``, which ``screens`` counts)
 
     def titles(self):
         return {name: [g["x"] - 45, g["y"] - self.offset, 90, 28] for name, g in self.gifts.items()
                 if shop.LIST_TOP <= g["y"] - self.offset <= 700}
 
     def recognize(self, node, override=None):
+        if node == SHORTCUT_MARK:
+            return result([row("商城", SHORTCUT + [1, 1])]) if self.where == "hud" else MISS
         if node == pages.FORBIDDEN:
             return result(self.forbidden)
         if node == shop.PRICE_GUARD:
@@ -142,6 +147,10 @@ class Game:
                     self.offset = min(self.end, self.offset + self.step)
             return True
         target = fields["target"]
+        if target == SHORTCUT:
+            assert self.where == "hud"
+            self.shortcuts += 1
+            return self.key("shop")
         if target == TAB_BOX:
             self.touches.append("tab")
             self.where = "gifts"
@@ -176,13 +185,33 @@ def stop_diagnostics(rt):
     return [c for c in rt.diagnostic.call_args_list if c.args[0].startswith("android_weekly_stop_")]
 
 
+def plan_shortcut(action, screen, recognize):
+    """actions.plan_tap for the scripted HUD: the shortcut where the frame says it is."""
+    assert action == "shop" and screen.kind == "hud"
+    found = recognize(SHORTCUT_MARK)
+    if not actions._hit(found):
+        raise actions.ScreenUnrecognised("大世界的快捷栏上找不到「商城」")
+    return actions.Plan(list(found.box[:2]), "label", True, "商城", SHORTCUT[0])
+
+
+def confirm_shortcut(plan, screen, recognize):
+    """actions.confirm_tap for the scripted HUD: only a frame that shows the shortcut in the same place."""
+    found = recognize(SHORTCUT_MARK)
+    return list(found.box[:2]) if actions._hit(found) and list(found.box[:2]) == plan.target else None
+
+
 def play(game):
-    rt = SimpleNamespace(stopped=False, logs=[], key=game.key, _frame_still_valid=Mock(return_value=True),
-                         pause=Mock(return_value=True), diagnostic=Mock(), TOUCH_KEY_ATTEMPTS=3, action=game.action)
+    rt = SimpleNamespace(stopped=False, logs=[], key=Mock(side_effect=AssertionError("no named action")),
+                         _frame_still_valid=Mock(return_value=True), pause=Mock(return_value=True),
+                         diagnostic=Mock(), TOUCH_KEY_ATTEMPTS=3, action=game.action)
     rt.log = rt.logs.append
     with patch.object(pages, "screen_now", side_effect=game.screen_now), \
+            patch.object(actions, "plan_tap", side_effect=plan_shortcut), \
+            patch.object(actions, "confirm_tap", side_effect=confirm_shortcut), \
+            patch.object(shop, "keep_frame") as kept, \
             patch("time.monotonic", side_effect=itertools.count(0, .25).__next__):
         outcome = shop.run(rt)
+    rt.kept = kept
     return outcome, rt
 
 
@@ -205,8 +234,11 @@ class FlowTests(unittest.TestCase):
         moved = [line for line in rt.logs if "次滑动礼包列表" in line]
         self.assertEqual(len(moved), game.swipes)  # the movement is logged after every list swipe
         self.assertIn("列表移动 300 像素", moved[0])
-        self.assertEqual([c.args[0] for c in rt.diagnostic.call_args_list],
-                         ["android_weekly_before_first_swipe"])  # only the frame before the first list swipe
+        self.assertEqual(rt.diagnostic.call_args_list, [])  # no failure evidence on a run that goes well
+        (name, _frame), = [c.args for c in rt.kept.call_args_list]  # the frame before the first list swipe is kept
+        self.assertEqual(name, "before_first_swipe")
+        self.assertEqual(game.shortcuts, 1)
+        self.assertEqual(rt.key.call_count, 0)  # never the named action, which would cancel a quit dialog
 
     def test_a_claimable_gift_is_reported_never_tapped_and_the_shop_is_left(self):
         gifts = sold_out_week()
@@ -302,6 +334,20 @@ class FlowTests(unittest.TestCase):
         saved, = stop_diagnostics(rt)
         self.assertIs(saved.kwargs["image"], unselected[1])
 
+    def test_a_forbidden_word_on_a_swipe_confirming_frame_saves_that_frame(self):
+        # Review round 2 finding 4: the refusal carries its frame; not the next clean one.
+        game = Game()
+        settle = [(SHOP, list_frame(300), game.recognize)] * 3  # settled (two frames), the deciding frame
+        image = list_frame(300)
+        words = lambda node, override=None: result([row("购买", [shop.LIST[0], 120, shop.LIST[2], 580])]) \
+            if node == pages.FORBIDDEN else game.recognize(node, override)  # noqa: E731
+        game.screens = {3: settle + [(SHOP, image, words)]}
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.swipes, 1)
+        saved, = stop_diagnostics(rt)
+        self.assertIs(saved.kwargs["image"], image)
+
     def test_leaving_needs_the_gifts_tab_still_selected(self):
         game = Game(ALL_VISIBLE)
         gifts = (SHOP, list_frame(0), game.recognize)
@@ -362,7 +408,7 @@ class FlowTests(unittest.TestCase):
         self.assertFalse(outcome)
         self.assertEqual(game.touches[-1], "back")
         names = [c.args[0] for c in rt.diagnostic.call_args_list]
-        self.assertEqual(names, ["android_weekly_before_first_swipe", "android_weekly_stop_0"])
+        self.assertEqual(names, ["android_weekly_stop_0"])
         self.assertIs(stop_diagnostics(rt)[0].kwargs["image"], POPUP[1])
 
     def test_a_tab_recognition_that_could_not_run_allows_no_sidebar_swipe(self):
@@ -374,7 +420,7 @@ class FlowTests(unittest.TestCase):
 
     def test_no_safe_place_to_start_a_swipe_sends_nothing(self):
         # A forbidden word next to every candidate column: the list is not swiped at all.
-        words = [row("购买", list(shop.LIST))]
+        words = [row("购买", [shop.LIST[0], 120, shop.LIST[2], 580])]  # clear of the shortcut, the tab and the left list
         game = Game(forbidden=words)
         outcome, rt = play(game)
         self.assertFalse(outcome)
@@ -400,6 +446,86 @@ class FlowTests(unittest.TestCase):
         self.assertTrue(outcome)
         self.assertNotIn("tab", game.touches)
         self.assertFalse(any(t[1][0] < shop.LIST[0] for t in game.touches if isinstance(t, tuple)))
+
+
+class EntryRecoveryTests(unittest.TestCase):
+    """The way into the shop (review round 2): the HUD shortcut only from the HUD, one attempt; the way back to the
+    HUD before the task taps each back arrow once and waits for the page to go."""
+
+    def hud(self, game, recognize=None, image=None):
+        return HUD, np.zeros((720, 1280, 3), np.uint8) if image is None else image, recognize or game.recognize
+
+    def test_the_shortcut_never_cancels_a_quit_dialog_or_passes_a_modal(self):
+        modal = (Screen("modal", {"close": [929, 177, 36, 36]}, title="兑换奖励"), np.full((720, 1280, 3), 9, np.uint8),
+                 lambda node, override=None: MISS)
+        for label, frames in (("quit on the deciding frame", lambda g: [self.hud(g), QUIT]),
+                              ("quit on the confirming frame", lambda g: [self.hud(g), self.hud(g), QUIT]),
+                              ("modal on the confirming frame", lambda g: [self.hud(g), self.hud(g), modal])):
+            with self.subTest(label):
+                game = Game()
+                shown = frames(game)
+                game.screens = {0: list(shown)}
+                outcome, rt = play(game)
+                self.assertFalse(outcome)
+                self.assertEqual((game.touches, game.shortcuts), ([], 0))  # neither 取消 nor the shortcut
+                saved, = stop_diagnostics(rt)
+                self.assertIs(saved.kwargs["image"], shown[-1][1])
+
+    def test_a_forbidden_word_by_the_shortcut_saves_the_refusing_frame(self):
+        game = Game()
+        image = np.full((720, 1280, 3), 5, np.uint8)
+        words = lambda node, override=None: result([row("购买", [640, 70, 40, 20])]) \
+            if node == pages.FORBIDDEN else game.recognize(node, override)  # noqa: E731
+        game.screens = {0: [self.hud(game), self.hud(game), self.hud(game, words, image)]}
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.shortcuts, 0)
+        saved, = stop_diagnostics(rt)
+        self.assertIs(saved.kwargs["image"], image)
+
+    def test_a_restart_in_the_open_shop_taps_back_once_then_runs(self):
+        game = Game(start="gifts")
+        outcome, rt = play(game)
+        self.assertTrue(outcome)
+        self.assertEqual(game.touches[0], "back")
+        self.assertEqual(game.touches.count("back"), 2)  # the recovery and the way back after the scan
+        self.assertEqual(game.shortcuts, 1)
+
+    def test_a_shop_still_showing_after_its_back_arrow_is_not_tapped_again(self):
+        # Review round 2 replay: the first back arrow did not take (yet); the next check still sees the shop.
+        game = Game(start="gifts")
+        still = [(SHOP, list_frame(0), game.recognize) for _ in range(60)]
+        game.screens = {1: list(still)}
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.touches, ["back"])
+        saved, = rt.diagnostic.call_args_list
+        self.assertEqual(saved.args[0], "android_weekly_start")
+        self.assertTrue(any(saved.kwargs["image"] is frame[1] for frame in still))
+
+    def test_a_modal_on_a_back_arrow_tap_frame_stops_with_that_frame(self):
+        game = Game(start="gifts")
+        modal = (Screen("modal", {"close": [929, 177, 36, 36]}, title="兑换奖励"), np.full((720, 1280, 3), 9, np.uint8),
+                 lambda node, override=None: MISS)
+        shop_frame = (SHOP, list_frame(0), game.recognize)
+        game.screens = {0: [shop_frame, shop_frame, modal]}  # to_hud's look, the deciding frame, the confirming one
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.touches, [])
+        saved, = rt.diagnostic.call_args_list
+        self.assertEqual(saved.args[0], "android_weekly_start")
+        self.assertIs(saved.kwargs["image"], modal[1])
+
+    def test_without_single_to_hud_keeps_its_old_behaviour(self):
+        # The default (the mailbox) is unchanged: back arrows with the retrying tap, no wait for the page to go.
+        rt = SimpleNamespace(stopped=False, _frame_still_valid=Mock(return_value=True))
+        frames = iter([(SHOP, "a", None), (HUD, "b", None)])
+        with patch.object(pages, "screen_now", side_effect=lambda rt: next(frames)), \
+                patch.object(pages, "tap_on_page", return_value=True) as tap, \
+                patch.object(pages, "left_page") as left:
+            self.assertTrue(pages.to_hud(rt))
+        tap.assert_called_once_with(rt, "商城", actions.BACK_ARROW)
+        left.assert_not_called()
 
 
 class CardTests(unittest.TestCase):
@@ -468,9 +594,9 @@ class SwipePointTests(unittest.TestCase):
         frame[520:700, 950:1120] = (250, 250, 250)  # a card's white panel over the lower empty column
         recognize = lambda node, override=None: MISS  # noqa: E731
         self.assertFalse(shop.blank(frame, (1060, 640)))
-        begin, _end = shop.choose_swipe(frame, recognize)
-        self.assertTrue(shop.blank(frame, begin))
-        self.assertFalse(950 - 30 <= begin[0] <= 1120 + 30 and begin[1] >= 520 - 30, begin)  # not on the panel
+        begin, end = shop.choose_swipe(frame, recognize)
+        self.assertTrue(shop.blank(frame, begin) and shop.blank(frame, end))
+        self.assertFalse(950 - 30 < begin[0] < 1120 + 30 and begin[1] > 520 - shop.BLANK_HALF, begin)  # not on it
         frame[60:720, 240:1240] = BACKGROUND  # an empty list: the lowest begin right of centre, clear of 回到顶部
         self.assertEqual(shop.choose_swipe(frame, recognize), ((1060, 640), (1060, 390)))
         self.assertEqual(shop.choose_swipe(frame, recognize, avoid=(1060, 640)), ((1000, 640), (1000, 390)))
@@ -478,8 +604,26 @@ class SwipePointTests(unittest.TestCase):
         frame[340:720, 240:1240] = (250, 250, 250)  # the begin's 60 px patch fits only at y 310 and above
         begin, end = shop.choose_swipe(frame, recognize)
         self.assertEqual((begin[1], end[1]), (shop.LIST_TOP + shop.SWIPE_DISTANCE, shop.LIST_TOP))
+        # Not tall enough for a full stroke: a shorter one, at the same speed.
         frame[330:720, 240:1240] = (250, 250, 250)
+        begin, end = shop.choose_swipe(frame, recognize)
+        self.assertEqual((begin, end), ((1150, 300), (1150, 100)))
+        self.assertEqual(shop.stroke_ms(begin, end), 800)
+        frame[160:720, 240:1240] = (250, 250, 250)  # no room even for the shortest stroke
         self.assertIsNone(shop.choose_swipe(frame, recognize))
+
+    def test_the_end_point_must_be_empty_background_too(self):
+        # Review round 2: the stroke's lift must not land on a card either (c3-shop-gifts-00 and -02 on the device).
+        frame = list_frame(0)
+        frame[60:720, 240:1240] = BACKGROUND
+        frame[330:450, 300:1240] = (250, 250, 250)  # a row of cards above the empty lower part of the list
+        recognize = lambda node, override=None: MISS  # noqa: E731
+        self.assertFalse(shop.points_clear(frame, recognize, (1060, 640), (1060, 390), []))
+        begin, end = shop.choose_swipe(frame, recognize)
+        self.assertEqual(begin[1] - end[1], shop.SWIPE_DISTANCE)
+        for point in (begin, end):
+            self.assertTrue(shop.blank(frame, point), point)
+            self.assertFalse(330 - shop.BLANK_HALF < point[1] < 450 + shop.BLANK_HALF, point)
 
     def test_a_failed_check_offers_no_swipe(self):
         self.assertIsNone(shop.choose_swipe(list_frame(0), lambda node, override=None: None))
@@ -657,6 +801,9 @@ frames = {
     "claimable": compose(selected, [(claimable, 733, 285), (currency, 270, 285)]),
     "tab unselected": compose(unselected, []),
     "run 1 stop": compose(selected, [(stop_list, 250, 60)]),
+    # A full row of cards above empty list (as c3-shop-gifts-00/-02, where a 250 px stroke from the empty part
+    # ended inside a paid card): the stroke must end on the empty part too.
+    "card row": compose(selected, [(currency, x, 180) for x in (270, 500, 733, 962)]),
 }
 frames["run 1 stop"][420:720, 250:1240] = 250  # below the crop: white card panels, not background
 current, results = {}, {}
@@ -735,10 +882,10 @@ class FrameworkTests(unittest.TestCase):
                          "星实置业之礼": ["sold_out", "免费", True, [0, 1]]},
             "hongji row": {"虹迹赠礼": ["sold_out", "免费", True, [0, 1]]},
             "claimable": {"虹迹赠礼": ["claimable", "免费", False, [10, 10]]},
-            "tab unselected": {}, "run 1 stop": {}})
+            "tab unselected": {}, "run 1 stop": {}, "card row": {}})
         self.assertEqual({name: value["tab"] for name, value in outcome.items()},
                          {"list end": "selected", "hongji row": "selected", "claimable": "selected",
-                          "tab unselected": "unselected", "run 1 stop": "selected"})
+                          "tab unselected": "unselected", "run 1 stop": "selected", "card row": "selected"})
         for value in outcome.values():
             x, y = value["tab_tap"]
             self.assertLessEqual(max(abs(x - 129), abs(y - 348)), 6)  # the survey tapped (130,350)
@@ -762,6 +909,11 @@ class FrameworkTests(unittest.TestCase):
         self.assertTrue(500 <= begin[0] <= 1180 and 310 <= begin[1] <= 360, begin)
         self.assertGreaterEqual(end[1], shop.LIST_TOP)
         self.assertIn("¥", "".join(outcome["run 1 stop"]["forbidden"]) + "".join(outcome["run 1 stop"]["prices"]))
+        # Below the row of cards (y 180-430): both ends on the empty part, so a shorter stroke.
+        begin, end, refused = outcome["card row"]["swipe"]
+        self.assertEqual(refused, [None, None])
+        self.assertGreaterEqual(end[1], 430 + shop.BLANK_HALF)
+        self.assertLess(begin[1] - end[1], shop.SWIPE_DISTANCE)
 
 
 if __name__ == "__main__":
