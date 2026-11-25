@@ -35,16 +35,18 @@ def button_state(frame) -> tuple[str, float, float]:
 
 
 def to_hud(rt, attempts: int = 4) -> bool:
-    """Leave pages until the open-world HUD shows (each leave decided on its own frames)."""
+    """Back to the open-world HUD before the task: the back arrow, tapped through tap_on_page on the page that is
+    showing (both tap frames, with the forbidden-label check); a modal, the quit dialog or an unrecognised screen
+    stops the task without a tap."""
     for _ in range(attempts):
         screen, frame, _ = pages.screen_now(rt)
-        if frame is None:
+        if frame is None or not rt._frame_still_valid(frame):
             return False
-        if screen.kind == "hud" and rt._frame_still_valid(frame):
+        if screen.kind == "hud":
             return True
-        if not rt.leave_page():
+        if screen.kind != "page" or not pages.tap_on_page(rt, screen.title, actions.BACK_ARROW):
             return False
-    return pages.wait_for(rt, lambda screen: screen.kind == "hud", 3) is not None
+    return False
 
 
 def back_from_mail(rt, attempts: int = 3) -> bool:

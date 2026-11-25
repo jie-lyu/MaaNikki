@@ -265,38 +265,42 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(children[0].calls, ["wait", "terminate", "wait", "kill", "wait"])
         self.assertEqual((records[0]["status"], records[0]["agent_exit"]), ("error", "unreaped"))
 
-    def test_a_left_unconfirmed_touch_blocks_the_runner_until_cleared(self):
+    def test_a_left_unconfirmed_touch_stops_the_runner_until_cleared_by_its_fingerprint(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            runner.check_unconfirmed(root, False)  # nothing left: fine
+            runner.check_unconfirmed(root, None)  # nothing left: fine
             marker = root / "config" / "android-input" / "touch.json"
             marker.parent.mkdir(parents=True)
             marker.write_text(json.dumps({"pid": 1, "since": "2026-11-25T23:00:00+09:00"}))
+            fingerprint = runner.marker_fingerprint(marker.read_bytes())
             with self.assertRaises(runner.RunnerError) as caught:
-                runner.check_unconfirmed(root, False)
-            self.assertIn("--clear-unconfirmed", str(caught.exception))
-            self.assertIn("adb kill-server", str(caught.exception))
+                runner.check_unconfirmed(root, None)
+            self.assertIn(fingerprint, str(caught.exception))
+            self.assertIn("需要人来决定", str(caught.exception))
+            with self.assertRaises(runner.RunnerError):
+                runner.check_unconfirmed(root, "000000000000")  # the wrong fingerprint
             self.assertTrue(marker.exists())
-            if runner.os.name != "nt":
-                original = marker.read_bytes
-                calls = []
-
-                def replaced(*args):
-                    calls.append(1)
-                    if len(calls) == 2:  # another run left a new marker between inspection and the lock
-                        marker.write_text(json.dumps({"pid": 2, "since": "2026-11-25T23:59:00+09:00"}))
-                    return original()
-                with patch.object(type(marker), "read_bytes", lambda self: replaced()), \
-                        self.assertRaises(runner.RunnerError):
-                    runner.check_unconfirmed(root, True)
-                self.assertTrue(marker.exists())  # the new one is kept
-                marker.write_text(json.dumps({"pid": 1, "since": "2026-11-25T23:00:00+09:00"}))
-            if runner.os.name != "nt":
-                with patch("sys.stderr"):
-                    runner.check_unconfirmed(root, True)
-                self.assertFalse(marker.exists())
-                self.assertTrue((marker.parent / "owner.lock").exists())  # the lock file is kept
+            if runner.os.name == "nt":
+                return  # take_owner_lock needs fcntl
+            # A later run's marker B replaced the inspected marker A: A's fingerprint does not clear B.
+            marker.write_text(json.dumps({"pid": 2, "since": "2026-11-25T23:59:00+09:00"}))
+            with self.assertRaises(runner.RunnerError):
+                runner.check_unconfirmed(root, fingerprint)
+            self.assertTrue(marker.exists())
+            with patch("sys.stderr"):
+                runner.check_unconfirmed(root, runner.marker_fingerprint(marker.read_bytes()))
+            self.assertFalse(marker.exists())
+            self.assertTrue((marker.parent / "owner.lock").exists())  # the lock file is kept
+            # An empty marker (agent killed while creating it) has a stable fingerprint and can be cleared.
+            marker.write_bytes(b"")
+            empty = runner.marker_fingerprint(b"")
+            with self.assertRaises(runner.RunnerError) as caught:
+                runner.check_unconfirmed(root, None)
+            self.assertIn(empty, str(caught.exception))
+            with patch("sys.stderr"):
+                runner.check_unconfirmed(root, empty)
+            self.assertFalse(marker.exists())
 
     def test_a_malformed_touch_line_is_flagged_not_hiding_later_rows(self):
         import datetime as dt

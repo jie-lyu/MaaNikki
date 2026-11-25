@@ -285,26 +285,38 @@ def run(args) -> int:
     return 0 if record.get("status") == "succeeded" else 1
 
 
-RELEASE_ADVICE = ("看画面不能证明所有触点都已抬起。先重启 ADB server（adb kill-server; adb start-server）：设备上的 Maatouch "
-                  "进程随 ADB 会话结束，它的虚拟触摸设备被移除（推断这会抬起它的所有触点）；再跑一次 probe.py bgcheck，"
-                  "打开和关闭奇想日历都成功，才加 --clear-unconfirmed 重跑。")
+RELEASE_ADVICE = ("没有办法从这里证明那个触点已经抬起（Maatouch 用 InputManager 注入事件，重启 ADB 或看画面都证明不了），"
+                  "所以运行器停下，需要人来决定：先报告协调者或维护者；确认可以继续时，用 --clear-unconfirmed 加上上面的指纹重跑。")
 
 
-def check_unconfirmed(data_root: Path, clear: bool) -> None:
+def marker_fingerprint(raw: bytes) -> str:
+    """A short identity of a marker's raw bytes (an empty marker, left by an agent killed while creating it, has one
+    too)."""
+    import hashlib
+    return hashlib.sha256(raw).hexdigest()[:12]
+
+
+def check_unconfirmed(data_root: Path, clear: str | None) -> None:
     """The runner is the recovery boundary for its own data root, as MaaNikki's start is for the client's: a touch
-    marker left by an earlier run (a touch that was never confirmed released) refuses the run until the operator has
-    established release (RELEASE_ADVICE) and passes --clear-unconfirmed. Only the marker that was inspected is
-    cleared: its bytes are compared again under the agent's owner lock."""
+    marker left by an earlier run (a touch that was never confirmed released) stops the runner until a person has
+    decided (RELEASE_ADVICE). Clearing names the marker by the fingerprint printed with the refusal and is checked
+    against the marker's bytes under the agent's owner lock, so a different, later marker is never cleared."""
     marker = data_root / "config" / "android-input" / "touch.json"
     if not marker.exists():
         return
     try:
-        inspected = marker.read_bytes()
-        since = json.loads(inspected.decode("utf-8")).get("since")
-    except (OSError, ValueError):
-        inspected, since = None, None
-    if not clear:
-        raise RunnerError(f"上一次运行留下了没有确认抬起的触摸（{since or '时间不明'}，{marker}）。{RELEASE_ADVICE}")
+        raw = marker.read_bytes()
+    except OSError as error:
+        raise RunnerError(f"读不了留下的触摸标记 {marker}：{error}") from None
+    fingerprint = marker_fingerprint(raw)
+    try:
+        since = json.loads(raw.decode("utf-8")).get("since")
+    except (ValueError, UnicodeDecodeError, AttributeError):
+        since = None
+    if clear != fingerprint:
+        named = "" if clear is None else f"（给的指纹 {clear} 对不上）"
+        raise RunnerError(f"上一次运行留下了没有确认抬起的触摸{named}：{marker}，时间 {since or '不明'}，指纹 {fingerprint}。"
+                          f"{RELEASE_ADVICE}")
     sys.path.insert(0, str(ROOT / "agent"))
     from host import UnsupportedInput, take_owner_lock
     try:
@@ -316,12 +328,12 @@ def check_unconfirmed(data_root: Path, clear: bool) -> None:
             current = marker.read_bytes()
         except FileNotFoundError:
             return  # already gone
-        if inspected is None or current != inspected:
-            raise RunnerError("触摸标记在检查之后变了（可能有另一次运行留下了新的），没有清除；请重新检查后再试。")
+        if marker_fingerprint(current) != clear:
+            raise RunnerError("触摸标记已经不是指纹对应的那个了（可能有另一次运行留下了新的），没有清除。")
         marker.unlink()
     finally:
         handle.close()
-    print(f"已清除上一次没有确认的触摸标记（{since or '时间不明'}）", file=sys.stderr)
+    print(f"已清除指纹 {clear} 的触摸标记（{since or '时间不明'}）", file=sys.stderr)
 
 
 def stop_tasker(tasker) -> bool:
@@ -411,8 +423,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--purpose", required=True, help="why this run; recorded with it")
     p.add_argument("--data-root", default=str(DEFAULT_DATA), help="the agent's data root (not the client's)")
     p.add_argument("--timeout", type=float, default=600, help="seconds the task may run")
-    p.add_argument("--clear-unconfirmed", action="store_true",
-                   help="after checking the device, clear a touch marker an earlier run left unconfirmed")
+    p.add_argument("--clear-unconfirmed", metavar="FINGERPRINT", default=None,
+                   help="after a person decided, clear the left-over touch marker with this fingerprint")
     p.set_defaults(func=run)
     sub.add_parser("tasks", help="entries the Android interface offers").set_defaults(func=list_tasks)
     return parser

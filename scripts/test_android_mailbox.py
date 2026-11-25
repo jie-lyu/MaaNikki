@@ -182,6 +182,25 @@ class MailboxTests(unittest.TestCase):
             with self.assertRaises(DeviceUnreachable):
                 self.run_flow("disabled", after=())
 
+    def test_the_way_to_the_hud_at_the_start_is_guarded_too(self):
+        rt = SimpleNamespace(stopped=False, _frame_still_valid=Mock(return_value=True))
+        shop = (page("商城"), np.zeros((720, 1280, 3), np.uint8), lambda *a: MISS)
+        hud = (Screen("hud", {"duck": [30, 18, 54, 54]}), np.zeros((720, 1280, 3), np.uint8), lambda *a: MISS)
+        frames = iter([shop, hud])
+        with patch.object(pages, "screen_now", side_effect=lambda rt_: next(frames)), \
+                patch.object(pages, "tap_on_page", return_value=True) as tap:
+            self.assertTrue(mailbox.to_hud(rt))
+        tap.assert_called_once_with(rt, "商城", actions.BACK_ARROW)  # the guarded page tap, not leave_page
+        modal = (Screen("modal", {"close": [929, 177, 36, 36]}, title="兑换奖励"), hud[1], lambda *a: MISS)
+        with patch.object(pages, "screen_now", return_value=modal), patch.object(pages, "tap_on_page") as tap:
+            self.assertFalse(mailbox.to_hud(rt))
+        tap.assert_not_called()
+        # 删除已读 beside the arrow: the guarded tap refuses, at the start as at the end.
+        with patch.object(pages, "screen_now", return_value=shop), \
+                patch.object(pages, "tap_on_page", side_effect=pages.GuardRefusal("要点的地方旁边有「删除已读」")):
+            with self.assertRaises(pages.GuardRefusal):
+                mailbox.to_hud(rt)
+
     def test_the_way_back_only_leaves_mail_and_menu_pages(self):
         rt = SimpleNamespace(stopped=False, _frame_still_valid=Mock(return_value=True))
         shop = (page("商城"), np.zeros((720, 1280, 3), np.uint8), lambda *a: MISS)
