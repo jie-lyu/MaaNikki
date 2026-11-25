@@ -304,34 +304,39 @@ class RunnerTests(unittest.TestCase):
 
     def test_a_left_marker_naming_this_device_is_cleared_when_the_device_reports_no_contact_held(self):
         import tempfile
-        serial = "127.0.0.1:5555"
-        for content, reading, cleared in (({"serial": serial}, "none", True),
-                                          ({"serial": serial}, "injected", False),
-                                          ({"serial": serial}, None, False),
-                                          ({"serial": "emulator-5554"}, "none", False),
-                                          ({}, "none", False)):
-            with self.subTest(content=content, reading=reading), tempfile.TemporaryDirectory() as tmp:
+        device = {"serial": "127.0.0.1:5555", "boot_id": "992f1bef-d353-4a1b-b401-b9867f884164"}
+        rebooted = {**device, "boot_id": "00000000" + device["boot_id"][8:]}
+        for content, reading, clear, cleared in (({"device": device}, "none", None, True),
+                                                 ({"device": device}, "injected", None, False),
+                                                 ({"device": device}, None, None, False),
+                                                 ({"device": rebooted}, "none", None, False),
+                                                 ({"device": {**device, "serial": "emulator-5554"}}, "none", None, False),
+                                                 ({"serial": device["serial"]}, "none", None, False),
+                                                 ({}, "none", None, False),
+                                                 # an explicit fingerprint that does not match refuses outright
+                                                 ({"device": device}, "none", "000000000000", False)):
+            with self.subTest(content=content, reading=reading, clear=clear), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 marker = root / "config" / "android-input" / "touch.json"
                 marker.parent.mkdir(parents=True)
                 marker.write_text(json.dumps({"pid": 1, "since": "2026-11-26T00:00:00+09:00", **content}))
                 fingerprint = runner.marker_fingerprint(marker.read_bytes())
                 read = Mock(return_value=reading)
-                if runner.os.name == "nt" and content.get("serial") == serial:
+                eligible = content.get("device") == device and clear is None
+                if runner.os.name == "nt" and eligible:
                     continue  # take_owner_lock needs fcntl
                 if cleared:
                     with patch("sys.stderr"):
-                        done = runner.check_unconfirmed(root, None, read, serial)
+                        done = runner.check_unconfirmed(root, clear, read, lambda: device)
                     self.assertEqual(done["cleared_by"], "device reports no contact held")
                     self.assertEqual(done["marker"], fingerprint)
                 else:
                     with self.assertRaises(runner.RunnerError) as caught:
-                        runner.check_unconfirmed(root, None, read, serial)
+                        runner.check_unconfirmed(root, clear, read, lambda: device)
                     self.assertIn(fingerprint, str(caught.exception))
                     self.assertIn("需要人来决定", str(caught.exception))
                 self.assertEqual(marker.exists(), not cleared)
-                # the device is read only for a marker that names it
-                self.assertEqual(read.call_count, int(content.get("serial") == serial))
+                self.assertEqual(read.call_count, int(eligible))  # the device is read only for a marker naming it
 
     def test_a_malformed_touch_line_is_flagged_not_hiding_later_rows(self):
         import datetime as dt

@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import host  # noqa: E402
 from host.android import actions  # noqa: E402
-from test_android_backend import FreshAndroidState, android_run  # noqa: E402
+from test_android_backend import FreshAndroidState, advancing_snapshots, android_run  # noqa: E402
 
 
 def hit(box, text=""):
@@ -290,7 +290,8 @@ class RuntimeKeyTests(FreshAndroidState):
         rt.pause = Mock(return_value=True)
         rt.ui = SimpleNamespace(unhover=Mock(return_value=True))
         rt._device_target = SimpleNamespace(foreground=Mock(return_value=True), exists=Mock(return_value=True),
-                                            serial="127.0.0.1:5555", touch_state=Mock(return_value="none"))
+                                            serial="127.0.0.1:5555", identity=Mock(return_value=None),
+                                            touch_snapshot=Mock(side_effect=advancing_snapshots()))
         screens = list(screens)
         self.frames = []
 

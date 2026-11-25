@@ -523,9 +523,7 @@ class Runtime:
                 return False
             target = self._sessionless_target()
             try:
-                # Reserved on disk first, or nothing is sent; a marker an earlier process left is cleared only when
-                # this device reports no contact held.
-                state.begin_touch(target.serial, target.touch_state)
+                state.begin_touch(target.identity())  # reserved on disk first, or nothing is sent
             except BaseException:
                 if state.halted:
                     self._halt_unconfirmed()
@@ -547,6 +545,16 @@ class Runtime:
                     raise ForegroundChanged("依据的截图已经过时（之后焦点变过），已取消本次输入，等待重新核对")
                 if self._stopped_now():  # Stop may have been pressed during the focus query
                     return False
+                # Nothing may be held before this touch (a contact left by anything earlier stops all input), and
+                # the dispatcher's latest event is the baseline this touch's own lift must come after.
+                before = target.touch_snapshot()
+                if before is None or before.state != "none":
+                    self._halt_unconfirmed()
+                    from host import InputUnconfirmed
+                    raise InputUnconfirmed("安卓模拟器上还有按住的触点（或读不出设备的触摸状态），这一步没有发送，已停止所有输入；"
+                                           "请检查模拟器后重新启动 MaaNikki。")
+                if self._stopped_now():
+                    return False
                 sent = True
                 try:
                     with measure("input.action"):
@@ -554,12 +562,17 @@ class Runtime:
                     succeeded = result is not None and bool(result.success)
                     outcome = "unconfirmed"
                     if succeeded:
-                        # The framework reports a lift as done even when MaaTouch is gone (measured 2026-11-26):
-                        # only the device saying no contact is held confirms it.
-                        released = self._device_touch_released(target)
-                        succeeded = released is True
-                        outcome = "confirmed" if succeeded else \
-                            f"unconfirmed: device reports {released or 'nothing readable'}"
+                        # The framework reports a lift as done once it is written to MaaTouch, even when MaaTouch
+                        # is gone (measured 2026-11-26): only the device showing this touch's UP, after the
+                        # baseline, with nothing held confirms it.
+                        after = self._device_touch_released(target, before.latest)
+                        succeeded = after is True
+                        if not succeeded:
+                            why = "nothing readable" if after is None else \
+                                after.state if after.state != "none" else "no new lift"
+                            outcome = f"unconfirmed: device reports {why}"
+                        else:
+                            outcome = "confirmed"
                 except BaseException as error:
                     state.record_touch(action, fields, f"raised {type(error).__name__}")
                     self._halt_unconfirmed()
@@ -582,19 +595,34 @@ class Runtime:
         return True
 
     TOUCH_KEY_ATTEMPTS = 3
-    RELEASE_READS = 3
+    RELEASE_READS = 6
 
-    def _device_touch_released(self, target):
-        """Android: True once the device reports no contact held (a few short reads, as the lift may still be in
-        flight); otherwise the last reading ("injected", "other" or None)."""
-        reading = None
+    def _device_touch_released(self, target, baseline):
+        """Android: True once the device shows an injected UP after ``baseline`` and no contact held (a few short
+        reads, as the gesture may still be in flight); otherwise the last snapshot (None when unreadable)."""
+        snapshot = None
         for attempt in range(self.RELEASE_READS):
             if attempt:
-                wall_time.sleep(.1)
-            reading = target.touch_state()
-            if reading == "none":
+                wall_time.sleep(.15)
+            snapshot = target.touch_snapshot()
+            if snapshot is not None and snapshot.released_after(baseline):
                 return True
-        return reading
+        return snapshot
+
+    def _recover_left_marker(self):
+        """Android, before a frame is captured for a decision: clear a touch marker an earlier process left when it
+        names this device and the device reports no contact held (DeviceInputState.recover_marker). A failure to
+        read halts this process, as an unconfirmed touch would."""
+        state = device_input()
+        marker = state.marker()
+        if state.halted or marker is None or not marker.exists():
+            return
+        try:
+            target = self._sessionless_target()
+            state.recover_marker(target.identity(), target.touch_snapshot)
+        except BaseException:
+            self._halt_unconfirmed()
+            raise
 
     def escape(self, delay=0.35):
         """Back out of the current screen: Esc (``key("menu")``) on the desktop, ``leave_page`` on Android, where
@@ -903,6 +931,7 @@ class Runtime:
             self.check_focus()
             if device_focus:
                 device_input().claim()  # capture, decision and dispatch belong to one agent process
+                self._recover_left_marker()  # before this frame: no decision made earlier is sent after it
             # The epoch is read before the focus check, so a loss seen anywhere after it discards this frame.
             epoch = device_input().epoch if device_focus else None
             if device_focus and not self._device_focus_ready():

@@ -90,6 +90,62 @@ def touch_state(output: str | None) -> str | None:
     return None  # a touched display with nothing down: not a form seen on the device
 
 
+_EVENT = re.compile(r"^\s*MotionEvent\(deviceId=(-?\d+), eventTime=(\d+),.*\baction=([A-Z_]+)\b")
+_BOOT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+class TouchSnapshot:
+    """One `dumpsys input` reading: the touch state (see touch_state()), the latest event time in the dispatcher's
+    RecentQueue (-1 when it is empty) and the latest injected UP's event time (None when there is none)."""
+
+    def __init__(self, state, latest, injected_up):
+        self.state, self.latest, self.injected_up = state, latest, injected_up
+
+    def released_after(self, baseline) -> bool:
+        """True when nothing is held and an injected UP was dispatched after ``baseline`` (an earlier reading's
+        ``latest``): evidence tied to this gesture's own lift, not just an idle dispatcher before its DOWN."""
+        return self.state == "none" and self.injected_up is not None and self.injected_up > baseline
+
+
+def recent_events(output: str | None):
+    """(deviceId, eventTime, action) of the motion events in the dispatcher's RecentQueue, or None when the queue
+    cannot be found (an empty queue gives [])."""
+    if output is None:
+        return None
+    lines = output.splitlines()
+    headers = [index for index, line in enumerate(lines) if line.strip().startswith("RecentQueue:")]
+    if len(headers) != 1:
+        return None
+    header = lines[headers[0]]
+    if header.strip() == "RecentQueue: <empty>":
+        return []
+    if not header.strip().startswith("RecentQueue: length="):
+        return None
+    depth = len(header) - len(header.lstrip())
+    events = []
+    for line in lines[headers[0] + 1:]:
+        if line.strip() and len(line) - len(line.lstrip()) <= depth:
+            break
+        match = _EVENT.match(line)
+        if match:
+            events.append((int(match.group(1)), int(match.group(2)), match.group(3)))
+    return events
+
+
+def touch_snapshot(output: str | None) -> TouchSnapshot | None:
+    """Touch state and recent events from one `dumpsys input` output; None when either cannot be read."""
+    state, events = touch_state(output), recent_events(output)
+    if state is None or events is None:
+        return None
+    ups = [time for device, time, action in events if device == INJECTED_DEVICE and action == "UP"]
+    return TouchSnapshot(state, max((time for _d, time, _a in events), default=-1), max(ups, default=None))
+
+
+def boot_id(output: str | None) -> str | None:
+    value = (output or "").strip()
+    return value if _BOOT_ID.match(value) else None
+
+
 def check_controller_info(info) -> str:
     """The ADB serial of a connection the Android backend can drive; raises NavigationError otherwise."""
     serial = info.get("adb_serial") if isinstance(info, dict) else None
@@ -144,6 +200,7 @@ class AndroidTarget:
         self.serial = check_controller_info(info)
         self.controller = controller
         self._shell_failures = 0
+        self._identity = None
 
     def _shell(self, command: str) -> str | None:
         # The device-input lock first, as everywhere (a tap's last checks hold it): a read that finds the device
@@ -192,9 +249,19 @@ class AndroidTarget:
                 state.observed_loss()
             return package
 
-    def touch_state(self) -> str | None:
-        """Whether a contact is held on the device now (see touch_state()); None when it cannot be read."""
-        return touch_state(self._shell("dumpsys input"))
+    def touch_snapshot(self) -> TouchSnapshot | None:
+        """Whether a contact is held on the device now, with the dispatcher's recent events; None when unreadable."""
+        return touch_snapshot(self._shell("dumpsys input"))
+
+    def identity(self) -> dict | None:
+        """The connected guest: its serial and its boot id (a different guest behind the same forwarded address,
+        or the same guest rebooted, has another). Read once; None when the boot id cannot be read."""
+        if self._identity is None:
+            booted = boot_id(self._shell("cat /proc/sys/kernel/random/boot_id"))
+            if booted is None:
+                return None
+            self._identity = {"serial": self.serial, "boot_id": booted}
+        return dict(self._identity)
 
     def hung(self) -> bool:
         return False

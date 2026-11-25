@@ -20,8 +20,8 @@ os.environ.setdefault("MAAFW_BINARY_PATH", str(ROOT / "maafw"))
 
 import host  # noqa: E402
 from host import android  # noqa: E402
-from host.android.target import (AndroidTarget, NoInput, check_controller_info, focused_package, process_state,  # noqa: E402
-                                 touch_state)
+from host.android.target import (AndroidTarget, NoInput, TouchSnapshot, check_controller_info,  # noqa: E402
+                                 focused_package, process_state, recent_events, touch_snapshot, touch_state)
 from navigation.models import NavigationError  # noqa: E402
 
 ADB_CONTROLLER = {"name": "nikki_android", "type": "Adb", "display_short_side": 720}
@@ -29,6 +29,13 @@ INFO = {"type": "adb", "adb_serial": "127.0.0.1:5555", "adb_path": "/opt/homebre
         "input_methods": 4, "screencap_methods": 8}
 FOCUS_GAME = "  mCurrentFocus=Window{fe7cc5b u0 com.papegames.infinitynikki/com.epicgames.unreal.GameActivity}\n"
 # `dumpsys input` around the InputDispatcher's touch state, as read on BlueStacks Air (Android 13, 2026-11-26).
+RECENT = ("  RecentQueue: length=3\n"
+          "    KeyEvent(deviceId=-1, eventTime=47389000000000, source=KEYBOARD, displayId=-1, action=DOWN)\n"
+          "    MotionEvent(deviceId=-1, eventTime=47558010000000, source=TOUCHSCREEN, displayId=0, action=DOWN, "
+          "actionButton=0x00000000, pointers=[0: (1017.0, 1413.0)]), policyFlags=0x6b000000, age=1237ms\n"
+          "    MotionEvent(deviceId=-1, eventTime=47558064000000, source=TOUCHSCREEN, displayId=0, action=UP, "
+          "actionButton=0x00000000, pointers=[0: (1017.0, 1413.0)]), policyFlags=0x6b000000, age=1179ms\n"
+          "  PendingEvent: <none>\n  InboundQueue: <empty>\n")
 TOUCH_NONE = ("  Pointer Capture Requested: false\n  TouchStates: <no displays touched>\n  Display: 0\n"
               "    logicalSize=1920x1080\n")
 TOUCH_HELD = ("  Pointer Capture Requested: false\n  TouchStatesByDisplay:\n"
@@ -44,6 +51,15 @@ def android_run():
     env["PI_CONTROLLER"] = json.dumps(ADB_CONTROLLER)
     with patch.dict(os.environ, env, clear=True), patch.object(host, "platform_backend", return_value="macos"):
         yield
+
+
+DEVICE = {"serial": "127.0.0.1:5555", "boot_id": "992f1bef-d353-4a1b-b401-b9867f884164"}
+
+
+def advancing_snapshots():
+    """A device on which every gesture is dispatched and lifted: each reading has a newer injected UP, nothing held."""
+    import itertools
+    return (TouchSnapshot("none", time, time) for time in itertools.count(1000, 10))
 
 
 class FakeShellController:
@@ -197,10 +213,29 @@ class TargetTests(FreshAndroidState):
                        "  TouchStates: <something else>\n"):
             with self.subTest(output=output):
                 self.assertIsNone(touch_state(output))
-        controller = FakeShellController({"dumpsys input": TOUCH_HELD})
+        self.assertEqual(recent_events(RECENT), [(-1, 47558010000000, "DOWN"), (-1, 47558064000000, "UP")])
+        self.assertEqual(recent_events("  RecentQueue: <empty>\n"), [])
+        for output in (None, "", TOUCH_NONE, RECENT + RECENT, "  RecentQueue: something\n"):
+            self.assertIsNone(recent_events(output))
+        snapshot = touch_snapshot(TOUCH_NONE + RECENT)
+        self.assertEqual((snapshot.state, snapshot.latest, snapshot.injected_up),
+                         ("none", 47558064000000, 47558064000000))
+        self.assertTrue(snapshot.released_after(47558010000000))
+        self.assertFalse(snapshot.released_after(47558064000000))  # no lift after the baseline
+        self.assertFalse(touch_snapshot(TOUCH_HELD + RECENT).released_after(0))
+        self.assertIsNone(touch_snapshot(TOUCH_NONE))  # no recent queue: cannot tie a lift to the gesture
+        self.assertIsNone(touch_snapshot(RECENT))
+        empty = touch_snapshot(TOUCH_NONE + "  RecentQueue: <empty>\n")
+        self.assertEqual((empty.latest, empty.injected_up), (-1, None))
+        boot = "992f1bef-d353-4a1b-b401-b9867f884164"
+        controller = FakeShellController({"dumpsys input": TOUCH_HELD + RECENT, "boot_id": boot + "\n"})
         target = AndroidTarget(INFO, controller)
-        self.assertEqual(target.touch_state(), "injected")
-        self.assertEqual(controller.commands, ["dumpsys input"])
+        self.assertEqual(target.touch_snapshot().state, "injected")
+        self.assertEqual(target.identity(), {"serial": INFO["adb_serial"], "boot_id": boot})
+        self.assertEqual(target.identity(), {"serial": INFO["adb_serial"], "boot_id": boot})
+        self.assertEqual(controller.commands, ["dumpsys input", "cat /proc/sys/kernel/random/boot_id"])  # read once
+        unreadable = AndroidTarget(INFO, FakeShellController({"boot_id": "not a uuid\n"}))
+        self.assertIsNone(unreadable.identity())
 
     def test_only_an_adb_connection_is_accepted(self):
         self.assertEqual(check_controller_info(INFO), "127.0.0.1:5555")
@@ -426,7 +461,8 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
         rt.pause = Mock(return_value=True)
         rt.ui = SimpleNamespace(unhover=Mock(return_value=True))  # without pointer hover it returns at once
         rt._device_target = SimpleNamespace(foreground=Mock(return_value=focused), exists=Mock(return_value=True),
-                                            serial=INFO["adb_serial"], touch_state=Mock(return_value="none"))
+                                            serial=INFO["adb_serial"], identity=Mock(return_value=DEVICE),
+                                            touch_snapshot=Mock(side_effect=advancing_snapshots()))
         return rt
 
     def test_a_tap_is_dispatched_with_device_focus_confirmed_right_before(self):
@@ -553,7 +589,7 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
                 self.state = state
                 nxt = self.tap_runtime()
                 nxt._device_target.serial = serial
-                nxt._device_target.touch_state.return_value = "injected"  # the device still reports it held
+                nxt._device_target.identity.return_value = {**DEVICE, "serial": serial}
                 with android_run(), patch("daily.runtime.active_session", return_value=None):
                     with self.assertRaises(host.InputUnconfirmed):
                         nxt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
@@ -564,74 +600,133 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
                 self.assertTrue(state.marker().is_file())  # still there for the next one
                 state._owner.close()
 
-    def test_a_touch_counts_as_confirmed_only_once_the_device_reports_no_contact_held(self):
-        # The framework reports the lift done even when MaaTouch is gone; the device's own state decides.
-        for index, (readings, outcome) in enumerate(((["injected"] * 3, "unconfirmed: device reports injected"),
-                                                     ([None] * 3, "unconfirmed: device reports nothing readable"),
-                                                     (["other"] * 3, "unconfirmed: device reports other"),
-                                                     (["injected", "none"], "confirmed"))):
-            with self.subTest(readings=readings), \
+    def test_a_touch_counts_as_confirmed_only_once_the_device_shows_its_own_lift(self):
+        # The framework reports the lift done once written to MaaTouch; the device's own state decides.
+        before = TouchSnapshot("none", 500, 400)
+        held, idle = TouchSnapshot("injected", 600, 400), TouchSnapshot("none", 500, 400)
+        for index, (readings, outcome) in enumerate((
+                ([held] * 6, "unconfirmed: device reports injected"),
+                ([None] * 6, "unconfirmed: device reports nothing readable"),
+                ([TouchSnapshot("other", 600, 400)] * 6, "unconfirmed: device reports other"),
+                # an idle dispatcher whose last lift is older than the baseline: this touch's DOWN may still come
+                ([idle] * 6, "unconfirmed: device reports no new lift"),
+                ([idle, held, TouchSnapshot("none", 700, 700)], "confirmed"))):
+            with self.subTest(outcome=outcome, index=index), \
                     patch.object(host, "_DEVICE_INPUT", self.fresh_state(self.data_root / str(index))) as state, \
                     patch("daily.runtime.wall_time.sleep"):
                 self.state = state
                 rt = self.tap_runtime()
-                rt._device_target.touch_state.side_effect = list(readings)
+                rt._device_target.touch_snapshot.side_effect = [before, *readings]
                 with android_run(), patch("daily.runtime.active_session", return_value=None):
                     if outcome == "confirmed":
                         self.assertTrue(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
                     else:
                         with self.assertRaises(host.InputUnconfirmed):
                             rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
-                self.assertEqual(rt._device_target.touch_state.call_count, len(readings))
+                self.assertEqual(rt._device_target.touch_snapshot.call_count, 1 + len(readings))
                 self.assertEqual(state.marker().exists(), outcome != "confirmed")
                 self.assertEqual(state.halted, outcome != "confirmed")
                 log = state.root / "logs" / "android-input.jsonl"
                 self.assertEqual(json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["outcome"], outcome)
+                marker = state.marker()
+                if marker.exists():  # the reservation names the device it was made for
+                    self.assertEqual(json.loads(marker.read_text())["device"], DEVICE)
                 state._owner.close()
+
+    def test_nothing_is_sent_while_the_device_reports_a_contact_held_or_cannot_be_read(self):
+        for index, before in enumerate((TouchSnapshot("injected", 500, 400), TouchSnapshot("other", 500, 400), None)):
+            with self.subTest(before=getattr(before, "state", None)), \
+                    patch.object(host, "_DEVICE_INPUT", self.fresh_state(self.data_root / str(index))) as state:
+                self.state = state
+                rt = self.tap_runtime()
+                rt._device_target.touch_snapshot.side_effect = [before]
+                with android_run(), patch("daily.runtime.active_session", return_value=None), \
+                        self.assertRaises(host.InputUnconfirmed):
+                    rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
+                rt.context.run_action_direct.assert_not_called()
+                self.assertTrue(state.halted)
+                self.assertFalse(state.marker().exists())  # nothing was sent: the reservation is released
+                log = (state.root / "logs" / "android-input.jsonl").read_text(encoding="utf-8").splitlines()
+                self.assertEqual(json.loads(log[-1])["outcome"], "cancelled")
+                state._owner.close()
+
+    def test_a_touch_whose_lift_check_raises_halts_and_keeps_the_marker(self):
         with patch.object(host, "_DEVICE_INPUT", self.fresh_state(self.data_root / "raised")) as state, \
                 android_run(), patch("daily.runtime.active_session", return_value=None), \
                 self.assertRaises(host.DeviceUnreachable):
             self.state = state
             rt = self.tap_runtime()
-            rt._device_target.touch_state.side_effect = host.DeviceUnreachable("gone")
+            rt._device_target.touch_snapshot.side_effect = [TouchSnapshot("none", 1, 1), host.DeviceUnreachable("gone")]
             rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
         self.assertTrue(state.halted)
         self.assertTrue(state.marker().exists())
 
-    def test_a_left_marker_is_cleared_only_for_this_device_reporting_no_contact_held(self):
-        serial = INFO["adb_serial"]
-        cases = (("same serial, nothing held", {"pid": 1, "serial": serial}, "none", True),
-                 ("same serial, still held", {"pid": 1, "serial": serial}, "injected", False),
-                 ("same serial, unreadable", {"pid": 1, "serial": serial}, None, False),
-                 ("other serial of the same emulator", {"pid": 1, "serial": "emulator-5554"}, "none", False),
-                 ("marker from before serials were recorded", {"pid": 1}, "none", False),
-                 ("this process's own marker", {"pid": os.getpid(), "serial": serial}, "none", False),
-                 ("empty marker", None, "none", False))
-        for name, content, reading, cleared in cases:
+    def test_a_left_marker_is_never_recovered_at_the_touch_itself(self):
+        # A marker found when reserving halts, even on a device reporting nothing held: recovery happens only
+        # before a decision's frame is captured, so a decision made before it is never sent after it.
+        self.state.marker().parent.mkdir(parents=True)
+        self.state.marker().write_text(json.dumps({"pid": 1, "since": "x", "device": DEVICE}))
+        rt = self.tap_runtime()
+        with android_run(), patch("daily.runtime.active_session", return_value=None), \
+                self.assertRaises(host.InputUnconfirmed):
+            rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
+        rt.context.run_action_direct.assert_not_called()
+        self.assertTrue(self.state.halted)
+        self.assertTrue(self.state.marker().exists())
+
+    def test_a_left_marker_is_cleared_only_for_this_very_device_reporting_no_contact_held(self):
+        none, held = TouchSnapshot("none", 1, 1), TouchSnapshot("injected", 1, 1)
+        cases = (("this device, nothing held", {"device": DEVICE}, none, True),
+                 ("this device, still held", {"device": DEVICE}, held, False),
+                 ("this device, unreadable", {"device": DEVICE}, None, False),
+                 ("same address, another guest or boot", {"device": {**DEVICE, "boot_id": "0" * 8 + DEVICE["boot_id"][8:]}},
+                  none, False),
+                 ("another serial of the same emulator", {"device": {**DEVICE, "serial": "emulator-5554"}}, none, False),
+                 ("marker naming no device", {"device": None}, none, False),
+                 ("marker from before devices were recorded", {"serial": DEVICE["serial"]}, none, False),
+                 ("empty marker", None, none, False))
+        for index, (name, content, reading, cleared) in enumerate(cases):
             with self.subTest(name), \
-                    patch.object(host, "_DEVICE_INPUT", self.fresh_state(self.data_root / name)) as state:
+                    patch.object(host, "_DEVICE_INPUT", self.fresh_state(self.data_root / str(index))) as state:
                 self.state = state
                 marker = state.marker()
                 marker.parent.mkdir(parents=True)
-                marker.write_bytes(b"" if content is None else json.dumps({"since": "x", **content}).encode())
+                marker.write_bytes(b"" if content is None else json.dumps({"pid": 1, "since": "x", **content}).encode())
                 rt = self.tap_runtime()
-                rt._device_target.touch_state.side_effect = [reading, "none"]
+                rt._device_target.touch_snapshot.side_effect = [reading]
                 with android_run(), patch("daily.runtime.active_session", return_value=None):
-                    if cleared:
-                        self.assertTrue(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
-                    else:
-                        with self.assertRaises(host.InputUnconfirmed):
-                            rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
-                self.assertEqual(rt.context.run_action_direct.call_count, int(cleared))
+                    rt._recover_left_marker()
                 self.assertEqual(marker.exists(), not cleared)
-                self.assertEqual(state.halted, not cleared)
+                self.assertFalse(state.halted)
                 log = state.root / "logs" / "android-input.jsonl"
                 lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
-                recovered = [json.loads(line) for line in lines if json.loads(line)["action"] == "RecoverMarker"]
-                self.assertEqual(len(recovered), int(cleared))
-                if cleared:  # the new reservation names the device it was made for
-                    self.assertIn(serial, recovered[0]["outcome"])
+                self.assertEqual([json.loads(line)["action"] for line in lines], ["RecoverMarker"] * int(cleared))
                 state._owner.close()
+
+    def test_recovery_needs_its_log_line_skips_a_halted_process_and_halts_when_the_read_raises(self):
+        def plant(state):
+            state.marker().parent.mkdir(parents=True, exist_ok=True)
+            state.marker().write_text(json.dumps({"pid": 1, "since": "x", "device": DEVICE}))
+        rt = self.tap_runtime()
+        plant(self.state)
+        with patch.object(self.state, "record_touch", return_value=False), android_run(), \
+                patch("daily.runtime.active_session", return_value=None):
+            rt._recover_left_marker()
+        self.assertTrue(self.state.marker().exists())  # not cleared without its record
+        rt._device_target.touch_snapshot.reset_mock()
+        self.state.halted = True
+        with android_run(), patch("daily.runtime.active_session", return_value=None):
+            rt._recover_left_marker()
+        rt._device_target.touch_snapshot.assert_not_called()
+        self.assertTrue(self.state.marker().exists())
+        self.state.halted = False
+        rt._device_target.touch_snapshot.side_effect = host.DeviceUnreachable("gone")
+        with android_run(), patch("daily.runtime.active_session", return_value=None), \
+                self.assertRaises(host.DeviceUnreachable):
+            rt._recover_left_marker()
+        self.assertTrue(self.state.halted)
+        rt.context.tasker.post_stop.assert_called_once()
+        self.assertTrue(self.state.marker().exists())
 
     @unittest.skipUnless(HAS_FLOCK, "flock is macOS/POSIX only; Android hosts are macOS for now")
     def test_only_one_agent_process_uses_android_input(self):
@@ -997,6 +1092,16 @@ class DeviceFocusCaptureTests(FreshAndroidState):
         with android_run(), patch("daily.runtime.active_session", return_value=None):
             image = rt._capture()
         return image, rt, inputs
+
+    def test_a_left_marker_is_looked_at_before_the_frame_is_captured(self):
+        rt, inputs = self.runtime([True, True])
+        order = []
+        rt._recover_left_marker = Mock(side_effect=lambda: order.append("recover"))
+        post = rt.controller.post_screencap.side_effect
+        rt.controller.post_screencap.side_effect = lambda: (order.append("capture"), post())[1]
+        with android_run(), patch("daily.runtime.active_session", return_value=None):
+            self.assertIsNotNone(rt._capture())
+        self.assertEqual(order[:2], ["recover", "capture"])
 
     def test_a_frame_with_focus_before_and_after_is_kept(self):
         image, rt, inputs = self.capture([True, True])
