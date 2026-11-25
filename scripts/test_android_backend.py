@@ -126,7 +126,8 @@ class TaskListTests(unittest.TestCase):
     def test_the_shipped_list_is_well_formed_and_holds_the_check_and_mailbox_on_trial(self):
         verified, experimental, excluded = android.task_tiers()
         self.assertEqual(verified, frozenset())
-        self.assertEqual(experimental, frozenset({"MaaNikki_AndroidCheck", "MaaNikki_Mailbox", "MaaNikki_MonthlyPass"}))
+        self.assertEqual(experimental, frozenset({"MaaNikki_AndroidCheck", "MaaNikki_Mailbox", "MaaNikki_MonthlyPass",
+                                                 "MaaNikki_WeeklyFreeGifts"}))
         self.assertEqual(excluded, {})
 
     def test_admission_notices_and_refusals_follow_the_android_list(self):

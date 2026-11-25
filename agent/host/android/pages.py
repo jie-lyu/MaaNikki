@@ -1,4 +1,4 @@
-"""Taps on a recognised page of the Android client, with the same rules as the named actions (actions.py):
+"""Taps and swipes on a recognised page of the Android client, with the same rules as the named actions (actions.py):
 
 decided on one focus-confirmed frame, refused unless that frame is positively the expected page and the target is
 recognised on it, refused when the point lies on or next to text that spends, deletes or commits (删除, 购买, ...),
@@ -231,6 +231,57 @@ def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, 
             continue
         return rt.pause(delay)
     raise PageMismatch(f"在「{title}」页面上连续 {rt.TOUCH_KEY_ATTEMPTS} 次没能在稳定的画面上确认要点的位置")
+
+
+def _point_box(point):
+    return [int(point[0]), int(point[1]), 1, 1]
+
+
+def swipe_on_page(rt, title: str, begin, end, *, duration: int, accept, delay: float = .5) -> bool:
+    """One swipe from the point ``begin`` to the point ``end`` on the page titled ``title``, with the rules of
+    tap_on_page: decided on a fresh focus-confirmed frame that is that page and that ``accept(frame, recognize)``
+    takes (the caller's whole expected state, e.g. the list it read, no price band near either point), neither point
+    within FORBIDDEN_MARGIN of a forbidden label; confirmed on a fresh frame (same title, ``accept``, guard); both
+    frames still valid; sent as a Swipe carrying the confirming frame, through the same reserved, logged and
+    device-confirmed path as a tap (the device must show this gesture's own lift afterwards). False when the run
+    stopped; PageMismatch (nothing sent) when the deciding frame fails; GuardRefusal next to a forbidden word."""
+    from task_control import ForegroundChanged
+    points = (_point_box(begin), _point_box(end))
+    for _attempt in range(rt.TOUCH_KEY_ATTEMPTS):
+        screen, decided, recognize = screen_now(rt)
+        if decided is None:
+            return False
+        if not is_page(screen, title):
+            raise PageMismatch(f"当前画面不是「{title}」页面")
+        for box in points:
+            word = _forbidden_near(recognize, box)
+            if word:
+                raise GuardRefusal(f"要滑动的地方旁边有「{word}」，没有滑动，任务停止")
+        if not accept(decided, recognize):
+            raise PageMismatch(f"「{title}」页面的状态不对，没有滑动")
+        if not rt._frame_still_valid(decided):
+            continue
+        fresh, confirming, recognize_b = screen_now(rt)
+        if confirming is None:
+            return False
+        if not is_page(fresh, title) or fresh.title != screen.title:
+            continue
+        for box in points:
+            word = _forbidden_near(recognize_b, box)
+            if word:
+                raise GuardRefusal(f"要滑动的地方旁边有「{word}」，没有滑动，任务停止")
+        if not accept(confirming, recognize_b):
+            continue
+        if not (rt._frame_still_valid(decided) and rt._frame_still_valid(confirming)):
+            continue
+        try:
+            if not rt.action("Swipe", begin=points[0][:2], end=points[1][:2], duration=int(duration),
+                             source_frame=confirming):
+                return False
+        except ForegroundChanged:
+            continue
+        return rt.pause(delay)
+    raise PageMismatch(f"在「{title}」页面上连续 {rt.TOUCH_KEY_ATTEMPTS} 次没能在稳定的画面上确认要滑动的位置")
 
 
 def to_hud(rt, attempts: int = 4, *, rejected=None) -> bool:

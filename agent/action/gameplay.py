@@ -57,6 +57,13 @@ class GameplayAction(CustomAction):
                 return check(runtime)
             game = Gameplay(runtime)
             if kind == "weekly_shop":
+                from host import capabilities, game_backend
+                if capabilities(game_backend()).touch_actions_only:
+                    # The phone layout has its own flow and taps (Windows does not ship it). It branches before
+                    # WeeklyShop is built: that reads the UID (its fallback navigates the PC way) for the weekly
+                    # record, which the phone flow does not keep (it only reports, nothing is claimed).
+                    from host.android import shop
+                    return shop.run(runtime) and not runtime.stopped
                 from daily.shop import WeeklyShop
                 return WeeklyShop(runtime).run()
             if kind == "monthly_exchange":
