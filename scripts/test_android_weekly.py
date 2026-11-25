@@ -54,14 +54,14 @@ def sold_out_week():
 
 
 def list_frame(offset, *, selected=True):
-    """The gift list at ``offset``: non-periodic bars in the card columns move with the list; the column at x 1070
+    """The gift list at ``offset``: non-periodic bars in the card columns move with the list; the column at x ~960-1110
     stays empty background (where the swipes start)."""
     frame = np.full((720, 1280, 3), BACKGROUND, np.uint8)
     rng = np.random.default_rng(7)
     for content_y in np.cumsum(rng.integers(30, 90, 80)):
         y = int(content_y) - offset + shop.LIST_TOP
         if shop.LIST_TOP <= y < 700:
-            frame[y:y + 12, 290:950] = (60, 90, 120)
+            frame[y:y + 12, 290:950] = frame[y:y + 12, 1120:1180] = (60, 90, 120)
     if selected:
         x, y, w, h = TAB_BOX
         frame[y:y + h, x:x + w] = GOLD
@@ -150,6 +150,10 @@ class Game:
         raise AssertionError(f"unexpected tap {target}")
 
 
+def stop_diagnostics(rt):
+    return [c for c in rt.diagnostic.call_args_list if c.args[0].startswith("android_weekly_stop_")]
+
+
 def play(game):
     rt = SimpleNamespace(stopped=False, logs=[], key=game.key, _frame_still_valid=Mock(return_value=True),
                          pause=Mock(return_value=True), diagnostic=Mock(), TOUCH_KEY_ATTEMPTS=3, action=game.action)
@@ -176,8 +180,11 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(game.offset, game.end)
         for name in shop.GIFTS:
             self.assertIn(f"每周免费礼包：「{name}」本周已领取（已售罄，本周限购 0/1）。", rt.logs)
-        self.assertTrue(any(line.startswith("每周免费礼包：礼包列表滑动 ") for line in rt.logs))
-        rt.diagnostic.assert_not_called()
+        moved = [line for line in rt.logs if "次滑动礼包列表" in line]
+        self.assertEqual(len(moved), game.swipes)  # the movement is logged after every list swipe
+        self.assertIn("列表移动 300 像素", moved[0])
+        self.assertEqual([c.args[0] for c in rt.diagnostic.call_args_list],
+                         ["android_weekly_before_first_swipe"])  # only the frame before the first list swipe
 
     def test_a_claimable_gift_is_reported_never_tapped_and_the_shop_is_left(self):
         gifts = sold_out_week()
@@ -211,7 +218,7 @@ class FlowTests(unittest.TestCase):
                 self.assertFalse(outcome)
                 self.assertNotIn("back", game.touches)
                 self.assertTrue(any(words in line for line in rt.logs), rt.logs)
-                rt.diagnostic.assert_called_once()
+                self.assertEqual(len(stop_diagnostics(rt)), 1)
 
     def test_a_list_that_stops_moving_before_every_gift_was_seen_stops(self):
         game = Game({"虹迹赠礼": gift(1200, 839), "芳馨赠礼": gift(1700, 839)}, end=700)  # 星实置业之礼 missing
@@ -238,11 +245,12 @@ class FlowTests(unittest.TestCase):
         self.assertFalse(outcome)
         self.assertEqual(game.swipes, 2)
         self.assertNotIn("back", game.touches)
-        rt.diagnostic.assert_called_once()
+        self.assertEqual(len(stop_diagnostics(rt)), 1)
+        self.assertTrue(any("第 2 次滑动礼包列表" in line and "没有停稳" in line for line in rt.logs), rt.logs)
 
     def test_no_safe_place_to_start_a_swipe_sends_nothing(self):
         # A forbidden word next to every candidate column: the list is not swiped at all.
-        words = [row("购买", [x - 20, 100, 40, 600]) for x in shop.SWIPE_XS]
+        words = [row("购买", list(shop.LIST))]
         game = Game(forbidden=words)
         outcome, rt = play(game)
         self.assertFalse(outcome)
@@ -297,8 +305,8 @@ class SwipePointTests(unittest.TestCase):
         frame = list_frame(0)
         # 「免费」 text centred at x 840: a point 60 px right of the text is on the band, so it is excluded.
         prices = shop.price_zones(lambda node, override=None: result([row("免费", [812, 491, 57, 35])]))
-        self.assertFalse(shop.points_clear(frame, None, (1070, 640), (900, 500), prices))
-        self.assertTrue(shop.points_clear(frame, None, (1070, 640), (1070, 390), prices))
+        self.assertFalse(shop.points_clear(frame, None, (1060, 640), (900, 500), prices))
+        self.assertTrue(shop.points_clear(frame, None, (1060, 640), (1060, 390), prices))
         self.assertFalse(shop.points_clear(frame, None, (1100, 640), (1100, 390), prices))  # 回到顶部
         # Outside the list (red dots on the left tabs read as digits) only the text itself counts.
         left = shop.price_zones(lambda node, override=None: result([row("8", [16, 222, 12, 16])]))
@@ -306,13 +314,21 @@ class SwipePointTests(unittest.TestCase):
 
     def test_the_begin_point_must_be_empty_background(self):
         frame = list_frame(0)
-        frame[600:680, 1040:1100] = (250, 250, 250)  # a card's white panel under (1070,640)
+        frame[520:700, 950:1120] = (250, 250, 250)  # a card's white panel over the lower empty column
         recognize = lambda node, override=None: MISS  # noqa: E731
-        self.assertFalse(shop.blank(frame, (1070, 640)))
-        self.assertEqual(shop.choose_swipe(frame, recognize), ((1070, 560), (1070, 310)))  # the next one up
-        frame[:, 240:960] = BACKGROUND  # the other columns empty too: the lowest point of the next column
-        self.assertEqual(shop.choose_swipe(frame, recognize), ((840, 640), (840, 390)))
-        self.assertEqual(shop.choose_swipe(frame, recognize, avoid=(840, 640)), ((610, 640), (610, 390)))
+        self.assertFalse(shop.blank(frame, (1060, 640)))
+        begin, _end = shop.choose_swipe(frame, recognize)
+        self.assertTrue(shop.blank(frame, begin))
+        self.assertFalse(950 - 30 <= begin[0] <= 1120 + 30 and begin[1] >= 520 - 30, begin)  # not on the panel
+        frame[60:720, 240:1240] = BACKGROUND  # an empty list: the lowest begin right of centre, clear of 回到顶部
+        self.assertEqual(shop.choose_swipe(frame, recognize), ((1060, 640), (1060, 390)))
+        self.assertEqual(shop.choose_swipe(frame, recognize, avoid=(1060, 640)), ((1000, 640), (1000, 390)))
+        # Empty background only near the top (device run 1): the stroke must still end inside the list.
+        frame[340:720, 240:1240] = (250, 250, 250)  # the begin's 60 px patch fits only at y 310 and above
+        begin, end = shop.choose_swipe(frame, recognize)
+        self.assertEqual((begin[1], end[1]), (shop.LIST_TOP + shop.SWIPE_DISTANCE, shop.LIST_TOP))
+        frame[330:720, 240:1240] = (250, 250, 250)
+        self.assertIsNone(shop.choose_swipe(frame, recognize))
 
     def test_a_failed_check_offers_no_swipe(self):
         self.assertIsNone(shop.choose_swipe(list_frame(0), lambda node, override=None: None))
@@ -458,6 +474,7 @@ crop = lambda name: cv2.imread(str(fixtures / name))
 # UID-free crops of the survey frames (c3-shop-*), put back where they were on a flat list background.
 title, selected, unselected, tabs = (crop(n) for n in ("shop_title.png", "shop_tab_selected.png",
                                                        "shop_tab_unselected.png", "shop_tabs_forbidden.png"))
+stop_list = crop("shop_run1_stop_list.jpg")  # device run 1's stop frame, x 250-1240, y 60-420 (no UID)
 fangxin, xingshi, hongji, currency, paid = (crop(f"shop_card_{n}.png") for n in
                                             ("fangxin", "xingshi", "hongji", "currency", "paid"))
 # An unseen claimable card, made up: 虹迹赠礼 without its 已售罄 pill and with a counter of 「本周限购10/10」.
@@ -477,7 +494,9 @@ frames = {
     "hongji row": compose(selected, [(hongji, 733, 285), (currency, 270, 285), (paid, 962, 180)]),
     "claimable": compose(selected, [(claimable, 733, 285), (currency, 270, 285)]),
     "tab unselected": compose(unselected, []),
+    "run 1 stop": compose(selected, [(stop_list, 250, 60)]),
 }
+frames["run 1 stop"][420:720, 250:1240] = 250  # below the crop: white card panels, not background
 current, results = {}, {}
 
 class Frame(CustomController):
@@ -552,10 +571,10 @@ class FrameworkTests(unittest.TestCase):
                          "星实置业之礼": ["sold_out", "免费", True, [0, 1]]},
             "hongji row": {"虹迹赠礼": ["sold_out", "免费", True, [0, 1]]},
             "claimable": {"虹迹赠礼": ["claimable", "免费", False, [10, 10]]},
-            "tab unselected": {}})
+            "tab unselected": {}, "run 1 stop": {}})
         self.assertEqual({name: value["tab"] for name, value in outcome.items()},
                          {"list end": "selected", "hongji row": "selected", "claimable": "selected",
-                          "tab unselected": "unselected"})
+                          "tab unselected": "unselected", "run 1 stop": "selected"})
         for value in outcome.values():
             x, y = value["tab_tap"]
             self.assertLessEqual(max(abs(x - 129), abs(y - 348)), 6)  # the survey tapped (130,350)
@@ -564,7 +583,7 @@ class FrameworkTests(unittest.TestCase):
             self.assertFalse(value["back_in_price_zone"])
             self.assertIn("星石获取", value["forbidden"])
             self.assertIn("共鸣商店", value["forbidden"])
-        for name in ("list end", "hongji row", "claimable"):
+        for name in ("list end", "hongji row", "claimable", "run 1 stop"):
             begin, end, refused = outcome[name]["swipe"]
             self.assertEqual(refused, [None, None])
             self.assertEqual(begin[1] - end[1], shop.SWIPE_DISTANCE)
@@ -573,7 +592,12 @@ class FrameworkTests(unittest.TestCase):
                         <= set(row["prices"]), row["prices"])
         self.assertTrue(any("¥" in text or "￥" in text for text in row["forbidden"]), row["forbidden"])
         self.assertIsNotNone(row["beside_paid_band"])
-        self.assertEqual(outcome["list end"]["swipe"][0], [1070, 640])
+        self.assertEqual(outcome["list end"]["swipe"][0], [1060, 640])
+        # Run 1 stopped here: the only empty background is above the 颂愿感悟之礼 header (x ~500-1180, y ~80-355).
+        begin, end, _refused = outcome["run 1 stop"]["swipe"]
+        self.assertTrue(500 <= begin[0] <= 1180 and 310 <= begin[1] <= 360, begin)
+        self.assertGreaterEqual(end[1], shop.LIST_TOP)
+        self.assertIn("¥", "".join(outcome["run 1 stop"]["forbidden"]) + "".join(outcome["run 1 stop"]["prices"]))
 
 
 if __name__ == "__main__":

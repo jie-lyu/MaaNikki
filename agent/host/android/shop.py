@@ -20,9 +20,11 @@ never next to a forbidden word (购买, ¥, 共鸣, 获取 ...), and the swipe p
 anything but empty list background: a swipe started in the narrow gap between two card columns once did not scroll,
 swipes started on empty background always did. The survey's 400 px swipes scrolled the list 480-670 px (it keeps
 moving after the lift), more than a card's height plus the visible list allows without skipping a card; these swipes
-are 250 px over 1 s (the release speed sets the extra glide; not yet measured on the device), and the list's actual
-movement per swipe is logged. Any frame that is not the 商城 page on 甄选礼包, a card that cannot be read, or a gift
-not seen by the list's end stops the task, saves the frame and sends nothing more.
+are 250 px over 1 s (device run 1, 2026-11-26: one such swipe moved the list ~315 px, estimated from the frames,
+and its lift was confirmed on the device), and the list's measured movement is logged after every swipe; the frame
+the first list swipe was decided on is saved with the diagnostics. Any frame that is not the 商城 page on
+甄选礼包, a card that cannot be read, or a gift not seen by the list's end stops the task, saves the frame and sends
+nothing more.
 """
 from __future__ import annotations
 
@@ -61,9 +63,12 @@ PILL = (-80, -85, 160, 65)
 LIMIT = (-20, -185, 150, 50)
 LIMIT_TEXT = re.compile(r"本周限购\s*(\d+)\s*/\s*(\d+)")
 
-# Swipe candidates: begin points (column centres, lowest first), each swiped SWIPE_DISTANCE straight up.
-SWIPE_XS = (1070, 840, 610, 380)
-SWIPE_BEGIN_YS = (640, 600, 560, 520, 480, 440, 400, 360)
+# Swipe candidates: begin points on a grid over the whole list, lowest first and right to left within a row, each
+# swiped SWIPE_DISTANCE straight up; the end must stay inside the list (y >= LIST_TOP), so begins above y 310 never
+# qualify. Device run 1 stopped on a frame whose only empty background was x ~500-1180, y ~80-355 (above a section
+# header), where the old eight rows from y 360 found nothing.
+SWIPE_XS = tuple(range(1150, 299, -30))
+SWIPE_BEGIN_YS = tuple(range(640, 79, -10))
 SWIPE_DISTANCE = 250
 SWIPE_MS = 1000
 MAX_SWIPES = 16
@@ -182,16 +187,27 @@ def points_clear(frame, recognize, begin, end, zones=None) -> bool:
     return not any(_overlaps([px, py, 1, 1], zone) for px, py in (begin, end) for zone in zones)
 
 
+def in_list(point) -> bool:
+    x, y = point
+    lx, ly, lw, lh = LIST
+    return lx <= x < lx + lw and ly <= y < ly + lh
+
+
 def choose_swipe(frame, recognize, avoid=None):
-    """``(begin, end)`` of the first candidate whose begin is empty background and whose points are clear of every
-    price zone and forbidden label on this frame (``avoid``: a begin point not to use again), else None."""
+    """``(begin, end)`` of the first candidate whose begin is empty background, whose end is inside the list and
+    whose points are clear of every price zone and forbidden label on this frame (``avoid``: a begin point not to
+    use again, nor anything within 60 px of it), else None."""
     prices, forbidden = price_zones(recognize), forbidden_zones(recognize)
     if prices is None or forbidden is None:
         return None
     for y in SWIPE_BEGIN_YS:
         for x in SWIPE_XS:
             begin, end = (x, y), (x, y - SWIPE_DISTANCE)
-            if begin == avoid or not points_clear(frame, recognize, begin, end, prices):
+            if not (in_list(begin) and in_list(end)):
+                continue
+            if avoid is not None and abs(x - avoid[0]) < 60 and abs(y - avoid[1]) < 60:
+                continue
+            if not points_clear(frame, recognize, begin, end, prices):
                 continue
             if any(_overlaps([px, py, 1, 1], zone) for px, py in (begin, end) for zone in forbidden):
                 continue
@@ -340,7 +356,7 @@ def scan(rt):
     frame, recognize = settled(rt, "打开「甄选礼包」")
     if frame is None:
         return None
-    cards, moves, swipes, unchanged, last_begin = {}, [], 0, 0, None
+    cards, swipes, unchanged, last_begin = {}, 0, 0, None
     while True:
         for name, card in read_gifts(recognize).items():
             if name in cards:
@@ -351,7 +367,6 @@ def scan(rt):
                            f"本周限购 {card.limit}）", [frame])
             cards[name] = card
         if len(cards) == len(GIFTS):
-            rt.log(f"每周免费礼包：礼包列表滑动 {swipes} 次，每次移动 {moves} 像素（None：超过约 460 像素或没量出）。")
             return cards
         missing = "、".join(name for name in GIFTS if name not in cards)
         if swipes >= MAX_SWIPES:
@@ -361,6 +376,8 @@ def scan(rt):
             raise Stop("礼包列表上找不到可以安全开始滑动的空白处", [frame])
         begin, end = choice
         reference = frame
+        if swipes == 0:  # the list as the first swipe found it, for checking the start point afterwards
+            rt.diagnostic("android_weekly_before_first_swipe", f"第一次滑动礼包列表之前（{begin}→{end}）", image=frame)
 
         def same_list(frame, recognize, reference=reference, begin=begin, end=end):
             return (on_gifts(frame, recognize) and list_diff(reference, frame) < UNCHANGED_DIFF
@@ -368,16 +385,24 @@ def scan(rt):
         if not pages.swipe_on_page(rt, TITLE, begin, end, duration=SWIPE_MS, accept=same_list):
             return None
         swipes, last_begin = swipes + 1, begin
-        frame, recognize = settled(rt, "滑动礼包列表")
+        what = f"每周免费礼包：第 {swipes} 次滑动礼包列表 {begin}→{end}"
+        try:
+            frame, recognize = settled(rt, "滑动礼包列表")
+        except Stop:
+            rt.log(f"{what}，之后列表没有停稳，没量出移动。")
+            raise
         if frame is None:
             return None
         if list_diff(reference, frame) < UNCHANGED_DIFF:
+            rt.log(f"{what}，列表没有移动。")
             unchanged += 1
             if unchanged >= 2:
                 raise Stop(f"礼包列表连续两次滑不动（可能已经到底），仍没有看到：{missing}", [frame])
         else:
             unchanged = 0
-            moves.append(movement(reference, frame))
+            moved = movement(reference, frame)
+            rt.log(f"{what}，列表移动 {moved} 像素。" if moved is not None
+                   else f"{what}，列表移动超过约 460 像素或没量出。")
 
 
 def report(rt, cards) -> list:
