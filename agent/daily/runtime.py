@@ -407,9 +407,9 @@ class Runtime:
             if source_frame is None:
                 from host import UnsupportedInput
                 raise UnsupportedInput("安卓模拟器上的点击必须说明它依据的是哪一张截图，这一步暂不支持。")
-            if action == "Click":
-                from host.android import touch_point
-                fields = {**fields, "target": touch_point(fields["target"])}
+            from host.android import touch_point
+            fields = {**fields, **{name: touch_point(fields[name]) for name in ("target", "begin", "end")
+                                   if name in fields}}
         if self.stopped:
             return False
         self.check_focus()
@@ -520,6 +520,13 @@ class Runtime:
                 raise ForegroundChanged("设备上游戏不在前台，已取消本次输入，等待重新核对")
             if state.marks_of(source_frame) != (self._focus_generation, state.epoch):
                 raise ForegroundChanged("依据的截图已经过时（之后焦点变过），已取消本次输入，等待重新核对")
+            serial = self._device_serial()
+            try:
+                state.begin_touch(serial)  # on disk before the touch, or nothing is sent
+            except BaseException:
+                if state.halted:
+                    self._halt_unconfirmed()
+                raise
             try:
                 with measure("input.action"):
                     result = _android_dispatch(self.context, action, fields)
@@ -527,7 +534,9 @@ class Runtime:
             except BaseException:
                 self._halt_unconfirmed()
                 raise
-            if not succeeded:
+            if succeeded:
+                state.end_touch(serial)
+            else:
                 self._halt_unconfirmed()
                 from host import InputUnconfirmed
                 raise InputUnconfirmed(f"安卓模拟器上的「{action}」没有确认完成（可能留下按住的触点），已停止所有输入；"
@@ -600,6 +609,19 @@ class Runtime:
 
     def capture(self):
         return self._capture()
+
+    def _device_serial(self):
+        inputs = self._active_inputs()
+        target = getattr(inputs, "target", None) if inputs is not None else None
+        if target is None:
+            session = active_session()
+            adapter = session.ensure_adapter() if session is not None else None
+            target = getattr(adapter, "target", None) if adapter is not None else self._sessionless_target()
+        serial = getattr(target, "serial", None)
+        if not isinstance(serial, str) or not serial:
+            from host import UnsupportedInput
+            raise UnsupportedInput("不知道当前连接的是哪台安卓模拟器，这一步暂不发送。")
+        return serial
 
     def _sessionless_target(self):
         target = getattr(self, "_device_target", None)
@@ -741,10 +763,11 @@ class Runtime:
             if available is not None and not available():
                 return None
             self.check_focus()
+            # The epoch is read before the focus check, so a loss seen anywhere after it discards this frame.
+            epoch = device_input().epoch if device_focus else None
             if device_focus and not self._device_focus_ready():
                 continue
             obs_gen = self.observation_generation()
-            epoch = device_input().epoch
             with measure("capture"):
                 with measure("capture.post"):
                     result = self.controller.post_screencap()
@@ -795,11 +818,15 @@ class Runtime:
                 )
                 if adjusted is not None:
                     image = adjusted
+            if device_focus:
+                self.validate_frame(image)
+                if not device_input().mark_if_unchanged(image, self._focus_generation, epoch):
+                    count("capture.discarded")  # a focus loss was observed after the last check (e.g. while validating)
+                    continue
+                self.evidence.remember_frame(image, self._focus_generation)  # only an accepted frame is evidence
+                return image
             self.evidence.remember_frame(image, self._focus_generation)
             self.validate_frame(image)
-            if device_focus and not device_input().mark_if_unchanged(image, self._focus_generation, epoch):
-                count("capture.discarded")  # a focus loss was observed after the last check (e.g. while validating)
-                continue
             return image
 
     def recognize(self, node, fields=None, image=None):

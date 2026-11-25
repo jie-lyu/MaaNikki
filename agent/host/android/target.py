@@ -122,11 +122,18 @@ class AndroidTarget:
         return False  # the emulator window's own state does not stop ADB capture or input (minimised: unverified)
 
     def foreground(self) -> bool:
-        focused = self.focus_package() == GAME_PACKAGE
-        if not focused:
-            from host import device_input
-            device_input().observed_loss()  # every caller's negative reading makes earlier frames stale
-        return focused
+        return self._read_focus() == GAME_PACKAGE
+
+    def _read_focus(self) -> str | None:
+        """The focused package, with a negative reading recorded in the same locked step: no tap can slip in
+        between seeing another app in front and making earlier frames stale."""
+        from host import device_input
+        state = device_input()
+        with state.lock:
+            package = self.focus_package()
+            if package != GAME_PACKAGE:
+                state.observed_loss()
+            return package
 
     def hung(self) -> bool:
         return False
@@ -135,7 +142,7 @@ class AndroidTarget:
         return False  # never start, resume or switch apps on the device
 
     def focus_details(self) -> dict:
-        return {"backend": "android", "serial": self.serial, "focused_package": self.focus_package()}
+        return {"backend": "android", "serial": self.serial, "focused_package": self._read_focus()}
 
     def input(self) -> NoInput:
         return NoInput()

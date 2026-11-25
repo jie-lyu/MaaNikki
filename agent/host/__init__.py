@@ -99,39 +99,67 @@ class InputUnconfirmed(Exception):
 
 
 class DeviceInputState:
-    """Process-wide state of input to an Android device; only Android code paths create or change it.
+    """Process-wide state of input to Android devices; only Android code paths create or change it.
 
-    - halted: a touch was not confirmed released. Nothing more is sent by this agent, and the halt survives the
-      client starting a new agent process for the next batch (a marker under the data root's cache/); the client
-      clears it when MaaNikki starts (phase B5), which is the recovery boundary.
-    - epoch: advanced by every observed loss of device focus (AndroidTarget.foreground records its own negative
-      readings, so every caller takes part); a frame captured before it is stale.
-    - marks: (focus generation, epoch) per captured frame, recorded only if no loss was observed since the epoch
-      the capture started with (compared and recorded under the lock).
+    - epoch: advanced by every observed loss of device focus (AndroidTarget records its own negative readings,
+      under this lock); a frame captured before it is stale.
+    - marks: (focus generation, epoch) per captured frame, recorded only if the epoch the capture started with is
+      still current (compared and recorded under the lock).
+    - touches: before every touch a per-device marker (config/android-input/<serial>.json, outside the cache the
+      client can clear) is written and verified, and removed only after the touch is confirmed released. A marker
+      already present means an earlier touch on that device was never confirmed (this agent, a previous agent
+      process, or another agent driving the same device): nothing is sent. MaaNikki clears the markers when it
+      starts (phase B5), which is the recovery boundary.
+    - halted: this process saw an unconfirmed touch; nothing more is sent by it at all.
     - lock: one touch at a time; halt, focus and marks are checked inside it right before dispatch.
     """
 
-    MARKER = ("cache", "android-input-halted.json")
-
-    def __init__(self, marker=None):
+    def __init__(self, root=None):
         import threading
         self.lock = threading.RLock()
-        self.marker = marker
-        self.halted = bool(marker is not None and marker.exists())
+        self.root = root
+        self.halted = False
         self.epoch = 0
         self._marks = {}
+
+    def marker(self, serial):
+        import re as _re
+        if self.root is None:
+            return None
+        return self.root / "config" / "android-input" / (_re.sub(r"[^A-Za-z0-9._-]", "_", serial) + ".json")
+
+    def begin_touch(self, serial):
+        """Record that a touch on ``serial`` is about to be sent; raises unless that record is on disk."""
+        with self.lock:
+            path = self.marker(serial)
+            if path is None:
+                raise UnsupportedInput("没有可写的数据目录，无法记录安卓模拟器上的触摸，这一步暂不发送。")
+            if path.exists():
+                self.halted = True
+                raise InputUnconfirmed("这台模拟器上一次的触摸没有确认抬起，已停止所有输入；请检查模拟器后重新启动 MaaNikki。")
+            import datetime as _dt
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"pid": os.getpid(), "serial": serial,
+                                            "since": _dt.datetime.now().astimezone().isoformat()}), encoding="utf-8")
+                recorded = path.is_file()
+            except OSError:
+                recorded = False
+            if not recorded:
+                raise UnsupportedInput("无法记录安卓模拟器上的触摸（数据目录不可写），这一步暂不发送。")
+
+    def end_touch(self, serial):
+        """The touch on ``serial`` was confirmed released."""
+        with self.lock:
+            path = self.marker(serial)
+            try:
+                path.unlink()
+            except OSError:
+                pass  # left in place it halts the next touch: safe, never silent input
 
     def halt(self):
         with self.lock:
             self.halted = True
-            if self.marker is not None:
-                try:
-                    import datetime as _dt
-                    self.marker.parent.mkdir(parents=True, exist_ok=True)
-                    self.marker.write_text(json.dumps({"halted_at": _dt.datetime.now().astimezone().isoformat()}),
-                                           encoding="utf-8")
-                except OSError:
-                    pass  # the in-process halt still holds
 
     def observed_loss(self):
         with self.lock:
@@ -156,14 +184,16 @@ class DeviceInputState:
 
 
 _DEVICE_INPUT = None
+_DEVICE_INPUT_INIT = __import__("threading").Lock()
 
 
 def device_input() -> DeviceInputState:
     global _DEVICE_INPUT
-    if _DEVICE_INPUT is None:
-        from app_paths import DATA_ROOT
-        _DEVICE_INPUT = DeviceInputState(DATA_ROOT.joinpath(*DeviceInputState.MARKER))
-    return _DEVICE_INPUT
+    with _DEVICE_INPUT_INIT:
+        if _DEVICE_INPUT is None:
+            from app_paths import DATA_ROOT
+            _DEVICE_INPUT = DeviceInputState(DATA_ROOT)
+        return _DEVICE_INPUT
 
 
 class Target(Protocol):
