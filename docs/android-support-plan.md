@@ -240,6 +240,8 @@
 | 按键 BACK（4） | 在页面里等于返回（关闭日历、邮件、商城等）；**在大世界里弹出「退出游戏」确认框**（点了取消）；在设置的下拉框上按 BACK 关闭了整个设置页 | 【画面】 |
 | 按键 M（41）、SPACE、手柄来源的 BUTTON_A、摇杆来源的 `motionevent`、DPAD_UP（都在「触屏控制」模式下） | 都没有可见效果 | 【画面】连续截图 |
 | 文字输入 | 在兑换码输入框里输入 `PROBE123` 成功显示；随后清空并关闭，没有点「使用」 | 【画面】 |
+| Maatouch：按住时结束设备上的 MaaTouch 进程（2026-11-26，两次） | **框架对之后的抬起照样返回成功，触点却一直按着**：`dumpsys input` 在结束进程前后、12 秒后都报告 `down=true, deviceId=-1`；在同一点上新点一下（新的 MaaTouch 进程）才清掉。所以框架的返回值证明不了触点抬起了，确认要读设备（见交接的「按住触点的设备读数」） | 【设备读数】`.build/android/held/`，探针 `up` 一步 `ok: true` |
+| `dumpsys input` 读触点状态（2026-11-26） | 按住时是 `TouchStatesByDisplay` 加 `down=true, deviceId=-1`（注入的事件没有输入设备），抬起后是 `TouchStates: <no displays touched>`；`RecentQueue` 列出最近 10 个派发的事件（设备号、时间、动作），能看到每次点击的按下和抬起；读一次约 20 ms | 【设备读数】同上 |
 
 调用耗时（发出到返回，不等于游戏响应时间）：Maatouch 单击约 55–60 ms，滑动约 135–145 ms，touch_down/move/up 小于 1 ms（异步写管道）；AdbShell 单击约 26 ms。
 
