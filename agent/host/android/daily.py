@@ -37,7 +37,9 @@ layer_over_tab on every frame that shows the layer, before and after that tap, a
 nothing recognised; the first frame that is anything else (a reward layer over anything else among them) stops the
 task with that frame saved and nothing more sent. On the way back, the 每日灵感 back arrow needs that tab on the frame
 that decides and on both tap frames; while it takes effect, another tab or a reward layer stops; and the frame that
-shows the page gone must itself be 奇想日历 or the HUD.
+shows the page gone must itself be 奇想日历 or the HUD. A start on 每日灵感 goes back by the arrow bound to the tab the
+start frame showed, with the same wait (to_hud). Wherever a tab is required (settling, after a claim), a frame of
+每日灵感 showing another tab stops even when its score cannot be read (shown_tab does not need the score).
 """
 from __future__ import annotations
 
@@ -382,6 +384,8 @@ def settle(rt, mode) -> View | None:
                     return view
             else:
                 stable, since, count = view, time.monotonic(), 1
+        elif kind == "unsettled" and shown_tab(frame, recognize) not in (None, mode):
+            raise Stop(f"读取{NAMES[mode]}的奖励时每日灵感显示的是另一个页签（积分读不出）", [frame])
         elif kind not in ("invalid", "unsettled"):
             raise Stop(f"读取{NAMES[mode]}的奖励时出现了不该出现的画面", [frame])
         if time.monotonic() - start >= OPEN_WAIT:
@@ -392,22 +396,23 @@ def settle(rt, mode) -> View | None:
     return None
 
 
-def dismiss_layer(rt, mode, expected) -> bool:
+def dismiss_layer(rt, mode, expected):
     """One guarded tap on blank space of the reward layer (pages.tap_on_layer: the layer recognised with nothing
-    read around the point and 每日灵感 on ``mode``'s tab beneath it, on both tap frames). A tap frame that is not
-    that layer decides: the page back on ``mode`` with a view in ``expected`` continues (nothing was sent); anything
-    else, a reward layer over anything else among them, saves it and stops."""
+    read around the point and 每日灵感 on ``mode``'s tab beneath it, on both tap frames): "tapped". A tap frame that
+    is not that layer decides: the page back on ``mode`` with a view in ``expected`` continues, "gone" (nothing was
+    sent); anything else, a reward layer over anything else among them, saves it and stops. False when the run
+    stopped."""
     try:
-        return pages.tap_on_layer(rt, f"「{NAMES[mode]}」上的「恭喜获得」奖励层",
-                                  lambda screen, recognize: is_reward_layer(screen, recognize)
-                                  and blank_at_dismiss(recognize), DISMISS_POINT,
-                                  verify=lambda frame: layer_over_tab(frame, mode))
+        return "tapped" if pages.tap_on_layer(rt, f"「{NAMES[mode]}」上的「恭喜获得」奖励层",
+                                              lambda screen, recognize: is_reward_layer(screen, recognize)
+                                              and blank_at_dismiss(recognize), DISMISS_POINT,
+                                              verify=lambda frame: layer_over_tab(frame, mode)) else False
     except pages.LayerMismatch as mismatch:
         if rt.stopped:
             return False
         kind, view = classify(rt, mismatch.screen, mismatch.frame, mismatch.recognize)
         if kind == "view" and view in expected:
-            return True
+            return "gone"
         if kind == "layer" and not layer_over_tab(mismatch.frame, mode):
             raise Stop(f"「恭喜获得」奖励层下面认不出每日灵感的「{NAMES[mode]}」页签，没有点", [mismatch.frame]) from None
         raise Stop("「恭喜获得」奖励层在点之前变了，但画面没有回到每日灵感", [mismatch.frame]) from None
@@ -429,6 +434,7 @@ def claim(rt, mode, index, before) -> View | None:
     done = View(mode, before.score, before.circles[:index] + (CLAIMED,) + before.circles[index + 1:])
     marked = time.monotonic()
     deadline, settled_at, settled_frames, dismissed, frame, last, kind = marked + CLAIM_WAIT, None, 0, False, None, None, None
+    tapped = False  # whether the one dismissal was a tap ("tapped") or the layer went before it ("gone")
     while not rt.stopped and time.monotonic() < deadline:
         kind, view, frame, screen, recognize = look(rt)
         if kind is None:
@@ -449,16 +455,20 @@ def claim(rt, mode, index, before) -> View | None:
             settled_at, settled_frames = None, 0
             if not layer_over_tab(frame, mode):  # every layer frame, before and after the one tap
                 raise Stop(f"领取{what}之后出现的「恭喜获得」奖励层下面认不出每日灵感的「{NAMES[mode]}」页签"
-                           + ("" if dismissed else "，没有点"), [frame])
+                           + ("" if tapped else "，没有点"), [frame])
             if dismissed:
                 pass  # still the layer after the one tap: waited for until the deadline
             else:
                 dismissed = True
-                if not dismiss_layer(rt, mode, (pending, done)):
+                outcome = dismiss_layer(rt, mode, (pending, done))
+                if not outcome:
                     return None
+                tapped = outcome == "tapped"
                 marked = time.monotonic()
                 deadline = max(deadline, marked + AFTER_DISMISS_WAIT)
                 continue
+        elif kind == "unsettled" and shown_tab(frame, recognize) not in (None, mode):
+            raise Stop(f"领取{what}之后每日灵感显示的是另一个页签（积分读不出）", [frame])
         elif kind == "invalid" or ((kind == "unsettled" or (kind == "other" and pages.nothing_recognised(
                 screen, recognize))) and time.monotonic() - marked <= TRANSITION_ALLOWANCE):
             pass
@@ -470,7 +480,8 @@ def claim(rt, mode, index, before) -> View | None:
     if rt.stopped:
         return None
     if kind == "layer":
-        raise Stop(f"领取{what}后的「恭喜获得」奖励层" + ("点了一次空白处仍然没有关闭" if dismissed else "没有关闭"),
+        raise Stop(f"领取{what}后的「恭喜获得」奖励层" + (
+            "点了一次空白处仍然没有关闭" if tapped else "在点之前消失、又出现了，没有再点" if dismissed else "没有关闭"),
                    [frame])
     if last is not None and last.circles[index] == UNKNOWN:
         raise Stop(f"领取{what}之后，这个奖励圆圈的样子认不出（领取后的样子还没在设备上见过）", [frame])
@@ -545,10 +556,59 @@ def back_home(rt, mode, attempts: int = 3) -> bool:
     raise Stop("回大世界时返回次数用完了", [])
 
 
+def to_hud(rt, rejected, attempts: int = 4) -> bool:
+    """Back to the HUD before the task, as pages.to_hud(single=True) (each back arrow one attempt on the page with
+    exactly the title it was decided for, no other until fresh frames show that page gone; the HUD done; a modal,
+    the quit dialog or an unrecognised screen ``rejected(frame, reason)`` without a tap), with this task's checks: on
+    每日灵感 the arrow is bound to the tab that page showed when it was decided (shown_tab; both tap frames must show
+    that same tab, whichever task this is, else FrameMismatch goes to ``rejected`` with that frame; not settled on a
+    tab: rejected), and the wait for the arrow to take effect is left_page above (another tab or a reward layer
+    meanwhile: rejected with that frame)."""
+    for _ in range(attempts):
+        screen, frame, recognize = pages.screen_now(rt)
+        if frame is None:
+            return False
+        tab = None
+        if not rt._frame_still_valid(frame):
+            reason = "焦点变了，这张截图作废"
+        elif screen.kind == "hud":
+            return True
+        elif screen.kind == "page" and screen.title == TITLE and (tab := shown_tab(frame, recognize)) is None:
+            reason = "每日灵感没有停在一个页签上"
+        elif screen.kind == "page":
+            title = screen.title
+
+            def on_tab(frame_, recognize_, tab=tab):
+                return shown_tab(frame_, recognize_) == tab
+            try:
+                if not pages.tap_on_page(rt, title, actions.BACK_ARROW, accept=on_tab if tab else None, retry=False,
+                                         exact=True):
+                    return False
+            except pages.FrameMismatch as error:
+                frame, reason = error.frame, str(error)
+            else:
+                state, frame, after = left_page(rt, tab, title)
+                if state is None:
+                    return False
+                if state == "left":
+                    if after.kind == "hud":
+                        return True
+                    continue
+                shown = ("每日灵感的另一个页签" if after.kind == "page" and after.title == TITLE else
+                         after.reason or after.title or after.kind)
+                reason = (f"点了「{title}」的返回箭头之后，页面一直没有离开" if state == "timeout" else
+                          f"点了「{title}」的返回箭头之后出现了{shown}")
+        else:
+            reason = screen.reason or f"当前画面是{screen.kind}"
+        rejected(frame, reason)
+        return False
+    return False
+
+
 def collect(rt, mode) -> bool:
     name = NAMES[mode]
     start = []
-    if not pages.to_hud(rt, rejected=lambda frame, reason: start.append((frame, reason)), single=True):
+    if not to_hud(rt, lambda frame, reason: start.append((frame, reason))):
         if start:
             raise Stop(f"开始时不在大世界，也没法安全地回去：{start[0][1]}", [start[0][0]])
         return False
