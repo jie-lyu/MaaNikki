@@ -13,12 +13,13 @@ otherwise, so a tap never lands in the launcher or another app.
     python -I scripts/android/probe.py gesture FILE.json --purpose TEXT
     python -I scripts/android/probe.py key KEYCODE --purpose TEXT
     python -I scripts/android/probe.py text STRING --purpose TEXT
-    python -I scripts/android/probe.py shell COMMAND
+    python -I scripts/android/probe.py shell NAME [--grep REGEX]   (fixed read-only diagnostics)
     python -I scripts/android/probe.py reco NODE [NODE ...] (--frame PNG | --live) [--any-roi]
     python -I scripts/android/probe.py reco-all --frame PNG [--filter REGEX] [--any-roi] [--json OUT]
     python -I scripts/android/probe.py steps FILE.json --purpose TEXT
 
-Coordinates are in the agent's 1280x720 frame (the controller scales them to the device) unless
+Coordinates are in the agent's frame, whose short side is 720 (1280x720 on a 16:9 device; the controller scales
+them to the device) unless
 --raw is given, in which case they are device pixels of the raw frame. Common options: --adb PATH,
 --serial ADDR, --input maatouch|minitouch|adbshell (default maatouch), --screencap
 netcat|gzip|encode|encode-pull (default netcat), --log PATH.
@@ -33,7 +34,7 @@ A gesture or steps file is a JSON list of steps, run in order on one connection:
     {"swipe": [X1, Y1, X2, Y2], "ms": 300}
     {"key": KEYCODE}
     {"text": "..."}
-    {"input": "gamepad keyevent KEYCODE_BUTTON_A"}   `adb shell input ...` (sources the controller lacks)
+    {"input": "gamepad keyevent KEYCODE_BUTTON_A"}   one `adb shell input` key event or joystick axis
     {"wait": MS}
     {"capture": "NAME"}                 save a 720p frame as NAME.png under --out
     {"reco": ["NODE", ...]}             recognize on a fresh frame, printed and kept in the report
@@ -44,7 +45,8 @@ recognitions (nikki.ui_template, nikki.crown_ready) with their analyze unwrapped
 guard. A result describes the node's own definition on these pixels; it skips what the agent adds around it
 (pause and recapture, frame-size checks, runtime pipeline overrides some tasks apply, and the Python-side
 matching of the MaaNikki_Asset_* entries, which GameUI.asset_boxes does with caller-specific methods and
-thresholds). --any-roi re-runs a missed node with its ROI widened to the whole frame. A widened hit is only a
+thresholds). --any-roi re-runs a missed node with its ROI widened to the whole frame (not And/Or nodes, and not custom nodes
+without an explicit roi). A widened hit is only a
 candidate: it can be the same element moved, or a different element with the same text or shape (the HUD's
 商城 shortcut satisfies the shop page title), so each one needs a look at the frame.
 """
@@ -116,10 +118,22 @@ def focused_package(shell) -> str | None:
 
 
 MAX_DURATION_MS = 20000  # swipe, drag, hold and wait; MaaFramework casts a negative duration to a ~49-day hold
-SHELL_READERS = ("dumpsys", "getprop", "ls", "cat", "id", "ps", "pidof", "uname", "df",
-                 "settings get", "getevent -p", "getevent -lp", "getevent -pl", "logcat -d", "cmd package list")
-SHELL_EXACT = ("wm size", "wm density")  # with an argument these set the display size or density
-SHELL_FILTERS = ("grep", "head", "tail", "wc", "sort", "cut")
+# Fixed read-only diagnostics for `shell NAME`; output is filtered on the host (--grep), never on the device.
+DIAGNOSTICS = {
+    "focus": "dumpsys window",
+    "activities": "dumpsys activity activities",
+    "input": "dumpsys input",
+    "input-method": "dumpsys input_method",
+    "input-devices": "getevent -pl",
+    "display": "dumpsys display",
+    "size": "wm size",
+    "density": "wm density",
+    "props": "getprop",
+    "processes": "ps -A",
+    "packages": "cmd package list packages",
+}
+INPUT_STEP = re.compile(r"(gamepad|dpad|keyboard|joystick) keyevent KEYCODE_[A-Z0-9_]+"
+                        r"|joystick motionevent MOVE -?[01](\.[0-9]+)? -?[01](\.[0-9]+)?")
 
 
 def check_duration(ms) -> int:
@@ -129,32 +143,25 @@ def check_duration(ms) -> int:
     return value
 
 
-def check_read_only_shell(command: str) -> None:
-    """Refuse anything but a reader optionally piped into text filters: `shell` is for diagnostics, inputs go
-    through the logged and focus-checked commands."""
-    if re.search(r"[;&<>`$\n]", command):
-        raise ProbeError(f"shell: only a reader piped into filters is allowed, got {command!r}")
-    first, *rest = [part.strip() for part in command.split("|")]
-    if first not in SHELL_EXACT and not any(first == reader or first.startswith(reader + " ") for reader in SHELL_READERS):
-        raise ProbeError(f"shell: {first.split()[0] if first else command!r} is not an allowed reader")
-    if any(not part or part.split()[0] not in SHELL_FILTERS for part in rest):
-        raise ProbeError(f"shell: only {', '.join(SHELL_FILTERS)} may follow a pipe")
-
-
 class Device:
     """One AdbController connection plus the guard and log every input goes through.
 
     Every input that starts a gesture or sends a key or text (tap, swipe, down, key, text, input) is preceded by a
-    check that the game's window has input focus; moves and ups of a contact already down are not, because
-    Android delivers the rest of a touch gesture to the window that received its down, and a release must never
-    be held back. Each input is logged before it is sent (an unwritable log stops it) and its outcome after.
+    check that the game's window has input focus, and moves of a held contact recheck it at most every 0.2 s.
+    Releases are never held back. The check narrows the window for mistakes but is not a guarantee: focus can
+    change between the check and the dispatch, and a touchable overlay can take a tap while the game keeps
+    focus. Each input is logged before it is sent (an unwritable log stops it, except a release) and its outcome
+    after.
     """
+
+    FOCUS_RECHECK_S = 0.2  # during a held gesture, recheck focus before a move at most this often
 
     def __init__(self, controller, log: InputLog):
         self.controller = controller
         self.log = log
         self.held: set[int] = set()
         self.release_failed: set[int] = set()
+        self._focus_checked = 0.0
 
     # Shell runs through the controller's own adb, so it shares the transport the inputs use.
     def shell(self, command: str, timeout_ms: int = 10000) -> str | None:
@@ -163,6 +170,7 @@ class Device:
 
     def check_foreground(self, command="input", args=None) -> None:
         package = focused_package(self.shell)
+        self._focus_checked = time.monotonic()
         if package != GAME_PACKAGE:
             self.log.write(command, args, False, refused=f"focused window is {package!r}, not the game")
             raise ProbeError(f"the focused window is {package!r}, not the game; refusing to send {command}")
@@ -184,10 +192,7 @@ class Device:
     def tap(self, x, y, contact=0, hold_ms=0) -> bool:
         hold_ms = check_duration(hold_ms)
         if hold_ms == 0:
-            ok = self._send("tap", [x, y, contact], lambda: self.controller.post_click(x, y, contact, 1))
-            if not ok:
-                self._recover(contact)
-            return ok
+            return self._down_up("tap", [x, y, contact], contact, lambda: self.controller.post_click(x, y, contact, 1))
         if not self.down(x, y, contact):
             return False
         time.sleep(hold_ms / 1000)
@@ -195,17 +200,21 @@ class Device:
 
     def swipe(self, x1, y1, x2, y2, ms, contact=0) -> bool:
         ms = check_duration(ms)
-        ok = self._send("swipe", [x1, y1, x2, y2, ms, contact],
-                        lambda: self.controller.post_swipe(x1, y1, x2, y2, ms, contact, 1))
-        if not ok:
-            self._recover(contact)
-        return ok
+        return self._down_up("swipe", [x1, y1, x2, y2, ms, contact], contact,
+                             lambda: self.controller.post_swipe(x1, y1, x2, y2, ms, contact, 1))
 
-    def _recover(self, contact) -> None:
-        """A click or swipe is down/move/up inside the core, which forgets the contact before sending the up; after a
-        failure the contact may still be down on the device, so send an explicit up."""
+    def _down_up(self, command, args, contact, job_factory) -> bool:
+        """A click or swipe is down/move/up inside the core, which forgets the contact before sending the up. The
+        contact counts as held from just before dispatch until the call succeeds, so a failure or an interruption
+        leaves it for release_all, which sends an explicit up."""
+        self.check_foreground(command, args)
         self.held.add(contact)
-        self.up(contact)
+        ok = self._send(command, args, job_factory, starts=False)
+        if ok:
+            self.held.discard(contact)
+        else:
+            self.up(contact)
+        return ok
 
     def down(self, x, y, contact=0) -> bool:
         self.check_foreground("touch_down", [x, y, contact])
@@ -214,14 +223,27 @@ class Device:
                           starts=False)
 
     def move(self, x, y, contact=0) -> bool:
+        if contact not in self.held:
+            raise ProbeError(f"touch_move on contact {contact}, which this run has not put down")
+        # Android normally keeps a gesture with the window of its down, but a gesture can be transferred; recheck
+        # focus during long gestures (throttled so drags keep their timing) and stop moving if it was lost.
+        if time.monotonic() - self._focus_checked >= self.FOCUS_RECHECK_S:
+            self.check_foreground("touch_move", [x, y, contact])
         return self._send("touch_move", [x, y, contact], lambda: self.controller.post_touch_move(x, y, contact, 1),
                           starts=False)
 
     def up(self, contact=0) -> bool:
+        """Release a contact. Never blocked by focus, and a failing input log does not stop the release itself."""
         ok = False
         for _attempt in range(2):  # one retry: an up that failed leaves the finger on the screen
             try:
                 ok = self._send("touch_up", [contact], lambda: self.controller.post_touch_up(contact), starts=False)
+            except OSError:  # the log could not be written: release anyway, then report
+                try:
+                    ok = bool(self.controller.post_touch_up(contact).wait().succeeded)
+                except Exception:
+                    ok = False
+                print(f"ERROR: input log unwritable while releasing contact {contact}", file=sys.stderr)
             except Exception:
                 ok = False
             if ok:
@@ -243,6 +265,9 @@ class Device:
         return self._send("key", [code], lambda: self.controller.post_click_key(code))
 
     def text(self, value) -> bool:
+        # Maatouch writes text into its line-oriented command stream: a line break would start another command.
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+            raise ProbeError("text must not contain line breaks or other control characters")
         return self._send("text", [value], lambda: self.controller.post_input_text(value))
 
     def shell_input(self, arguments: str) -> bool:
@@ -250,8 +275,11 @@ class Device:
 
         Only the `input` command: anything else is a shell command, not an input, and goes through `shell`.
         """
-        if not re.fullmatch(r"[\w .:-]+", arguments):
-            raise ProbeError(f"unexpected characters in input arguments {arguments!r}")
+        # One key event, or one joystick axis position: nothing that can leave a pointer down or send several keys
+        # after a single focus check.
+        if not INPUT_STEP.fullmatch(arguments):
+            raise ProbeError(f"input step allows one '<source> keyevent KEYCODE_X' or 'joystick motionevent MOVE x y', "
+                             f"got {arguments!r}")
         self.check_foreground("input", [arguments])
         command = f"input {arguments}; echo __exit=$?"
         self.log.write("input", [arguments], None, phase="sending")
@@ -416,6 +444,8 @@ def judged(name: str, reco) -> dict:
     """
     if reco is None:
         return {"node": name, "hit": False, "box": None, "detail": {"error": "recognition did not start"}}
+    error = _find_error(reco.raw_detail) or _find_error([dataclasses.asdict(item) if dataclasses.is_dataclass(item)
+                                                         else item for item in reco.all_results or []])
     best = reco.best_result
     if dataclasses.is_dataclass(best):
         detail = _short(dataclasses.asdict(best))
@@ -431,8 +461,27 @@ def judged(name: str, reco) -> dict:
             detail["texts"] = texts[:16]
         if not candidates and isinstance(reco.raw_detail, dict):
             detail["raw"] = _short(reco.raw_detail)
+    if error:
+        detail = {**(detail or {}), "error": error}
     return {"node": name, "hit": bool(reco.hit), "box": list(reco.box) if reco.box else None,
             "algorithm": str(getattr(reco.algorithm, "value", reco.algorithm)), "detail": detail}
+
+
+def _find_error(value, depth=0):
+    """The first "error" string anywhere in a (nested) recognition detail: custom recognitions report failures that
+    way, and And/Or nodes carry their children's details."""
+    if depth > 8:
+        return None
+    if isinstance(value, dict):
+        if isinstance(value.get("error"), str) and value["error"]:
+            return value["error"]
+        value = list(value.values())
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            found = _find_error(item, depth + 1)
+            if found:
+                return found
+    return None
 
 
 def _jsonable(value):
@@ -655,6 +704,8 @@ def _input_step(device: Device, step: dict, contact: int) -> bool:
     if "move" in step:
         return device.move(*step["move"], contact)
     if "up" in step:
+        if int(step["up"]) not in device.held:
+            raise ProbeError(f"up on contact {step['up']}, which this run has not put down")
         return device.up(int(step["up"]))
     if "drag" in step:
         return device.drag(*step["drag"], int(step.get("ms", 300)), contact, int(step.get("steps", 10)))
@@ -759,13 +810,17 @@ def cmd_text(args) -> int:
 
 
 def cmd_shell(args) -> int:
-    check_read_only_shell(args.command)
+    """One of the fixed read-only DIAGNOSTICS; --grep filters its lines here, not on the device."""
+    command = DIAGNOSTICS[args.name]
+    pattern = re.compile(args.grep) if args.grep else None
     device = connect(args)
-    output = device.shell(args.command, args.timeout)
+    output = device.shell(command, args.timeout)
     if output is None:
         print("shell command failed", file=sys.stderr)
         return 1
-    print(output, end="" if output.endswith("\n") else "\n")
+    for line in output.splitlines():
+        if pattern is None or pattern.search(line):
+            print(line)
     return 0
 
 
@@ -846,7 +901,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("value")
     p.set_defaults(func=cmd_text)
     p = sub.add_parser("shell")
-    p.add_argument("command")
+    p.add_argument("name", choices=sorted(DIAGNOSTICS))
+    p.add_argument("--grep", help="keep only lines matching this regular expression")
     p.add_argument("--timeout", type=int, default=10000)
     p.set_defaults(func=cmd_shell)
     for name in ("steps", "gesture"):

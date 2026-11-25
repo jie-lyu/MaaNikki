@@ -5,7 +5,9 @@ of scripts/test_*.py so the Windows offline gate (scripts/run_offline_tests.py) 
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import tempfile
 import unittest
@@ -124,7 +126,7 @@ class ProbeTests(unittest.TestCase):
             probe.run_steps(device, [{"key": 3}, {"tap": [1, 2]}], out=None)
         self.assertEqual(controller.events, [("key", 3)])
 
-    def test_moves_and_ups_of_a_held_contact_are_not_blocked_by_focus(self):
+    def test_a_recent_focus_check_covers_the_moves_of_a_held_contact(self):
         device, controller = self.device()
         device.down(1, 2)
         controller.focus = FOCUS_LAUNCHER
@@ -179,39 +181,73 @@ class ProbeTests(unittest.TestCase):
             probe.run_steps(device, [{"reco": ["X"]}, {"tap": [1, 2]}], out=None, recognizer=Recognizer())
         self.assertEqual(controller.events, [])
 
-    def test_shell_allows_only_readers(self):
-        for ok in ("dumpsys window | grep mCurrentFocus", "getprop ro.build.version.sdk", "wm size",
-                   "getevent -pl | head -30"):
-            probe.check_read_only_shell(ok)
-        for bad in ("input tap 1 2", "dumpsys window; input keyevent 3", "am start x", "wm size 100x100x",
-                    "getprop x | sh", "wm density 160", "cat /x > /y", "echo $(input tap 1 2)", "settings put system x 1"):
+    def test_shell_offers_only_fixed_diagnostics(self):
+        parser = probe.build_parser()
+        self.assertEqual(parser.parse_args(["shell", "focus", "--grep", "mCurrentFocus"]).name, "focus")
+        for bad in ("input tap 1 2", "dumpsys batterystats --reset", "wm size 100x100"):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                parser.parse_args(["shell", bad])
+        self.assertTrue(all(" " not in c or c.split()[0] in {"dumpsys", "getevent", "wm", "ps", "cmd"}
+                            for c in probe.DIAGNOSTICS.values()))
+
+    def test_input_step_allows_one_key_event_or_axis(self):
+        for ok in ("gamepad keyevent KEYCODE_BUTTON_A", "dpad keyevent KEYCODE_DPAD_UP", "joystick motionevent MOVE 0 -1"):
+            self.assertTrue(probe.INPUT_STEP.fullmatch(ok), ok)
+        device, controller = self.device()
+        for bad in ("motionevent DOWN 100 100", "keyevent 3 4", "touchscreen motionevent DOWN 1 2",
+                    "gamepad keyevent KEYCODE_BUTTON_A KEYCODE_HOME", "joystick motionevent DOWN 0 0"):
             with self.assertRaises(probe.ProbeError, msg=bad):
-                probe.check_read_only_shell(bad)
+                device.shell_input(bad)
+        self.assertEqual(controller.events, [])
 
-    def test_every_input_is_logged_with_its_purpose(self):
-        device, _ = self.device()
-        device.tap(10, 20)
-        device.key(4)
-        records = self.records()
-        self.assertEqual([r["command"] for r in records], ["tap", "key"])
-        self.assertTrue(all(r["purpose"] == "test purpose" and r["ok"] for r in records))
-        self.assertEqual(records[0]["args"], [10, 20, 0])
+    def test_text_refuses_line_breaks(self):
+        device, controller = self.device()
+        for bad in ("a\nd 0 10 10 50", "x\ry", "tab\there"):
+            with self.assertRaises(probe.ProbeError):
+                device.text(bad)
+        self.assertEqual(controller.events, [])
 
-    def test_steps_lift_held_contacts_when_a_step_fails(self):
-        device, controller = self.device(fail={"click"})
-        steps = [{"drag": [200, 600, 200, 500], "ms": 0, "steps": 2, "contact": 0},
-                 {"tap": [1100, 600], "contact": 1}]
+    def test_moves_and_ups_of_contacts_not_put_down_are_refused(self):
+        device, controller = self.device()
         with self.assertRaises(probe.ProbeError):
-            probe.run_steps(device, steps, out=None)
-        self.assertEqual(controller.events[-1], ("up", 0))
-        self.assertEqual(device.held, set())
+            device.move(1, 2, contact=3)
+        with self.assertRaises(probe.ProbeError):
+            probe.run_steps(device, [{"up": 2}], out=None)
+        self.assertEqual(controller.events, [])
 
-    def test_steps_lift_held_contacts_when_interrupted(self):
-        device, controller = self.device(interrupt={"move"})
+    def test_long_gesture_rechecks_focus_before_moves(self):
+        device, controller = self.device()
+        device.down(1, 2)
+        controller.focus = FOCUS_LAUNCHER
+        device._focus_checked -= 1  # the last check is older than the recheck interval
+        with self.assertRaises(probe.ProbeError):
+            device.move(3, 4)
+        self.assertEqual(device.release_all(), [])
+        self.assertEqual(controller.events, [("down", 1, 2, 0), ("up", 0)])
+
+    def test_interrupted_click_is_released(self):
+        device, controller = self.device(interrupt={"click"})
         with self.assertRaises(KeyboardInterrupt):
-            probe.run_steps(device, [{"drag": [1, 2, 3, 4], "ms": 0, "steps": 1}], out=None)
+            device.tap(1, 2, contact=1)
+        self.assertEqual(device.held, {1})
+        self.assertEqual(device.release_all(), [])
+        self.assertEqual(controller.events[-1], ("up", 1))
+
+    def test_release_proceeds_when_the_log_cannot_be_written(self):
+        device, controller = self.device()
+        device.down(1, 2)
+        self.log_path.unlink()
+        self.log_path.mkdir()  # every further log write fails
+        self.assertEqual(device.release_all(), [])
         self.assertEqual(controller.events[-1], ("up", 0))
-        self.assertEqual(self.records(phase="interrupted")[0]["command"], "touch_move")
+
+    def test_custom_recognition_errors_are_kept(self):
+        class Reco:
+            hit, box, algorithm, best_result = False, None, "And", None
+            all_results = []
+            raw_detail = {"sub_results": [{"name": "x", "detail": {"all": [{"detail": {"error": "missing template"}}]}}]}
+        result = probe.judged("N", Reco())
+        self.assertEqual(result["detail"]["error"], "missing template")
 
     def test_drag_interpolates_and_stays_held(self):
         device, controller = self.device()
@@ -239,12 +275,12 @@ class ProbeTests(unittest.TestCase):
         self.assertTrue(device.shell_input("gamepad keyevent KEYCODE_BUTTON_A"))
         controller.post_shell = lambda command, timeout: (
             Job(True, "Error: Unknown command\n__exit=1\n") if command.startswith("input ") else focus(command, timeout))
-        self.assertFalse(device.shell_input("bogus"))
+        self.assertFalse(device.shell_input("keyboard keyevent KEYCODE_BOGUS"))
         records = self.records()
         self.assertEqual([r["command"] for r in records], ["input", "input"])
         self.assertEqual([r["ok"] for r in records], [True, False])
         with self.assertRaises(probe.ProbeError):
-            device.shell_input("keyevent 4; reboot")
+            device.shell_input("keyboard keyevent KEYCODE_BACK; reboot")
         self.assertEqual(len(self.records()), 2)
 
     def test_full_roi_override(self):
