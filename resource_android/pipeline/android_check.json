@@ -1,0 +1,10 @@
+{
+  "MaaNikki_AndroidCheck": {
+    "recognition": "DirectHit",
+    "action": "Custom",
+    "custom_action": "nikki.gameplay",
+    "custom_action_param": {"kind": "android_check"},
+    "post_delay": 0,
+    "next": []
+  }
+}

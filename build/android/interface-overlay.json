@@ -1,0 +1,27 @@
+{
+  "comment": "Android emulator controller and its read-only check task, applied on top of interface.json by scripts/android_interface.py for the Android development home (scripts/android_dev_home.py). No package uses it yet (phase F); the Windows package copies interface.json unchanged. Input is Maatouch only and capture RawByNetcat only (docs/android-support-plan.md decision 5); the client applies these instead of the device discovery's masks (phase B5b).",
+  "controller": [
+    {
+      "name": "nikki_android",
+      "label": "无限暖暖（安卓模拟器，开发中）",
+      "description": "连接安卓模拟器里的无限暖暖。开发中：目前只开放只读的「安卓检查」，不向游戏发送任何输入。",
+      "type": "Adb",
+      "display_short_side": 720,
+      "attach_resource_path": ["./resource_android"],
+      "adb": {
+        "input": "Maatouch",
+        "screencap": "RawByNetcat"
+      }
+    }
+  ],
+  "task": [
+    {
+      "name": "android_check",
+      "label": "安卓检查（只读）",
+      "entry": "MaaNikki_AndroidCheck",
+      "controller": ["nikki_android"],
+      "default_check": false,
+      "description": "确认游戏在模拟器前台后截一张图，报告认出的画面和各个动作此刻会点哪里；只截图和识别，不向游戏发送任何输入。"
+    }
+  ]
+}

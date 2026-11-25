@@ -117,6 +117,23 @@
     "NoKeyboardOrMouseTests.test_only_one_agent_process_uses_android_input"
    ]
   },
+  "test_android_overlay.py": {
+   "tests": [
+    "CheckTaskTests.test_no_frame_means_no_report",
+    "CheckTaskTests.test_the_check_reports_the_screen_and_sends_nothing",
+    "CheckTaskTests.test_the_check_runs_through_the_gameplay_action_without_recovery",
+    "DevHomeTests.test_a_runtime_without_the_adb_unit_is_refused",
+    "DevHomeTests.test_the_home_links_the_repository_and_writes_the_interface",
+    "InterfaceTests.test_the_android_interface",
+    "InterfaceTests.test_the_check_entry_and_its_tier",
+    "InterfaceTests.test_the_repository_interface_has_nothing_android"
+   ],
+   "known_failures": [],
+   "skips": [
+    "DevHomeTests.test_a_runtime_without_the_adb_unit_is_refused",
+    "DevHomeTests.test_the_home_links_the_repository_and_writes_the_interface"
+   ]
+  },
   "test_app_paths.py": {
    "tests": [
     "DataPathTests.test_older_overlay_is_ignored",

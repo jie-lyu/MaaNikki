@@ -38,9 +38,14 @@ class UIClickAction(CustomAction):
 class GameplayAction(CustomAction):
     def run(self, context, argv):
         runtime = Executors(context)
+        kind = None
         try:
             options = parse_custom_param(argv.custom_action_param)
             kind = options["kind"]
+            if kind == "android_check":
+                # Android only (its entry node is in resource_android/): one frame, no input, no recovery.
+                from host.android.check import check
+                return check(runtime)
             game = Gameplay(runtime)
             if kind == "weekly_shop":
                 from daily.shop import WeeklyShop
@@ -72,6 +77,6 @@ class GameplayAction(CustomAction):
             raise
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, cv2.error) as error:
             runtime.log(f"任务未完成：{error}。")
-            if not runtime.stopped:
+            if not runtime.stopped and kind != "android_check":  # the read-only check never sends input
                 runtime.main()
             return False
