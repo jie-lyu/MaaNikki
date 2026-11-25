@@ -40,8 +40,25 @@ def link(target: Path, source: Path) -> None:
     target.symlink_to(source, target_is_directory=source.is_dir())
 
 
-def runtime_dir(target: Path, runtime: Path, agent_binary: Path) -> None:
-    """``target`` as a directory of links: every entry of ``runtime``, and MaaAgentBinary."""
+def runtime_entries(runtime: Path, home: Path) -> dict:
+    """Every entry of ``runtime`` (but MaaAgentBinary and a generated home's marker) resolved to its final file,
+    read before anything is written: linking to resolved targets means a home built from another home's maafw/
+    never points back through links that a later rebuild replaces."""
+    entries = {}
+    for entry in runtime.iterdir():
+        if entry.name in ("MaaAgentBinary", RUNTIME_MARKER):
+            continue
+        resolved = entry.resolve()
+        if not resolved.exists():
+            sys.exit(f"{entry} does not resolve to a file")
+        if resolved == home or home in resolved.parents:
+            sys.exit(f"{entry} resolves into the home {home} being written")
+        entries[entry.name] = resolved
+    return entries
+
+
+def runtime_dir(target: Path, entries: dict, agent_binary: Path) -> None:
+    """``target`` as a directory of links to the resolved runtime entries and to MaaAgentBinary."""
     if target.is_symlink() or target.is_file():
         target.unlink()
     elif target.exists() and not (target / RUNTIME_MARKER).exists():
@@ -51,9 +68,8 @@ def runtime_dir(target: Path, runtime: Path, agent_binary: Path) -> None:
         if entry.is_symlink():
             entry.unlink()
     (target / RUNTIME_MARKER).write_text("written by scripts/android_dev_home.py\n", encoding="utf-8")
-    for entry in runtime.iterdir():
-        if entry.name not in ("MaaAgentBinary", RUNTIME_MARKER):  # another generated home's maafw/ is a fine source
-            (target / entry.name).symlink_to(entry, target_is_directory=entry.is_dir())
+    for name, resolved in entries.items():
+        (target / name).symlink_to(resolved, target_is_directory=resolved.is_dir())
     (target / "MaaAgentBinary").symlink_to(agent_binary, target_is_directory=True)
 
 
@@ -85,13 +101,16 @@ def main(argv=None) -> int:
     if agent_binary is None or not (agent_binary.resolve() / MAATOUCH).is_file():
         sys.exit(f"no MaaAgentBinary with {MAATOUCH} (the Maatouch helper pushed to the device); pass --agent-binary")
     agent_binary = agent_binary.resolve()
+    if agent_binary == home or home in agent_binary.parents:
+        sys.exit(f"MaaAgentBinary {agent_binary} resolves into the home {home} being written")
+    entries = runtime_entries(runtime, home)  # all reading done before the first write
     if home.exists() and any(home.iterdir()) and not (home / MARKER).exists():
         sys.exit(f"{home} exists and was not written by this script")
     home.mkdir(parents=True, exist_ok=True)
     (home / MARKER).write_text("written by scripts/android_dev_home.py\n", encoding="utf-8")
     for name in LINKED:
         link(home / name, ROOT / name)
-    runtime_dir(home / "maafw", runtime, agent_binary)
+    runtime_dir(home / "maafw", entries, agent_binary)
     link(home / "python", venv)
     target = home / "interface.json"
     if target.is_symlink():

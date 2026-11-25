@@ -121,8 +121,11 @@ class DevHomeTests(unittest.TestCase):
             self.assertTrue((first / "maafw/MaaAgentBinary" / android_dev_home.MAATOUCH).is_file())
             second = tmp / "second"
             self.assertEqual(build(second, first / "maafw"), 0)
-            self.assertTrue((second / "maafw/libMaaFramework.dylib").resolve().is_file())
-            self.assertTrue((second / "maafw/MaaAgentBinary" / android_dev_home.MAATOUCH).is_file())
+            self.assertEqual(build(first, second / "maafw"), 0)  # and back again: no links pointing at each other
+            for home in (first, second):
+                for name in ("libMaaFramework.dylib", "libMaaAdbControlUnit.dylib"):
+                    self.assertEqual((home / "maafw" / name).resolve(), (runtime / name).resolve())
+                self.assertTrue((home / "maafw/MaaAgentBinary" / android_dev_home.MAATOUCH).is_file())
 
     def test_a_home_without_the_maatouch_helper_is_refused(self):
         import android_dev_home
