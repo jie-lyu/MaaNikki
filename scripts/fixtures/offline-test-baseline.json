@@ -291,9 +291,14 @@
     "SwipeOnPageTests.test_the_swipe_is_sent_on_the_confirming_frame_through_the_touch_path",
     "SwipePointTests.test_a_failed_check_offers_no_swipe",
     "SwipePointTests.test_a_price_band_excludes_the_whole_band_and_the_top_button_is_avoided",
+    "SwipePointTests.test_an_end_on_empty_background_is_preferred",
     "SwipePointTests.test_the_begin_point_must_be_empty_background",
-    "SwipePointTests.test_the_end_point_must_be_empty_background_too",
-    "TabTests.test_a_recognition_that_could_not_run_is_not_an_absent_tab"
+    "SwipePointTests.test_the_end_falls_back_to_a_card_only_when_no_blank_stroke_fits",
+    "TabTests.test_a_recognition_that_could_not_run_is_not_an_absent_tab",
+    "ToHudSingleTests.test_a_dialog_or_popup_after_a_back_arrow_stops_with_that_frame",
+    "ToHudSingleTests.test_reaching_the_hud_after_the_last_allowed_back_arrow_is_success",
+    "ToHudSingleTests.test_the_wait_is_for_the_page_that_was_tapped",
+    "ToHudSingleTests.test_titles_must_match_exactly"
    ],
    "known_failures": [],
    "skips": []

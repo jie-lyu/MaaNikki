@@ -16,14 +16,14 @@ a claimable gift is only reported, never tapped.
 
 Every touch is a guarded tap or swipe decided and confirmed on fresh frames (pages.tap_shortcut from the HUD only,
 pages.tap_on_page, pages.swipe_on_page): never next to a forbidden word (购买, ¥, 共鸣, 获取 ...), and both swipe
-points also never on or next to a price band (¥, bare digits, 免费: the whole band of the card, not only its text), on
-the 回到顶部 button, or on anything but empty list background (so neither the press nor the lift is on a card): a
-swipe started in the narrow gap between two card columns once did not scroll, swipes started on empty background
-always did. The survey's 400 px swipes scrolled the list 480-670 px (it keeps moving after the lift), more than a
-card's height plus the visible list allows without skipping a card; these swipes are at most 250 px over 1 s (device
-run 1, 2026-11-26: one such swipe moved the list ~315 px, estimated from the frames, and its lift was confirmed on
-the device), shorter at the same speed where the empty background is not tall enough, and the list's measured
-movement is logged after every swipe; the frame the first list swipe was decided on is kept (keep_frame).
+points also never on or next to a price band (¥, bare digits, 免费: the whole band of the card, not only its text) or
+on the 回到顶部 button; the press is always on empty list background, the lift preferably too (else on a card's
+illustration, see SWIPE_DISTANCES): a swipe started in the narrow gap between two card columns once did not
+scroll, swipes started on empty background always did. The survey's 400 px swipes scrolled the list 480-670 px (it
+keeps moving after the lift), more than a card's height plus the visible list allows without skipping a card; these
+swipes are at most 250 px over 1 s (device run 1, 2026-11-26: one such swipe moved the list ~315 px, estimated from
+the frames, and its lift was confirmed on the device), shorter at the same speed when that is the longest stroke
+with both ends on empty background, and the list's measured movement is logged after every swipe; the frame the first list swipe was decided on is kept (keep_frame).
 
 The way to the HUD before the task taps each back arrow once and waits for that page to go before another
 (pages.to_hud with single=True).
@@ -75,12 +75,18 @@ LIMIT = (-20, -185, 150, 50)
 LIMIT_TEXT = re.compile(r"本周限购\s*(\d+)\s*/\s*(\d+)")
 
 # Swipe candidates: begin points on a grid over the whole list, lowest first and right to left within a row, each
-# swiped straight up by one of SWIPE_DISTANCES, the longest that fits anywhere first. Both ends must be empty list
-# background (blank), so neither the press nor the lift is on a card (review round 2: on c3-shop-gifts-00 and -02
-# the old begin-only check let 250 px strokes end inside the ¥68 and ¥198 cards). A full SWIPE_DISTANCE stroke needs
-# empty background ~310 px tall; c3-shop-gifts-02 (a row of four cards above a row of one) has only ~150 px, so a
-# shorter stroke is used there, at the same speed (SWIPE_MS per SWIPE_DISTANCE). Device run 1 stopped on a frame
-# whose only empty background was x ~500-1180, y ~80-355 (above a section header).
+# swiped straight up by one of SWIPE_DISTANCES. The begin (the finger-down point) must always be empty list background
+# (blank) on both tap frames. The end (the lift) must be inside the list, clear of every price zone (the whole price
+# band of a card, 购买), the 回到顶部 button and the forbidden-word margin on both frames, and is preferably empty
+# background too: candidates with both ends blank come first (longest stroke first), and only when none fits does
+# the end fall back to any other point that passes those checks, e.g. a card's illustration. Why a lift on a card is
+# accepted: a press belongs to the widget under the finger-down point, so a stroke that starts on empty background is
+# not expected to activate a card when it lifts there (inferred from Unreal UMG touch handling, not proven); device run
+# 1 (5652a22d) sent (1150,490)->(1150,240), which ends inside the ¥68 card on that layout, and nothing opened; any
+# popup after a swipe stops the task anyway. Requiring both ends blank stopped device run 2 (839474c8) on a real layout
+# with two full rows of paid cards above a row of one (empty background only at x ~500-1230, y ~575-720), and on
+# saved frame c3-shop-gifts-02 no fully blank stroke fits either. A full SWIPE_DISTANCE stroke with both ends blank
+# needs empty background ~310 px tall; shorter strokes keep the same speed (SWIPE_MS per SWIPE_DISTANCE).
 SWIPE_XS = tuple(range(1150, 299, -30))
 SWIPE_BEGIN_YS = tuple(range(640, 79, -10))
 SWIPE_DISTANCE = 250
@@ -209,11 +215,11 @@ def blank(frame, point) -> bool:
                 and mean[1] >= BLANK_SATURATION)
 
 
-def points_clear(frame, recognize, begin, end, zones=None) -> bool:
-    """Both points on empty list background (not on or within BLANK_HALF of a card) and in no price zone (zones
-    read on this frame)."""
+def points_clear(frame, recognize, begin, end, zones=None, *, end_blank=True) -> bool:
+    """The begin on empty list background (not on or within BLANK_HALF of a card), with ``end_blank`` the end too,
+    and neither point in a price zone (zones read on this frame)."""
     zones = price_zones(recognize) if zones is None else zones
-    if zones is None or not (blank(frame, begin) and blank(frame, end)):
+    if zones is None or not blank(frame, begin) or (end_blank and not blank(frame, end)):
         return False
     return not any(_overlaps([px, py, 1, 1], zone) for px, py in (begin, end) for zone in zones)
 
@@ -225,25 +231,27 @@ def in_list(point) -> bool:
 
 
 def choose_swipe(frame, recognize, avoid=None):
-    """``(begin, end)`` of the first candidate (longest stroke first) whose points are both inside the list, both on
-    empty background and clear of every price zone and forbidden label on this frame (``avoid``: a begin point not
-    to use again, nor anything within 60 px of it), else None."""
+    """``(begin, end)`` of the first candidate whose points are both inside the list and clear of every price zone
+    and forbidden label on this frame, with the begin on empty background: first those whose end is empty background
+    too (longest stroke first), then any other (``avoid``: a begin point not to use again, nor anything within 60 px
+    of it); None when there is none."""
     prices, forbidden = price_zones(recognize), forbidden_zones(recognize)
     if prices is None or forbidden is None:
         return None
-    for distance in SWIPE_DISTANCES:
-        for y in SWIPE_BEGIN_YS:
-            for x in SWIPE_XS:
-                begin, end = (x, y), (x, y - distance)
-                if not (in_list(begin) and in_list(end)):
-                    continue
-                if avoid is not None and abs(x - avoid[0]) < 60 and abs(y - avoid[1]) < 60:
-                    continue
-                if not points_clear(frame, recognize, begin, end, prices):
-                    continue
-                if any(_overlaps([px, py, 1, 1], zone) for px, py in (begin, end) for zone in forbidden):
-                    continue
-                return begin, end
+    for end_blank in (True, False):
+        for distance in SWIPE_DISTANCES:
+            for y in SWIPE_BEGIN_YS:
+                for x in SWIPE_XS:
+                    begin, end = (x, y), (x, y - distance)
+                    if not (in_list(begin) and in_list(end)):
+                        continue
+                    if avoid is not None and abs(x - avoid[0]) < 60 and abs(y - avoid[1]) < 60:
+                        continue
+                    if not points_clear(frame, recognize, begin, end, prices, end_blank=end_blank):
+                        continue
+                    if any(_overlaps([px, py, 1, 1], zone) for px, py in (begin, end) for zone in forbidden):
+                        continue
+                    return begin, end
     return None
 
 
@@ -499,17 +507,18 @@ def scan(rt):
         if choice is None:
             raise Stop("礼包列表上找不到可以安全开始滑动的空白处", [frame])
         begin, end = choice
+        end_blank = blank(frame, end)  # kept on the confirming frames: a blank end must still be blank
         reference = frame
         if swipes == 0:  # the list as the first swipe found it, for checking the points afterwards
             keep_frame("before_first_swipe", frame)
 
-        def same_list(frame, recognize, reference=reference, begin=begin, end=end):
+        def same_list(frame, recognize, reference=reference, begin=begin, end=end, end_blank=end_blank):
             return (on_gifts(frame, recognize) and list_diff(reference, frame) < UNCHANGED_DIFF
-                    and points_clear(frame, recognize, begin, end))
+                    and points_clear(frame, recognize, begin, end, end_blank=end_blank))
         if not swipe(rt, begin, end, stroke_ms(begin, end), same_list):
             return None
         swipes, last_begin = swipes + 1, begin
-        what = f"每周免费礼包：第 {swipes} 次滑动礼包列表 {begin}→{end}"
+        what = f"每周免费礼包：第 {swipes} 次滑动礼包列表 {begin}→{end}" + ("" if end_blank else "（终点不在空白处）")
         try:
             frame, recognize = settled(rt, "滑动礼包列表")
         except Stop:

@@ -86,8 +86,8 @@ def nothing_recognised(screen, recognize) -> bool:
     return True
 
 
-def _target(screen, recognize, title, node, override):
-    if not is_page(screen, title):
+def _target(screen, recognize, title, node, override, exact=False):
+    if not is_page(screen, title) or (exact and screen.title != title):
         raise PageMismatch(f"当前画面不是「{title}」页面")
     result = recognize(node, override) if override else recognize(node)
     if not actions._hit(result):
@@ -191,14 +191,15 @@ def _forbidden_near(recognize, box) -> str | None:
 
 
 def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, verify=None, accept=None,
-                retry: bool = True) -> bool:
+                retry: bool = True, exact: bool = False) -> bool:
     """Tap ``node`` on the page titled ``title`` (decided and confirmed on fresh frames). ``verify(frame)`` and
     ``accept(frame, recognize)``, when given, must hold on both of them too (e.g. a button that is enabled, the whole
     expected state of the page). False when the run stopped; PageMismatch (nothing sent) when the page, its target,
     ``verify`` or ``accept`` fails on the deciding frame; GuardRefusal when the point is next to a forbidden word.
     A confirming frame that does not agree means deciding again, unless ``retry`` is False: then a deciding or
     confirming frame that does not agree raises FrameMismatch with that frame (only a frame voided by a focus change
-    is decided again)."""
+    is decided again). ``exact``: the page's title must be exactly ``title`` on both frames (not only start with
+    it, e.g. 美鸭梨 and 美鸭梨挖掘)."""
     from task_control import ForegroundChanged
 
     def mismatch(reason, screen_, frame_, recognize_):
@@ -210,7 +211,7 @@ def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, 
         if decided is None:
             return False
         try:
-            target = _target(screen, recognize, title, node, override)
+            target = _target(screen, recognize, title, node, override, exact)
         except PageMismatch as error:
             mismatch(str(error), screen, decided, recognize)
             raise
@@ -226,7 +227,7 @@ def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, 
         if confirming is None:
             return False
         try:
-            confirmed = _target(fresh, recognize_b, title, node, override)
+            confirmed = _target(fresh, recognize_b, title, node, override, exact)
         except PageMismatch as error:
             mismatch(f"确认时{error}", fresh, confirming, recognize_b)
             continue
@@ -319,9 +320,12 @@ def to_hud(rt, attempts: int = 4, *, rejected=None, single: bool = False) -> boo
     showing (both tap frames, with the forbidden-label check); a modal, the quit dialog or an unrecognised screen
     stops the task without a tap. ``rejected(frame, reason)``, when given, receives the frame it stopped on.
 
-    ``single``: each back arrow is one attempt (tap_on_page with retry=False: a tap frame that is not that page
-    stops, with that frame), and no other back arrow is decided until fresh frames show the page gone (left_page):
-    a page still showing after LEAVE_PAGE_WAIT stops instead of being tapped again."""
+    ``single``: each back arrow is one attempt on the page with exactly the title it was decided for (tap_on_page
+    with retry=False, both tap frames that exact page; a tap frame that is not stops, with that frame), and no other
+    back arrow is decided until fresh frames show that page gone (left_page): the HUD (done, also after the last
+    allowed back arrow) or a page with another title. That page staying up for LEAVE_PAGE_WAIT, or anything else
+    positively recognised meanwhile (the quit dialog, a modal such as 兑换奖励, an unknown popup), stops with that
+    frame instead of being tapped again."""
     for _ in range(attempts):
         screen, frame, _ = screen_now(rt)
         if frame is None:
@@ -335,18 +339,22 @@ def to_hud(rt, attempts: int = 4, *, rejected=None, single: bool = False) -> boo
                 continue
             return False
         elif screen.kind == "page":
+            title = screen.title
             try:
-                if not tap_on_page(rt, screen.title, actions.BACK_ARROW, retry=False):
+                if not tap_on_page(rt, title, actions.BACK_ARROW, retry=False, exact=True):
                     return False
             except FrameMismatch as error:
                 frame, reason = error.frame, str(error)
             else:
-                left, frame = left_page(rt, screen.title)
-                if left:
-                    continue
-                if frame is None:
+                state, frame, after = left_page(rt, title)
+                if state is None:
                     return False
-                reason = f"点了「{screen.title}」的返回箭头之后，页面一直没有离开"
+                if state == "left":
+                    if after.kind == "hud":
+                        return True
+                    continue
+                reason = (f"点了「{title}」的返回箭头之后，页面一直没有离开" if state == "timeout" else
+                          f"点了「{title}」的返回箭头之后出现了{after.reason or after.title or after.kind}")
         else:
             reason = screen.reason or f"当前画面是{screen.kind}"
         if rejected is not None:
@@ -356,24 +364,28 @@ def to_hud(rt, attempts: int = 4, *, rejected=None, single: bool = False) -> boo
 
 
 def left_page(rt, title: str, seconds: float = LEAVE_PAGE_WAIT, step: float = .3):
-    """``(True, frame)`` once a fresh valid frame shows something recognised that is not the page titled exactly
-    ``title`` (frames of that page, and frames on which nothing at all is recognised yet, are waited through);
-    ``(False, frame)`` when the time runs out (the last frame looked at); ``(False, None)`` when the run stopped."""
+    """After a back arrow on the page titled exactly ``title``: ``("left", frame, screen)`` once a fresh valid frame
+    shows the HUD or a page with another title; ``("other", frame, screen)`` on the first one that shows anything
+    else recognised (the quit dialog, a modal, an unknown screen with a close mark, duck or back arrow: not proof
+    that the page went); ``("timeout", frame, screen)`` when the time runs out first (the last valid frame); frames
+    of that page and frames on which nothing at all is recognised yet are waited through. ``(None, None, None)``
+    when the run stopped."""
     import time
-    deadline, last = time.monotonic() + seconds, None
+    deadline, last = time.monotonic() + seconds, (None, None)
     while not rt.stopped:
         screen, frame, recognize = screen_now(rt)
         if frame is None:
-            return False, None
+            return None, None, None
         if rt._frame_still_valid(frame):
-            last = frame
-            still = screen.kind == "page" and screen.title == title
-            if not still and not nothing_recognised(screen, recognize):
-                return True, frame
+            last = frame, screen
+            if screen.kind == "hud" or (screen.kind == "page" and screen.title != title):
+                return "left", frame, screen
+            if not (screen.kind == "page" or nothing_recognised(screen, recognize)):
+                return "other", frame, screen
         if time.monotonic() >= deadline:
-            return False, last if last is not None else frame
+            return ("timeout", *last) if last[0] is not None else ("timeout", frame, screen)
         rt.pause(step)
-    return False, None
+    return None, None, None
 
 
 def tap_shortcut(rt, action: str, *, delay: float = .35) -> bool:

@@ -528,6 +528,88 @@ class EntryRecoveryTests(unittest.TestCase):
         left.assert_not_called()
 
 
+class ToHudSingleTests(unittest.TestCase):
+    """pages.to_hud(single=True) on a scripted stack of screens (review round 3)."""
+
+    @staticmethod
+    def page(title):
+        return Screen("page", {"back": BACK_BOX}, title=title)
+
+    def run_stack(self, stack, inserts=None, attempts=4):
+        """``stack``: screens from the top (shown) down; a back-arrow tap pops the top one. ``inserts``: frames shown
+        instead, keyed by the number of taps sent (one per capture)."""
+        stack, inserts, sent, rejected = list(stack), dict(inserts or {}), [], []
+        images = {}
+
+        def recognize(node, override=None):
+            return result([row("", BACK_BOX)]) if node == actions.BACK_ARROW else MISS
+
+        def screen_now(rt):
+            if inserts.get(len(sent)):
+                return inserts[len(sent)].pop(0)
+            top = stack[0]
+            image = images.setdefault(id(top), np.full((720, 1280, 3), len(images) + 1, np.uint8))
+            return top, image, recognize
+
+        def action(name, target=None, source_frame=None, **fields):
+            assert name == "Click" and target == BACK_BOX and source_frame is not None
+            sent.append(stack[0].title)
+            stack.pop(0)
+            return True
+        rt = SimpleNamespace(stopped=False, _frame_still_valid=Mock(return_value=True), pause=Mock(return_value=True),
+                             TOUCH_KEY_ATTEMPTS=3, action=action)
+        with patch.object(pages, "screen_now", side_effect=screen_now), \
+                patch("time.monotonic", side_effect=itertools.count(0, .25).__next__):
+            outcome = pages.to_hud(rt, attempts, rejected=lambda frame, reason: rejected.append((frame, reason)),
+                                   single=True)
+        return outcome, sent, rejected
+
+    def test_reaching_the_hud_after_the_last_allowed_back_arrow_is_success(self):
+        stack = [self.page(t) for t in ("一", "二", "三", "四")] + [HUD]
+        outcome, sent, rejected = self.run_stack(stack, attempts=4)
+        self.assertTrue(outcome)
+        self.assertEqual(sent, ["一", "二", "三", "四"])
+        self.assertEqual(rejected, [])
+
+    def test_a_dialog_or_popup_after_a_back_arrow_stops_with_that_frame(self):
+        modal = (Screen("modal", {"close": [929, 177, 36, 36]}, title="兑换奖励"), np.full((720, 1280, 3), 9, np.uint8),
+                 lambda node, override=None: MISS)
+        for label, other in (("quit", QUIT), ("modal", modal), ("popup", POPUP)):
+            with self.subTest(label):
+                # Review round 3 replay: one Back, the dialog for one poll, then the same page again.
+                shop_page = self.page("商城")
+                again = (shop_page, np.full((720, 1280, 3), 4, np.uint8),
+                         lambda node, override=None: result([row("", BACK_BOX)])
+                         if node == actions.BACK_ARROW else MISS)
+                outcome, sent, rejected = self.run_stack([shop_page, shop_page, HUD], {1: [other] + [again] * 10})
+                self.assertFalse(outcome)
+                self.assertEqual(sent, ["商城"])  # never a second Back
+                (frame, _reason), = rejected
+                self.assertIs(frame, other[1])
+
+    def test_titles_must_match_exactly(self):
+        # Review round 3 replay: the look sees 美鸭梨, the tap frames show 美鸭梨挖掘 (the same prefix): no tap.
+        dig = (self.page("美鸭梨挖掘"), np.full((720, 1280, 3), 6, np.uint8),
+               lambda node, override=None: result([row("", BACK_BOX)]) if node == actions.BACK_ARROW else MISS)
+        outcome, sent, rejected = self.run_stack([self.page("美鸭梨"), HUD], {0: [(self.page("美鸭梨"), np.zeros(
+            (720, 1280, 3), np.uint8), dig[2]), dig, dig, dig]})
+        self.assertFalse(outcome)
+        self.assertEqual(sent, [])
+        (frame, _reason), = rejected
+        self.assertIs(frame, dig[1])
+
+    def test_the_wait_is_for_the_page_that_was_tapped(self):
+        # 美鸭梨挖掘 tapped (its exact title on both tap frames), still showing afterwards: not "another page".
+        stack = [self.page("美鸭梨挖掘"), HUD]
+        dig = stack[0]
+        outcome, sent, rejected = self.run_stack(stack, {1: [(dig, np.full((720, 1280, 3), 6, np.uint8),
+                                                              lambda node, override=None: MISS)] * 40})
+        self.assertFalse(outcome)
+        self.assertEqual(sent, ["美鸭梨挖掘"])
+        self.assertEqual(len(rejected), 1)
+        self.assertIn("一直没有离开", rejected[0][1])
+
+
 class CardTests(unittest.TestCase):
     def read(self, card, title_y=450):
         game = Game({"虹迹赠礼": {**card, "y": title_y}})
@@ -612,8 +694,8 @@ class SwipePointTests(unittest.TestCase):
         frame[160:720, 240:1240] = (250, 250, 250)  # no room even for the shortest stroke
         self.assertIsNone(shop.choose_swipe(frame, recognize))
 
-    def test_the_end_point_must_be_empty_background_too(self):
-        # Review round 2: the stroke's lift must not land on a card either (c3-shop-gifts-00 and -02 on the device).
+    def test_an_end_on_empty_background_is_preferred(self):
+        # Review round 2: when a stroke with both ends on empty background fits, one is used.
         frame = list_frame(0)
         frame[60:720, 240:1240] = BACKGROUND
         frame[330:450, 300:1240] = (250, 250, 250)  # a row of cards above the empty lower part of the list
@@ -624,6 +706,28 @@ class SwipePointTests(unittest.TestCase):
         for point in (begin, end):
             self.assertTrue(shop.blank(frame, point), point)
             self.assertFalse(330 - shop.BLANK_HALF < point[1] < 450 + shop.BLANK_HALF, point)
+
+    def test_the_end_falls_back_to_a_card_only_when_no_blank_stroke_fits(self):
+        # Device run 2 (839474c8): cards everywhere above y ~560, empty background only below. The press stays on
+        # empty background; the lift may then lie on a card's illustration (still clear of price zones and words).
+        frame = list_frame(0)
+        frame[60:720, 240:1240] = BACKGROUND
+        frame[60:560, 270:1180] = (250, 250, 250)
+        recognize = lambda node, override=None: MISS  # noqa: E731
+        begin, end = shop.choose_swipe(frame, recognize)
+        self.assertEqual((begin, end), ((1060, 640), (1060, 390)))
+        self.assertTrue(shop.blank(frame, begin))
+        self.assertFalse(shop.blank(frame, end))
+        self.assertTrue(shop.points_clear(frame, recognize, begin, end, [], end_blank=False))
+        self.assertFalse(shop.points_clear(frame, recognize, begin, end, []))  # a blank-end choice would not hold
+        # A price band where the lift would be: that end is never used; the press is never on a card.
+        band = lambda node, override=None: result([row("¥98", [1000, 380, 60, 24])]) \
+            if node == shop.PRICE_GUARD else MISS  # noqa: E731
+        choice = shop.choose_swipe(frame, band)
+        self.assertNotEqual(choice[1], (1060, 390))
+        self.assertTrue(shop.blank(frame, choice[0]))
+        frame[60:720, 270:1180] = (250, 250, 250)  # no empty background for the press at all
+        self.assertIsNone(shop.choose_swipe(frame, recognize))
 
     def test_a_failed_check_offers_no_swipe(self):
         self.assertIsNone(shop.choose_swipe(list_frame(0), lambda node, override=None: None))
@@ -804,6 +908,10 @@ frames = {
     # A full row of cards above empty list (as c3-shop-gifts-00/-02, where a 250 px stroke from the empty part
     # ended inside a paid card): the stroke must end on the empty part too.
     "card row": compose(selected, [(currency, x, 180) for x in (270, 500, 733, 962)]),
+    # Device run 2's stop (839474c8): two full rows of cards, a third row with one card, empty background only at
+    # x ~500-1230 below y ~575. No stroke with both ends blank fits; the lift falls back to a card.
+    "two full rows": compose(selected, [(currency, x, y) for x in (270, 500, 733, 962) for y in (65, 320)]
+                             + [(currency[:145], 270, 575)]),
 }
 frames["run 1 stop"][420:720, 250:1240] = 250  # below the crop: white card panels, not background
 current, results = {}, {}
@@ -882,10 +990,11 @@ class FrameworkTests(unittest.TestCase):
                          "星实置业之礼": ["sold_out", "免费", True, [0, 1]]},
             "hongji row": {"虹迹赠礼": ["sold_out", "免费", True, [0, 1]]},
             "claimable": {"虹迹赠礼": ["claimable", "免费", False, [10, 10]]},
-            "tab unselected": {}, "run 1 stop": {}, "card row": {}})
+            "tab unselected": {}, "run 1 stop": {}, "card row": {}, "two full rows": {}})
         self.assertEqual({name: value["tab"] for name, value in outcome.items()},
                          {"list end": "selected", "hongji row": "selected", "claimable": "selected",
-                          "tab unselected": "unselected", "run 1 stop": "selected", "card row": "selected"})
+                          "tab unselected": "unselected", "run 1 stop": "selected", "card row": "selected",
+                          "two full rows": "selected"})
         for value in outcome.values():
             x, y = value["tab_tap"]
             self.assertLessEqual(max(abs(x - 129), abs(y - 348)), 6)  # the survey tapped (130,350)
@@ -914,6 +1023,10 @@ class FrameworkTests(unittest.TestCase):
         self.assertEqual(refused, [None, None])
         self.assertGreaterEqual(end[1], 430 + shop.BLANK_HALF)
         self.assertLess(begin[1] - end[1], shop.SWIPE_DISTANCE)
+        begin, end, refused = outcome["two full rows"]["swipe"]
+        self.assertEqual(refused, [None, None])
+        self.assertTrue(500 <= begin[0] <= 1230 and begin[1] >= 575 + shop.BLANK_HALF, begin)
+        self.assertLess(end[1], 575)  # on a card: the fallback
 
 
 if __name__ == "__main__":
