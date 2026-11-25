@@ -22,13 +22,17 @@ class PageMismatch(actions.ScreenUnrecognised):
     """The frame is not the page the step expects (or its target is not on it)."""
 
 
-class LayerMismatch(PageMismatch):
-    """A tap frame of tap_on_layer is not the layer: the frame itself (``screen``, ``frame``, ``recognize``) goes to
-    the caller to decide on; nothing was sent."""
+class FrameMismatch(PageMismatch):
+    """A tap frame is not what the tap needs and the tap is not tried again: the frame itself (``screen``,
+    ``frame``, ``recognize``) goes to the caller to decide on or keep as evidence; nothing was sent."""
 
     def __init__(self, reason, screen, frame, recognize):
         super().__init__(reason)
         self.screen, self.frame, self.recognize = screen, frame, recognize
+
+
+class LayerMismatch(FrameMismatch):
+    """A tap frame of tap_on_layer is not the layer."""
 
 
 class GuardRefusal(PageMismatch):
@@ -84,28 +88,57 @@ def _within_margin(found, box) -> bool:
         and top < found[1] + found[3]
 
 
-def word_boxes(text: str, box) -> list:
-    """Where the forbidden words of one OCR row are. A row that holds nothing but forbidden words and HUD shortcut
-    labels (OCR merges the densely packed label row, e.g. 「共鸣 奇迹之旅活动大厅…」, and pads a lone 「共鸣」 into its
-    neighbour) gives each word its own box: its start from its position in the row, its width from the glyph width
-    (the row's width per character, at most the row height: the HUD glyphs measure 18-19 px in rows 15-23 px high,
-    while OCR pads a lone label's box up to 60 px). Any other row gives its whole box: the word belongs to a label or
-    button whose extent is not known (购买等级, ¥6)."""
-    rest = re.sub(FORBIDDEN_WORDS, "", text)
-    for label in HUD_LABELS:
+def hud_label_row(text: str) -> bool:
+    """Whether an OCR line holds nothing but HUD shortcut labels (the forbidden words in it, 共鸣, among them): OCR
+    merges the densely packed label row (「共鸣 奇迹之旅活动大厅…」) and pads a lone 「共鸣」 into its neighbour, so its
+    box says little about where the word is. Any other line (购买等级, ¥6, a standalone 「解锁悠远颂歌」) counts whole."""
+    if not text.strip():
+        return False
+    if any(match.group(0) not in HUD_LABELS for match in re.finditer(FORBIDDEN_WORDS, text)):
+        return False
+    rest = text
+    for label in sorted(HUD_LABELS, key=len, reverse=True):
         rest = rest.replace(label, "")
-    x, y, w, h = [int(v) for v in box]
-    if re.sub(r"\s", "", rest) or not text:
-        return [[x, y, w, h]]
-    glyph = min(w / len(text), h)
-    return [[round(x + w * m.start() / len(text)), y, max(1, round(glyph * (m.end() - m.start()))), h]
-            for m in re.finditer(FORBIDDEN_WORDS, text)]
+    return not re.sub(r"\s", "", rest)
+
+
+WORD_EDGE = 6  # a word read in a window counts only when its box stays this far inside the window (not clipped)
+
+
+def locate_word(recognize, line_text: str, line_box, start: int, word: str):
+    """The box of ``word`` (at character ``start`` of an OCR line of HUD labels) read on its own by OCR in windows
+    of the line, or None when no window reads it whole. A window counts only when it reads exactly the word and the
+    word's box stays WORD_EDGE inside the window's right side (and its left side, for a word inside the line), so a
+    glyph cut by the window cannot make the word look shorter than it is. A word at the start of the line keeps the
+    line's left edge."""
+    x, y, w, h = [int(v) for v in line_box]
+    glyph = max(1, h)
+    estimate = round(x + w * start / max(1, len(line_text)))
+    lefts = (x - 4, x) if start == 0 else (estimate - glyph, estimate - WORD_EDGE - 4)
+    for left in (max(0, value) for value in lefts):
+        for width in range(round(glyph * (len(word) + .5)), round(glyph * (len(word) + 2.5)) + 1, 4):
+            result = recognize(FORBIDDEN, {"roi": [left, max(0, y - 4), width, h + 8], "expected": ".+"})
+            if result is None or not getattr(result, "hit", False):
+                continue
+            for row in _rows(result):
+                found = [int(v) for v in getattr(row, "box", None) or []]
+                if str(getattr(row, "text", "") or "").strip() != word or len(found) != 4:
+                    continue
+                if found[0] + found[2] > left + width - WORD_EDGE:
+                    continue  # touches the window's right side: maybe cut
+                if start == 0:
+                    right = found[0] + found[2]
+                    return [min(found[0], x), found[1], right - min(found[0], x), found[3]]
+                if found[0] >= left + WORD_EDGE:
+                    return found
+    return None
 
 
 def forbidden_word_near(recognize, target) -> str | None:
-    """A forbidden word within FORBIDDEN_MARGIN of ``target`` (a point or a box), each word located on its own
-    (word_boxes) in the rows read on the full frame. For the named HUD actions, where the shortcut labels sit close
-    together and 共鸣 (the gacha) is one of them; elsewhere it is as strict as _forbidden_near."""
+    """A forbidden word within FORBIDDEN_MARGIN of ``target`` (a point or a box), for the named HUD actions, where
+    the shortcut labels sit close together and 共鸣 (the gacha) is one of them. Every line read on the full frame
+    counts with its full OCR box, except a line of HUD labels within the margin: each forbidden word in it must then
+    be read on its own (locate_word) and clear the margin, and a word that cannot be read on its own refuses."""
     result = recognize(FORBIDDEN)
     if result is None:
         return "检查不了要点的地方附近有没有危险按钮"
@@ -114,10 +147,14 @@ def forbidden_word_near(recognize, target) -> str | None:
     box = [int(v) for v in target] if len(target) == 4 else [int(target[0]), int(target[1]), 1, 1]
     for row in _rows(result):
         found, text = getattr(row, "box", None), str(getattr(row, "text", "") or "")
-        if found is None or len(found) != 4:
+        if found is None or len(found) != 4 or not _within_margin([int(v) for v in found], box):
             continue
-        if any(_within_margin(word, box) for word in word_boxes(text, found)):
+        if not hud_label_row(text):
             return text or "危险按钮"
+        for match in re.finditer(FORBIDDEN_WORDS, text):
+            word = locate_word(recognize, text, found, match.start(), match.group(0))
+            if word is None or _within_margin(word, box):
+                return match.group(0)
     return None
 
 
@@ -135,21 +172,35 @@ def _forbidden_near(recognize, box) -> str | None:
     return None
 
 
-def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, verify=None, accept=None) -> bool:
+def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, verify=None, accept=None,
+                retry: bool = True) -> bool:
     """Tap ``node`` on the page titled ``title`` (decided and confirmed on fresh frames). ``verify(frame)`` and
     ``accept(frame, recognize)``, when given, must hold on both of them too (e.g. a button that is enabled, the whole
     expected state of the page). False when the run stopped; PageMismatch (nothing sent) when the page, its target,
-    ``verify`` or ``accept`` fails on the deciding frame; GuardRefusal when the point is next to a forbidden word."""
+    ``verify`` or ``accept`` fails on the deciding frame; GuardRefusal when the point is next to a forbidden word.
+    A confirming frame that does not agree means deciding again, unless ``retry`` is False: then a deciding or
+    confirming frame that does not agree raises FrameMismatch with that frame (only a frame voided by a focus change
+    is decided again)."""
     from task_control import ForegroundChanged
+
+    def mismatch(reason, screen_, frame_, recognize_):
+        if retry:
+            return False
+        raise FrameMismatch(reason, screen_, frame_, recognize_)
     for _attempt in range(rt.TOUCH_KEY_ATTEMPTS):
         screen, decided, recognize = screen_now(rt)
         if decided is None:
             return False
-        target = _target(screen, recognize, title, node, override)
+        try:
+            target = _target(screen, recognize, title, node, override)
+        except PageMismatch as error:
+            mismatch(str(error), screen, decided, recognize)
+            raise
         word = _forbidden_near(recognize, target)
         if word:
             raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止")
         if (verify is not None and not verify(decided)) or (accept is not None and not accept(decided, recognize)):
+            mismatch(f"「{title}」页面上要点的东西状态不对", screen, decided, recognize)
             raise PageMismatch(f"「{title}」页面上要点的东西状态不对")
         if not rt._frame_still_valid(decided):
             continue
@@ -158,16 +209,18 @@ def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, 
             return False
         try:
             confirmed = _target(fresh, recognize_b, title, node, override)
-        except PageMismatch:
+        except PageMismatch as error:
+            mismatch(f"确认时{error}", fresh, confirming, recognize_b)
             continue
         if fresh.title != screen.title or not actions._near(confirmed, target):
+            mismatch(f"确认时「{title}」页面上要点的东西不在原处", fresh, confirming, recognize_b)
             continue
         word = _forbidden_near(recognize_b, confirmed)
         if word:
             raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止")
-        if verify is not None and not verify(confirming):
-            continue
-        if accept is not None and not accept(confirming, recognize_b):
+        if (verify is not None and not verify(confirming)) or \
+                (accept is not None and not accept(confirming, recognize_b)):
+            mismatch(f"确认时「{title}」页面上要点的东西状态不对", fresh, confirming, recognize_b)
             continue
         if not (rt._frame_still_valid(decided) and rt._frame_still_valid(confirming)):
             continue
@@ -180,18 +233,27 @@ def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, 
     raise PageMismatch(f"在「{title}」页面上连续 {rt.TOUCH_KEY_ATTEMPTS} 次没能在稳定的画面上确认要点的位置")
 
 
-def to_hud(rt, attempts: int = 4) -> bool:
+def to_hud(rt, attempts: int = 4, *, rejected=None) -> bool:
     """Back to the open-world HUD before a task: the back arrow, tapped through tap_on_page on the page that is
     showing (both tap frames, with the forbidden-label check); a modal, the quit dialog or an unrecognised screen
-    stops the task without a tap."""
+    stops the task without a tap. ``rejected(frame, reason)``, when given, receives the frame it stopped on."""
     for _ in range(attempts):
         screen, frame, _ = screen_now(rt)
-        if frame is None or not rt._frame_still_valid(frame):
+        if frame is None:
             return False
-        if screen.kind == "hud":
+        if not rt._frame_still_valid(frame):
+            reason = "焦点变了，这张截图作废"
+        elif screen.kind == "hud":
             return True
-        if screen.kind != "page" or not tap_on_page(rt, screen.title, actions.BACK_ARROW):
+        elif screen.kind == "page":
+            if tap_on_page(rt, screen.title, actions.BACK_ARROW):
+                continue
             return False
+        else:
+            reason = screen.reason or f"当前画面是{screen.kind}"
+        if rejected is not None:
+            rejected(frame, reason)
+        return False
     return False
 
 

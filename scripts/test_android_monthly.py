@@ -322,13 +322,46 @@ class FlowTests(unittest.TestCase):
         result, rt = self.run_game(game)
         self.assertFalse(result)
         self.assertNotIn("claim", game.taps)
-        # Gone only on the confirming frame: decided again, tapped only on a whole view.
-        game = Game(tab=monthly.TASK, buttons={monthly.TASK: "enabled"},
-                    script=["", "", view(monthly.TASK, "enabled"), view(monthly.TASK, "enabled"),
-                            view(monthly.TASK, "enabled"), nocontent])
+        self.assertIs(rt.diagnostic.call_args.kwargs["image"], nocontent[1])
+        # Review round 3: gone (or 商城) only on the confirming frame: no second attempt, that frame is saved.
+        for wrong in (nocontent, SHOP):
+            with self.subTest(confirming=wrong[0].title):
+                game = Game(tab=monthly.TASK, buttons={monthly.TASK: "enabled"},
+                            script=["", "", view(monthly.TASK, "enabled"), view(monthly.TASK, "enabled"),
+                                    view(monthly.TASK, "enabled"), wrong])
+                result, rt = self.run_game(game)
+                self.assertFalse(result)
+                self.assertNotIn("claim", game.taps)
+                self.assertIs(rt.diagnostic.call_args.kwargs["image"], wrong[1])
+
+    def test_a_tab_tap_does_not_retry_either(self):
+        game = Game(script=["", "", view(monthly.TREASURE, "none"), view(monthly.TREASURE, "none"), SHOP])
         result, rt = self.run_game(game)
-        self.assertTrue(result)
-        self.assertEqual(game.taps.count("claim"), 1)
+        self.assertFalse(result)
+        self.assertEqual(game.taps, [])
+        self.assertIs(rt.diagnostic.call_args.kwargs["image"], SHOP[1])
+
+    def test_a_recognised_other_screen_is_not_waited_through(self):
+        # Review round 3: the quit title alone, or an unknown popup's close mark, within the transition allowance.
+        quit_title = other(Screen("unknown", reason="画面上像是有确认框"), {actions.QUIT_TITLE: hit([560, 180, 160, 40])})
+        popup = other(Screen("unknown", reason="画面上有弹窗"), {actions.MODAL_CLOSE: hit([929, 177, 36, 36])})
+        for wrong in (quit_title, popup):
+            for game, taps in ((Game(buttons={monthly.TASK: "enabled"}, after_entry=[wrong]), []),
+                               (Game(buttons={monthly.TASK: "enabled"}, after_tab=[wrong]), [monthly.TASK])):
+                with self.subTest(screen=wrong[0].reason, taps=taps):
+                    result, rt = self.run_game(game)
+                    self.assertFalse(result)
+                    self.assertEqual(game.taps, taps)
+                    self.assertIs(rt.diagnostic.call_args.kwargs["image"], wrong[1])
+
+    def test_a_start_that_is_not_the_hud_saves_that_frame(self):
+        # Review round 3: restarted on the reward layer left by a stopped run: no tap, the layer frame is saved.
+        game = Game(start="layer")
+        result, rt = self.run_game(game)
+        self.assertFalse(result)
+        self.assertEqual(game.taps, [])
+        rt.diagnostic.assert_called_once()
+        self.assertIs(rt.diagnostic.call_args.kwargs["image"], REWARD_LAYER[1])
 
     def test_no_tab_is_tapped_without_a_recognised_view_of_the_page(self):
         game = Game(script=["", ""] + [view(monthly.TREASURE, "none", content=False)] * 40)
@@ -523,9 +556,14 @@ for name, unlock in (("layer over settings", False), ("layer over settings with 
         frame[620:705, 950:1260] = under_unlock
     frames[name] = frame
 # Review round 2: the HUD, and the HUD with the paid-pass label over the 奇迹之旅 shortcut icon (its label visible).
-for name, over in (("hud", False), ("hud with paid label over the shortcut", True)):
+# Review round 3: the 共鸣 glyphs (x 713-742 in the label row) moved 23 px right, their visible edge then 37 px from
+# the 奇迹之旅 target: OCR merges them into the next label and the word cannot be read on its own.
+moved = row.copy()
+moved[:, 108:131], moved[:, 131:168] = row[:, 80:103], row[:, 108:145]
+for name, over, label_row in (("hud", False, row), ("hud with paid label over the shortcut", True, row),
+                              ("hud with 共鸣 moved right", False, moved)):
     frame = np.full((720, 1280, 3), 90, np.uint8)
-    frame[18:72, 30:84], frame[50:100, 600:1280] = duck, row
+    frame[18:72, 30:84], frame[50:100, 600:1280] = duck, label_row
     if over:
         frame[10:52, 707:909] = paid
     frames[name] = frame
@@ -602,6 +640,9 @@ class FrameworkTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
         outcome = json.loads(result.stdout.strip().splitlines()[-1])
         hud, covered = outcome.pop("hud"), outcome.pop("hud with paid label over the shortcut")
+        shifted = outcome.pop("hud with 共鸣 moved right")
+        self.assertLessEqual(abs(shifted["plans"]["monthly"][0] - 800), 6)  # the entry is still found ...
+        self.assertEqual(shifted["refused"]["monthly"], "共鸣")              # ... and refused
         self.assertEqual(hud["refused"], {"menu": None, "monthly": None, "shop": None})  # 共鸣 is not in the way
         self.assertEqual(covered["refused"]["monthly"], "解锁悠远颂歌")
         self.assertIsNone(covered["refused"]["menu"])

@@ -47,7 +47,7 @@ class Scripted:
                  FORBIDDEN}
 
     def __init__(self, *, quit=False, cancel=False, modal=False, redeem=True, duck=False, arrow=False, lit=None,
-                 title="设置", labels=LABELS, ocr=True, errors=(), forbidden=None):
+                 title="设置", labels=LABELS, ocr=True, errors=(), forbidden=None, glyphs=None):
         # A dialog dims what is behind it; without one the HUD and page icons are at full brightness.
         lit = not (quit or modal) if lit is None else lit
         self.fixed = {actions.QUIT_TITLE: quit and hit([560, 180, 160, 40], "退出游戏"),
@@ -65,7 +65,19 @@ class Scripted:
         rows = [SimpleNamespace(text=text, box=box) for text, box in forbidden]
         self.fixed[FORBIDDEN] = rows and SimpleNamespace(hit=True, box=rows[0].box, best_result=rows[0],
                                                          filtered_results=rows)
+        # What OCR reads in a window (a re-read of part of a line): each text where its glyphs are, cut to the
+        # window when the window cuts it (as OCR may still read a cut word). By default the full-frame lines.
+        self.glyphs = forbidden if glyphs is None else glyphs
         self.labels, self.ocr, self.errors, self.calls = labels, ocr, set(errors), []
+
+    def window(self, roi):
+        x, y, w, h = roi
+        rows = []
+        for text, (gx, gy, gw, gh) in self.glyphs:
+            left, right = max(x, gx), min(x + w, gx + gw)
+            if right > left and gy < y + h and y < gy + gh:
+                rows.append(SimpleNamespace(text=text, box=[left, gy, right - left, gh]))
+        return SimpleNamespace(hit=True, box=rows[0].box, best_result=rows[0], filtered_results=rows) if rows else MISS
 
     def __call__(self, node, override=None):
         self.calls.append((node, override))
@@ -73,6 +85,8 @@ class Scripted:
             return None
         if node in self.OCR_NODES and not self.ocr:
             return MISS
+        if node == FORBIDDEN and override and "roi" in override:
+            return self.window(override["roi"])
         if node != actions.HUD_LABEL:
             return self.fixed[node] or MISS
         if not self.fixed[actions.HUD_DUCK]:
@@ -354,13 +368,30 @@ class RuntimeKeyTests(FreshAndroidState):
                         rt.key("monthly")
                 self.assertIn("解锁悠远颂歌", str(caught.exception))
                 rt.context.run_action_direct.assert_not_called()
+        # Review round 3: a standalone paid label is never shrunk (read wider than the original: [540,23,264,32]).
+        rt = self.runtime([Scripted(duck=True, forbidden=[("解锁悠远颂歌", [540, 23, 264, 32])])])
+        with android_run(), patch("daily.runtime.active_session", return_value=None):
+            with self.assertRaises(NavigationError):
+                rt.key("monthly")
+        rt.context.run_action_direct.assert_not_called()
+        # 共鸣 merged into the label row, or padded into its neighbour: allowed when a window reads it on its own and
+        # it clears the margin; refused when it is really within the margin, or cannot be read on its own.
+        glyphs = [("共鸣", [708, 64, 38, 19]), ("奇迹之旅活动大厅", [762, 64, 150, 19])]
         merged = [("共鸣 奇迹之旅活动大厅奇想日历无限之心", [705, 64, 340, 19])]
-        for forbidden in (None, merged, [("共鸣", [706, 64, 60, 19])]):  # the default is a lone 共鸣
-            with self.subTest(forbidden=forbidden):
-                rt = self.runtime([Scripted(duck=True, forbidden=forbidden)] * 2)
+        padded = [("共鸣", [706, 64, 60, 19])]
+        moved = [("共鸣", [731, 64, 38, 19]), ("奇迹之旅活动大厅", [772, 64, 150, 19])]  # visible edge 769
+        for forbidden, glyph, allowed in ((None, None, True), (merged, glyphs, True), (padded, glyphs, True),
+                                          (merged, moved, False), (padded, moved, False), (merged, merged, False)):
+            with self.subTest(forbidden=forbidden, glyphs=glyph):
+                rt = self.runtime([Scripted(duck=True, forbidden=forbidden, glyphs=glyph)] * 2)
                 with android_run(), patch("daily.runtime.active_session", return_value=None):
-                    self.assertTrue(rt.key("monthly"))
-                self.assertEqual(len(self.sent(rt)), 1)
+                    if allowed:
+                        self.assertTrue(rt.key("monthly"))
+                    else:
+                        with self.assertRaises(NavigationError) as caught:
+                            rt.key("monthly")
+                        self.assertIn("共鸣", str(caught.exception))
+                self.assertEqual(len(self.sent(rt)), int(allowed))
 
     def test_the_tap_carries_the_confirming_frame(self):
         rt = self.runtime([Scripted(duck=True), Scripted(duck=True)])
@@ -502,17 +533,12 @@ class RuntimeKeyTests(FreshAndroidState):
 
 
 class ForbiddenWordTests(unittest.TestCase):
-    def test_words_are_located_on_their_own_only_in_rows_of_hud_labels(self):
+    def test_only_lines_of_hud_labels_are_read_again(self):
         from host.android import pages
-        # A lone 共鸣 padded into its neighbour: about two glyphs wide, not the padded 60 px.
-        self.assertEqual(pages.word_boxes("共鸣", [706, 64, 60, 19]), [[706, 64, 38, 19]])
-        # The merged label row: 共鸣 alone, ending far left of 奇迹之旅's centre (797).
-        [box] = pages.word_boxes("共鸣 奇迹之旅活动大厅奇想日历无限之心", [705, 64, 340, 19])
-        self.assertLessEqual(box[0] + box[2], 750)
-        # A word inside an unknown label or button: the whole row (its extent is unknown).
-        self.assertEqual(pages.word_boxes("购买等级", [1056, 112, 105, 28]), [[1056, 112, 105, 28]])
-        self.assertEqual(pages.word_boxes("¥6", [336, 334, 87, 24]), [[336, 334, 87, 24]])
-        self.assertEqual(pages.word_boxes("解锁悠远颂歌", [710, 14, 187, 37]), [[710, 14, 187, 37]])
+        self.assertTrue(pages.hud_label_row("共鸣"))
+        self.assertTrue(pages.hud_label_row("共鸣 奇迹之旅活动大厅奇想日历 无限之心 任务"))
+        for text in ("解锁悠远颂歌", "购买等级", "¥6", "共鸣商店", "共鸣解锁悠远颂歌", ""):
+            self.assertFalse(pages.hud_label_row(text), text)
 
     def test_the_word_list_is_the_nodes(self):
         from host.android import pages

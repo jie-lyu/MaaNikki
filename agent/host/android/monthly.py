@@ -141,12 +141,25 @@ def classify(rt, screen, frame, recognize):
 
 
 def look(rt):
-    """``(kind, view, frame, screen)`` from one fresh frame (classify); kind None when the run stopped."""
+    """``(kind, view, frame, screen, recognize)`` from one fresh frame (classify); kind None when the run stopped."""
     screen, frame, recognize = pages.screen_now(rt)
     if frame is None:
-        return None, None, None, None
+        return None, None, None, None, None
     kind, view = classify(rt, screen, frame, recognize)
-    return kind, view, frame, screen
+    return kind, view, frame, screen, recognize
+
+
+def nothing_recognised(screen, recognize) -> bool:
+    """An unrecognised screen on which nothing at all was recognised (no quit title or 取消, no modal close mark, no
+    duck, no back arrow, and every one of those checks ran): what a screen in transition looks like. A screen with
+    any of them is something else and is not waited through."""
+    if screen is None or screen.kind != "unknown":
+        return False
+    for node in (actions.QUIT_TITLE, actions.QUIT_CANCEL, actions.MODAL_CLOSE, actions.HUD_DUCK, actions.BACK_ARROW):
+        result = recognize(node)
+        if result is None or actions._hit(result):
+            return False
+    return True
 
 
 def expected(tab, button=None):
@@ -168,19 +181,20 @@ class Stop(Exception):
 
 def wait_state(rt, what, done, source):
     """Poll fresh frames until ``done(kind, view)`` holds and return that view. Frames for which ``source(screen,
-    kind, view)`` holds (the state being left) are waited through up to OPEN_WAIT; an unrecognised screen or the
-    奇迹之旅 page between tabs only within TRANSITION_ALLOWANCE; any other frame, or the time running out, saves that
+    kind, view)`` holds (the state being left) are waited through up to OPEN_WAIT; a frame on which nothing is
+    recognised yet (nothing_recognised) or the 奇迹之旅 page between tabs only within TRANSITION_ALLOWANCE; any other
+    frame (another page, the quit title, an unknown popup's close mark, ...), or the time running out, saves that
     frame and stops. None when the run stopped."""
     start = time.monotonic()
     while not rt.stopped:
-        kind, view, frame, screen = look(rt)
+        kind, view, frame, screen, recognize = look(rt)
         if kind is None:
             return None
         if kind != "invalid":
             if done(kind, view):
                 return view
             elapsed = time.monotonic() - start
-            transition = kind == "unsettled" or (kind == "other" and screen.kind == "unknown")
+            transition = kind == "unsettled" or (kind == "other" and nothing_recognised(screen, recognize))
             if not (source(screen, kind, view) or (transition and elapsed <= TRANSITION_ALLOWANCE)):
                 raise Stop(f"{what}时出现了不该出现的画面", [frame])
             if elapsed >= OPEN_WAIT:
@@ -199,7 +213,7 @@ def open_tab(rt, tab) -> bool:
     if view.tab == tab:
         return True
     source = view.tab
-    if not pages.tap_on_page(rt, TITLE, TAB_NODES[tab], accept=expected(source)):
+    if not pages.tap_on_page(rt, TITLE, TAB_NODES[tab], accept=expected(source), retry=False):
         return False
     view = wait_state(rt, f"切换到「{TAB_NAMES[tab]}」", lambda kind, v: kind == "view" and v.tab == tab,
                       lambda screen, kind, v: kind == "view" and v.tab == source)
@@ -227,7 +241,7 @@ def claim(rt, tab) -> bool:
     """Claim on the selected ``tab`` when 一键领取 is gold. True when there was nothing to claim or the claim was seen
     to land (the same tab, settled, button off)."""
     name = TAB_NAMES[tab]
-    kind, view, frame, _screen = look(rt)
+    kind, view, frame, _screen, _recognize = look(rt)
     if kind is None:
         return False
     if kind != "view" or view.tab != tab:
@@ -238,7 +252,7 @@ def claim(rt, tab) -> bool:
     if view.button != "enabled":
         raise Stop(f"「{name}」页签的「一键领取」按钮状态认不出（金色占比 {view.gold}）", [frame])
     # Both tap frames must show the whole expected state: this tab, settled, the button labelled and gold.
-    if not pages.tap_on_page(rt, TITLE, CLAIM_ALL, accept=expected(tab, "enabled")):
+    if not pages.tap_on_page(rt, TITLE, CLAIM_ALL, accept=expected(tab, "enabled"), retry=False):
         return False
     # Every frame after the tap must be this tab's view with the button still gold (the claim has not shown yet) or
     # off (success once that holds on fresh frames at least SETTLE_SECONDS apart with nothing else between), or the
@@ -246,7 +260,7 @@ def claim(rt, tab) -> bool:
     # there, with nothing more sent.
     deadline, settled_at, settled_frames, dismissed, kind = time.monotonic() + CLAIM_WAIT, None, 0, False, None
     while not rt.stopped and time.monotonic() < deadline:
-        kind, view, frame, _screen = look(rt)
+        kind, view, frame, _screen, _recognize = look(rt)
         if kind is None:
             return False
         if kind == "view" and view.tab == tab and view.button == "none":
@@ -281,7 +295,10 @@ def run(rt) -> bool:
     from navigation.models import NavigationError
     claimed = None
     try:
-        if not pages.to_hud(rt):
+        start = []
+        if not pages.to_hud(rt, rejected=lambda frame, reason: start.append((frame, reason))):
+            for frame, reason in start:  # the screen the task would not start from (e.g. a reward layer)
+                rt.diagnostic("android_monthly_start", f"开始时不在大世界，也没法安全地回去：{reason}", image=frame)
             return fail(rt, "没能回到大世界")
         if not rt.key("monthly"):
             return False
@@ -294,6 +311,9 @@ def run(rt) -> bool:
     except Stop as error:
         for index, frame in enumerate(error.frames):
             rt.diagnostic(f"android_monthly_stop_{index}", str(error), image=frame)
+        fail(rt, str(error))
+    except pages.FrameMismatch as error:  # a tab or claim tap frame that was not the expected page: no retry
+        rt.diagnostic("android_monthly_stop_0", str(error), image=error.frame)
         fail(rt, str(error))
     except (pages.GuardRefusal, actions.ScreenUnrecognised, NavigationError) as error:
         fail(rt, str(error))
