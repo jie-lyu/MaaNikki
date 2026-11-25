@@ -528,9 +528,14 @@ class Runtime:
                     self._halt_unconfirmed()
                 raise
             sent = False
+            intent = False
             try:
-                # After the reservation (which does file I/O), right before sending: another caller may have halted
-                # input, the run may be stopping, or the player may have switched apps meanwhile.
+                # The intent is logged first (file I/O), so every check below comes after all the I/O: another caller
+                # may have halted input, the run may be stopping, or the player may have switched apps meanwhile.
+                if not state.record_touch(action, fields, "sending"):
+                    from host import UnsupportedInput
+                    raise UnsupportedInput("无法写入安卓模拟器的输入记录，这一步暂不发送。")
+                intent = True
                 if state.halted or self.stopped:
                     return False
                 if not self._device_focus_now():
@@ -539,9 +544,6 @@ class Runtime:
                     raise ForegroundChanged("依据的截图已经过时（之后焦点变过），已取消本次输入，等待重新核对")
                 if self._stopped_now():  # Stop may have been pressed during the focus query
                     return False
-                if not state.record_touch(action, fields, "sending"):
-                    from host import UnsupportedInput
-                    raise UnsupportedInput("无法写入安卓模拟器的输入记录，这一步暂不发送。")
                 sent = True
                 try:
                     with measure("input.action"):
@@ -554,6 +556,8 @@ class Runtime:
                 state.record_touch(action, fields, "confirmed" if succeeded else "unconfirmed")
             finally:
                 if not sent:
+                    if intent:
+                        state.record_touch(action, fields, "cancelled")  # logged as not sent
                     self._release_touch(state)
             if succeeded:
                 self._release_touch(state)

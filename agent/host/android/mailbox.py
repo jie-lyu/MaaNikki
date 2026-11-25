@@ -48,14 +48,16 @@ def to_hud(rt, attempts: int = 4) -> bool:
 
 
 def back_from_mail(rt, attempts: int = 3) -> bool:
-    """The way back after the task: leave only from the 邮件 and 美鸭梨 pages; any other screen stops input."""
+    """The way back after the task: the back arrow, tapped only on the 邮件 and 美鸭梨 pages (both tap frames,
+    with the forbidden-label check); any other screen stops input."""
     for _ in range(attempts):
         screen, frame, _ = pages.screen_now(rt)
         if frame is None or not rt._frame_still_valid(frame):
             return False
         if screen.kind == "hud":
             return True
-        if not (pages.is_page(screen, MAIL) or pages.is_page(screen, MENU)) or not rt.leave_page():
+        title = MAIL if pages.is_page(screen, MAIL) else MENU if pages.is_page(screen, MENU) else None
+        if title is None or not pages.tap_on_page(rt, title, actions.BACK_ARROW):
             return False
     return False
 
@@ -77,7 +79,7 @@ def mail_state(rt):
 
 def run(rt) -> bool:
     from navigation.models import NavigationError
-    claimed, returnable = None, True
+    claimed = None
     try:
         if not to_hud(rt):
             return fail(rt, "没能回到大世界")
@@ -90,16 +92,13 @@ def run(rt) -> bool:
         if pages.wait_for(rt, lambda screen: pages.is_page(screen, MAIL), 5) is None:
             return fail(rt, "没能打开邮件页面")
         claimed = claim(rt)
-    except (pages.GuardRefusal, Stop) as error:
-        returnable = False
+    except (pages.GuardRefusal, Stop, actions.ScreenUnrecognised, NavigationError) as error:
         fail(rt, str(error))
-    except (actions.ScreenUnrecognised, NavigationError) as error:
-        fail(rt, str(error))
-    finally:
-        returned = returnable and not rt.stopped and back_from_mail(rt)
+    # The way back only after a successful result: after a stop, a guard refusal or a fatal error (raised past this
+    # point, e.g. the device stopped answering) nothing more is sent.
     if not claimed:
         return False
-    if not returned:
+    if rt.stopped or not back_from_mail(rt):
         return fail(rt, "没能回到大世界")
     return True
 

@@ -153,14 +153,15 @@ class MailboxTests(unittest.TestCase):
     def test_a_disabled_button_means_nothing_to_claim(self):
         result, rt, taps = self.run_flow("disabled", after=())
         self.assertTrue(result)
-        self.assertEqual(taps, [mailbox.MENU_MAIL])  # the envelope only; never the claim or delete buttons
+        # The envelope, then the way back (the arrow on the mail page); never the claim or delete buttons.
+        self.assertEqual(taps, [mailbox.MENU_MAIL, actions.BACK_ARROW])
         rt.key.assert_called_once_with("menu")
         self.assertIn("邮箱没有可领取的附件。", rt.logs)
 
     def test_an_enabled_button_is_claimed_and_checked_on_one_mail_frame(self):
         result, rt, taps = self.run_flow("enabled")
         self.assertTrue(result)
-        self.assertEqual(taps, [mailbox.MENU_MAIL, mailbox.CLAIM_ALL])
+        self.assertEqual(taps, [mailbox.MENU_MAIL, mailbox.CLAIM_ALL, actions.BACK_ARROW])
         self.assertIn("邮箱附件已全部领取。", rt.logs)
 
     def test_another_page_after_claiming_is_not_success_and_sends_nothing_more(self):
@@ -174,6 +175,19 @@ class MailboxTests(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(taps, [mailbox.MENU_MAIL])
         rt.leave_page.assert_not_called()
+
+    def test_a_fatal_device_error_sends_nothing_more(self):
+        from host import DeviceUnreachable
+        with patch.object(mailbox, "claim", side_effect=DeviceUnreachable("ADB 没有回应")):
+            with self.assertRaises(DeviceUnreachable):
+                self.run_flow("disabled", after=())
+
+    def test_the_way_back_only_leaves_mail_and_menu_pages(self):
+        rt = SimpleNamespace(stopped=False, _frame_still_valid=Mock(return_value=True))
+        shop = (page("商城"), np.zeros((720, 1280, 3), np.uint8), lambda *a: MISS)
+        with patch.object(pages, "screen_now", return_value=shop), patch.object(pages, "tap_on_page") as tap:
+            self.assertFalse(mailbox.back_from_mail(rt))
+        tap.assert_not_called()
 
     def test_a_guard_refusal_ends_all_input(self):
         result, rt, taps = self.run_flow("disabled", after=(), guard=True)

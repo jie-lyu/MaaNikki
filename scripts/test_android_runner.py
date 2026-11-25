@@ -276,7 +276,22 @@ class RunnerTests(unittest.TestCase):
             with self.assertRaises(runner.RunnerError) as caught:
                 runner.check_unconfirmed(root, False)
             self.assertIn("--clear-unconfirmed", str(caught.exception))
+            self.assertIn("adb kill-server", str(caught.exception))
             self.assertTrue(marker.exists())
+            if runner.os.name != "nt":
+                original = marker.read_bytes
+                calls = []
+
+                def replaced(*args):
+                    calls.append(1)
+                    if len(calls) == 2:  # another run left a new marker between inspection and the lock
+                        marker.write_text(json.dumps({"pid": 2, "since": "2026-11-25T23:59:00+09:00"}))
+                    return original()
+                with patch.object(type(marker), "read_bytes", lambda self: replaced()), \
+                        self.assertRaises(runner.RunnerError):
+                    runner.check_unconfirmed(root, True)
+                self.assertTrue(marker.exists())  # the new one is kept
+                marker.write_text(json.dumps({"pid": 1, "since": "2026-11-25T23:00:00+09:00"}))
             if runner.os.name != "nt":
                 with patch("sys.stderr"):
                     runner.check_unconfirmed(root, True)
@@ -294,6 +309,19 @@ class RunnerTests(unittest.TestCase):
             found = runner.touches(Path(tmp), dt.datetime.fromisoformat("2026-11-25T23:00:00+09:00"))
         self.assertEqual(found[0], {"audit": "incomplete: a malformed line was skipped"})
         self.assertEqual(found[1]["outcome"], "confirmed")
+
+    def test_an_intent_without_an_outcome_is_flagged(self):
+        import datetime as dt
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "logs" / "android-input.jsonl"
+            log.parent.mkdir()
+            rows = [{"time": "2026-11-25T23:31:34+09:00", "action": "Click", "outcome": "sending"},
+                    {"time": "2026-11-25T23:31:35+09:00", "action": "Click", "outcome": "confirmed"},
+                    {"time": "2026-11-25T23:31:36+09:00", "action": "Click", "outcome": "sending"}]
+            log.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            found = runner.touches(Path(tmp), dt.datetime.fromisoformat("2026-11-25T23:00:00+09:00"))
+        self.assertEqual(found[-1], {"audit": "incomplete: 1 intent(s) without an outcome"})
 
     def test_the_command_line(self):
         args = runner.build_parser().parse_args(["run", "MaaNikki_AndroidCheck", "--purpose", "t", "--option", "A=B"])

@@ -459,6 +459,30 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
             rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
         self.assertEqual(json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["outcome"], "unconfirmed")
 
+    def test_stop_or_focus_loss_during_the_intent_write_sends_nothing(self):
+        for change in ("stopping", "focus"):
+            with self.subTest(change=change):
+                rt = self.tap_runtime()
+                original = self.state.record_touch
+
+                def record(action, fields, outcome, rt=rt, change=change, original=original):
+                    if outcome == "sending":
+                        if change == "stopping":
+                            rt.context.tasker.stopping = True
+                        else:
+                            rt._device_target.foreground.return_value = False
+                    return original(action, fields, outcome)
+                with patch.object(self.state, "record_touch", side_effect=record), android_run(), \
+                        patch("daily.runtime.active_session", return_value=None):
+                    try:
+                        self.assertFalse(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
+                    except Exception as error:  # focus loss raises ForegroundChanged
+                        self.assertEqual(type(error).__name__, "ForegroundChanged")
+                rt.context.run_action_direct.assert_not_called()
+                self.assertFalse(self.state.marker().exists())
+                log = (self.data_root / "logs" / "android-input.jsonl").read_text(encoding="utf-8").splitlines()
+                self.assertEqual(json.loads(log[-1])["outcome"], "cancelled")
+
     def test_a_touch_whose_intent_cannot_be_logged_is_not_sent(self):
         (self.data_root / "logs").write_text("")  # a file where the log directory goes
         rt = self.tap_runtime()

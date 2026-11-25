@@ -285,20 +285,26 @@ def run(args) -> int:
     return 0 if record.get("status") == "succeeded" else 1
 
 
+RELEASE_ADVICE = ("看画面不能证明所有触点都已抬起。先重启 ADB server（adb kill-server; adb start-server）：设备上的 Maatouch "
+                  "进程随 ADB 会话结束，它的虚拟触摸设备被移除（推断这会抬起它的所有触点）；再跑一次 probe.py bgcheck，"
+                  "打开和关闭奇想日历都成功，才加 --clear-unconfirmed 重跑。")
+
+
 def check_unconfirmed(data_root: Path, clear: bool) -> None:
     """The runner is the recovery boundary for its own data root, as MaaNikki's start is for the client's: a touch
     marker left by an earlier run (a touch that was never confirmed released) refuses the run until the operator has
-    checked the device and passes --clear-unconfirmed; clearing takes the agent's owner lock first."""
+    established release (RELEASE_ADVICE) and passes --clear-unconfirmed. Only the marker that was inspected is
+    cleared: its bytes are compared again under the agent's owner lock."""
     marker = data_root / "config" / "android-input" / "touch.json"
     if not marker.exists():
         return
     try:
-        since = json.loads(marker.read_text(encoding="utf-8")).get("since")
+        inspected = marker.read_bytes()
+        since = json.loads(inspected.decode("utf-8")).get("since")
     except (OSError, ValueError):
-        since = None
+        inspected, since = None, None
     if not clear:
-        raise RunnerError(f"上一次运行留下了没有确认抬起的触摸（{since or '时间不明'}，{marker}）：先看模拟器上没有按住的触点、"
-                          "游戏状态正常，再加 --clear-unconfirmed 重跑。")
+        raise RunnerError(f"上一次运行留下了没有确认抬起的触摸（{since or '时间不明'}，{marker}）。{RELEASE_ADVICE}")
     sys.path.insert(0, str(ROOT / "agent"))
     from host import UnsupportedInput, take_owner_lock
     try:
@@ -306,6 +312,12 @@ def check_unconfirmed(data_root: Path, clear: bool) -> None:
     except UnsupportedInput as error:
         raise RunnerError(f"清除触摸标记之前没能拿到 owner.lock：{error}") from None
     try:
+        try:
+            current = marker.read_bytes()
+        except FileNotFoundError:
+            return  # already gone
+        if inspected is None or current != inspected:
+            raise RunnerError("触摸标记在检查之后变了（可能有另一次运行留下了新的），没有清除；请重新检查后再试。")
         marker.unlink()
     finally:
         handle.close()
@@ -350,6 +362,16 @@ def touches(data_root: Path, since: dt.datetime) -> list[dict]:
                 found.append(entry)
         except (ValueError, KeyError, TypeError):
             found.append({"audit": "incomplete: a malformed line was skipped"})
+    # A touch whose intent was logged but whose outcome was not (the outcome write failed, or the agent died).
+    open_intents = 0
+    for entry in found:
+        outcome = entry.get("outcome")
+        if outcome == "sending":
+            open_intents += 1
+        elif outcome is not None and open_intents:
+            open_intents -= 1
+    if open_intents:
+        found.append({"audit": f"incomplete: {open_intents} intent(s) without an outcome"})
     return found
 
 
