@@ -163,6 +163,11 @@ QUIT = (Screen("quit_dialog", {"cancel": [494, 480, 20, 20]}), np.full((720, 128
         lambda node, override=None: MISS)
 # A popup's close mark on an otherwise unrecognised frame (e.g. an unseen dialog over the shop).
 POPUP = unknown_frame({actions.MODAL_CLOSE: result([row("", [929, 177, 36, 36])])})
+# Something recognised on an otherwise unrecognised frame (an unseen page's back arrow, the duck), or a check that
+# could not run there: not a screen in transition (pages.nothing_recognised), so not waited through.
+BACK_ONLY = unknown_frame({actions.BACK_ARROW: result([row("", BACK_BOX)])})
+DUCK_ONLY = unknown_frame({actions.HUD_DUCK: result([row("", [30, 18, 54, 54])])})
+CHECK_FAILED = unknown_frame({actions.QUIT_TITLE: None})
 # All three gifts wholly in the list at once: no list swipe needed.
 ALL_VISIBLE = {"虹迹赠礼": gift(450, 608), "芳馨赠礼": gift(281, 839), "星实置业之礼": gift(598, 377)}
 
@@ -264,9 +269,11 @@ class FlowTests(unittest.TestCase):
         self.assertTrue(any("第 2 次滑动礼包列表" in line and "没有停稳" in line for line in rt.logs), rt.logs)
 
     def test_one_positively_other_frame_after_a_swipe_stops_with_that_frame(self):
-        # Review round 1 replay: one quit-dialog frame (or a popup's close mark) right after list swipe 2.
-        for other in (QUIT, POPUP):
-            with self.subTest(kind=other[0].kind):
+        # Review round 1 replay: one quit-dialog frame (or a popup's close mark) right after list swipe 2; the same for
+        # an unrecognised frame showing a back arrow or the duck, or one whose checks could not run.
+        for label, other in (("quit", QUIT), ("popup", POPUP), ("back arrow", BACK_ONLY), ("duck", DUCK_ONLY),
+                             ("check failed", CHECK_FAILED)):
+            with self.subTest(kind=label):
                 game = Game(screens={4: [other]})
                 outcome, rt = play(game)
                 self.assertFalse(outcome)
@@ -299,12 +306,51 @@ class FlowTests(unittest.TestCase):
         game = Game(ALL_VISIBLE)
         gifts = (SHOP, list_frame(0), game.recognize)
         unselected = (SHOP, list_frame(0, selected=False), game.recognize)
-        game.screens = {2: [gifts, gifts, unselected]}  # settled after the tab tap, then another tab
+        # Settled after the tab tap and again for the scan (two frames each), then another tab before leaving.
+        game.screens = {2: [gifts] * 4 + [unselected]}
         outcome, rt = play(game)
         self.assertFalse(outcome)
         self.assertNotIn("back", game.touches)
         saved, = stop_diagnostics(rt)
         self.assertIs(saved.kwargs["image"], unselected[1])
+        self.assertTrue(any("离开之前确认商城" in line for line in rt.logs), rt.logs)
+
+    def test_a_mismatch_on_a_back_arrow_tap_frame_stops_with_that_frame(self):
+        # The confirming frame of the back-arrow tap shows another 商城 tab: no second attempt, that frame saved.
+        game = Game(ALL_VISIBLE)
+        gifts = (SHOP, list_frame(0), game.recognize)
+        unselected = (SHOP, list_frame(0, selected=False), game.recognize)
+        game.screens = {2: [gifts] * 6 + [unselected]}  # settled twice, the check before leaving, the deciding frame
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.touches.count("back"), 0)
+        saved, = stop_diagnostics(rt)
+        self.assertIs(saved.kwargs["image"], unselected[1])
+        self.assertTrue(any("离开商城时" in line for line in rt.logs), rt.logs)
+
+    def test_a_mismatch_on_a_tab_tap_frame_stops_with_that_frame(self):
+        # After the left list swipe: the tab is unselected on the frame waited for and on the deciding frame, but
+        # already selected on the confirming frame. No second attempt (retry=False), that frame saved.
+        game = Game()
+        left = (SHOP, list_frame(0, selected=False), game.recognize)
+        selected = (SHOP, list_frame(0), game.recognize)
+        game.screens = {1: [left, left, selected]}
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(len(game.touches), 1)  # the left list swipe only: no tab tap, nothing after it
+        saved, = stop_diagnostics(rt)
+        self.assertIs(saved.kwargs["image"], selected[1])
+
+    def test_a_card_read_that_stops_saves_the_frame_it_was_read_on(self):
+        game = Game(ALL_VISIBLE)
+        frames = [(SHOP, list_frame(0), game.recognize) for _ in range(4)]
+        game.screens = {2: list(frames)}
+        with patch.object(shop, "read_gifts", side_effect=shop.Stop("同一张画面上同一个礼包的名字出现了两次")):
+            outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertNotIn("back", game.touches)
+        saved, = stop_diagnostics(rt)
+        self.assertIs(saved.kwargs["image"], frames[3][1])  # the scan's settled frame, the one read
 
     def test_an_unexpected_frame_after_the_back_arrow_is_saved(self):
         game = Game()
@@ -338,10 +384,14 @@ class FlowTests(unittest.TestCase):
     def test_a_modal_at_the_start_sends_nothing(self):
         modal = Screen("modal", {"close": [929, 177, 36, 36]}, title="兑换奖励")
         game = Game(start="modal")
-        game.screen_now = lambda rt: (modal, np.zeros((720, 1280, 3), np.uint8), game.recognize)
-        outcome, _rt = play(game)
+        image = np.zeros((720, 1280, 3), np.uint8)
+        game.screen_now = lambda rt: (modal, image, game.recognize)
+        outcome, rt = play(game)
         self.assertFalse(outcome)
         self.assertEqual(game.touches, [])
+        saved, = rt.diagnostic.call_args_list  # the screen it would not start from
+        self.assertEqual(saved.args[0], "android_weekly_start")
+        self.assertIs(saved.kwargs["image"], image)
 
     def test_the_tab_already_selected_is_not_tapped_again(self):
         game = Game(start="hud")
@@ -395,6 +445,8 @@ class TabTests(unittest.TestCase):
         self.assertEqual(shop.shop_view(*QUIT), "other")
         self.assertEqual(shop.shop_view(*POPUP), "other")
         self.assertEqual(shop.shop_view(*unknown_frame()), "pending")
+        for other in (BACK_ONLY, DUCK_ONLY, CHECK_FAILED):
+            self.assertEqual(shop.shop_view(*other), "other")
         self.assertEqual(shop.shop_view(Screen("page", {"back": BACK_BOX}, title="奇迹之旅"), frame,
                                         lambda node, override=None: MISS), "other")
 
@@ -479,6 +531,7 @@ class SwipeOnPageTests(unittest.TestCase):
             pages.swipe_on_page(rt, "商城", (1070, 640), (1070, 390), duration=1000,
                                 accept=lambda frame, recognize: frame[0, 0, 0] == 1)
         self.assertEqual(raised.exception.frame[0, 0, 0], 2)
+        self.assertIsInstance(raised.exception, pages.FrameMismatch)  # the run's FrameMismatch path saves it too
         self.assertEqual(rt.sent, [])
         # Another page on the confirming frame: the same.
         rt, patched = self.rt([self.frame(tag=1), self.frame(screen=HUD, tag=3)])
@@ -669,8 +722,10 @@ class FrameworkTests(unittest.TestCase):
             self.assertFalse((ROOT / ".git").exists(), "resource_android/ is missing from the checkout")
             return
         env = {**os.environ, "MAAFW_BINARY_PATH": str(ROOT / "maafw")}
-        completed = subprocess.run([sys.executable, "-I", "-B", "-c", FRAMEWORK_CHECK, str(ROOT)], capture_output=True,
-                                   text=True, timeout=300, env=env, cwd=tempfile.gettempdir())
+        # -X utf8: the child prints Chinese text, and -I ignores PYTHONUTF8 (Windows consoles default to cp1252).
+        completed = subprocess.run([sys.executable, "-I", "-X", "utf8", "-B", "-c", FRAMEWORK_CHECK, str(ROOT)],
+                                   capture_output=True, text=True, encoding="utf-8", timeout=300, env=env,
+                                   cwd=tempfile.gettempdir())
         self.assertEqual(completed.returncode, 0, completed.stderr[-2000:])
         outcome = json.loads(completed.stdout.strip().splitlines()[-1])
         self.assertEqual({name: (value["kind"], value["title"]) for name, value in outcome.items()},

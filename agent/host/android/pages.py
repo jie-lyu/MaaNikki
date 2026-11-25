@@ -68,6 +68,19 @@ def wait_for(rt, accept, seconds: float, step: float = .4):
     return None
 
 
+def nothing_recognised(screen, recognize) -> bool:
+    """An unrecognised screen on which nothing at all was recognised (no quit title or 取消, no modal close mark, no
+    duck, no back arrow, and every one of those checks ran): what a screen in transition looks like. A screen with
+    any of them is something else and is not waited through."""
+    if screen is None or screen.kind != "unknown":
+        return False
+    for node in (actions.QUIT_TITLE, actions.QUIT_CANCEL, actions.MODAL_CLOSE, actions.HUD_DUCK, actions.BACK_ARROW):
+        result = recognize(node)
+        if result is None or actions._hit(result):
+            return False
+    return True
+
+
 def _target(screen, recognize, title, node, override):
     if not is_page(screen, title):
         raise PageMismatch(f"当前画面不是「{title}」页面")
@@ -237,13 +250,9 @@ def _point_box(point):
     return [int(point[0]), int(point[1]), 1, 1]
 
 
-class SwipeMismatch(PageMismatch):
-    """A tap frame of swipe_on_page is not the expected state: that frame (``frame``) goes to the caller, to be
-    saved; nothing was sent and the swipe is not decided again."""
-
-    def __init__(self, reason, frame):
-        super().__init__(reason)
-        self.frame = frame
+class SwipeMismatch(FrameMismatch):
+    """A tap frame of swipe_on_page is not the expected state: that frame goes to the caller, to be saved; nothing
+    was sent and the swipe is not decided again."""
 
 
 def swipe_on_page(rt, title: str, begin, end, *, duration: int, accept, delay: float = .5) -> bool:
@@ -264,26 +273,27 @@ def swipe_on_page(rt, title: str, begin, end, *, duration: int, accept, delay: f
         if not rt._frame_still_valid(decided):
             continue
         if not is_page(screen, title):
-            raise SwipeMismatch(f"要滑动时画面不是「{title}」页面", decided)
+            raise SwipeMismatch(f"要滑动时画面不是「{title}」页面", screen, decided, recognize)
         for box in points:
             word = _forbidden_near(recognize, box)
             if word:
                 raise GuardRefusal(f"要滑动的地方旁边有「{word}」，没有滑动，任务停止")
         if not accept(decided, recognize):
-            raise SwipeMismatch(f"「{title}」页面的状态不对，没有滑动", decided)
+            raise SwipeMismatch(f"「{title}」页面的状态不对，没有滑动", screen, decided, recognize)
         fresh, confirming, recognize_b = screen_now(rt)
         if confirming is None:
             return False
         if not (rt._frame_still_valid(decided) and rt._frame_still_valid(confirming)):
             continue
         if not is_page(fresh, title) or fresh.title != screen.title:
-            raise SwipeMismatch(f"确认滑动时画面已经不是「{title}」页面", confirming)
+            raise SwipeMismatch(f"确认滑动时画面已经不是「{title}」页面", fresh, confirming, recognize_b)
         for box in points:
             word = _forbidden_near(recognize_b, box)
             if word:
                 raise GuardRefusal(f"要滑动的地方旁边有「{word}」，没有滑动，任务停止")
         if not accept(confirming, recognize_b):
-            raise SwipeMismatch(f"确认滑动时「{title}」页面的状态变了，没有滑动", confirming)
+            raise SwipeMismatch(f"确认滑动时「{title}」页面的状态变了，没有滑动", fresh, confirming,
+                                recognize_b)
         if not (rt._frame_still_valid(decided) and rt._frame_still_valid(confirming)):
             continue
         try:

@@ -24,9 +24,11 @@ are 250 px over 1 s (device run 1, 2026-11-26: one such swipe moved the list ~31
 and its lift was confirmed on the device), and the list's measured movement is logged after every swipe; the frame
 the first list swipe was decided on is saved with the diagnostics.
 
-Waits forgive only frames that show nothing recognisable yet, and only briefly (TRANSITION_ALLOWANCE in a row); a
-positively recognised other screen (the quit dialog, a popup's close mark, the HUD, another page, another 商城 tab)
-stops at once, and so does a swipe whose deciding or confirming frame is not the expected state (no second attempt).
+Waits forgive only frames that show nothing recognisable yet (pages.nothing_recognised, as in the monthly pass), and
+only briefly (TRANSITION_ALLOWANCE in a row); a positively recognised other screen (the quit dialog, a popup's close
+mark, a back arrow or the duck on an unrecognised screen, the HUD, another page, another 商城 tab) stops at once, and
+so does a tap or swipe whose deciding or confirming frame is not the expected state (no tap or swipe is tried twice;
+the way back is the on-screen back arrow, never the BACK key).
 A card that cannot be read (an impossible counter included), a gift not seen by the list's end, or a shop no longer
 on 甄选礼包 before leaving stops too. Every stop saves the frame it stopped on and sends nothing more; the way back
 is taken only after all three gifts were read, from 甄选礼包, and must reach the HUD.
@@ -319,22 +321,18 @@ def frame_now(rt):
     return frame
 
 
-def popup_seen(recognize) -> bool:
-    """The quit dialog's title or 取消, or a popup's close mark, on an otherwise unrecognised frame."""
-    return any(actions._hit(recognize(node)) for node in (actions.QUIT_TITLE, actions.QUIT_CANCEL, actions.MODAL_CLOSE))
-
-
 def shop_view(screen, frame, recognize):
     """What one valid frame shows, for the waits: "gifts" (the 商城 page on 甄选礼包), "unselected" (the 商城 page on
     another tab, 甄选礼包 in the left list), "absent" (the 商城 page, 甄选礼包 not in the left list), "hud", "pending"
-    (nothing recognisable yet: an unknown screen without a popup mark, or the 甄选礼包 recognition could not run) or
-    "other" (anything else positively recognised: the quit dialog, a popup, another page)."""
+    (nothing recognisable yet: an unknown screen on which nothing at all was recognised, pages.nothing_recognised, or
+    the 甄选礼包 recognition could not run) or "other" (anything else: the quit dialog, a popup's close mark, a back
+    arrow or the duck on an unrecognised screen, another page, a check that could not run on an unknown screen)."""
     if pages.is_page(screen, TITLE):
         state = tab_state(frame, recognize)
         return {"selected": "gifts", "unselected": "unselected", "absent": "absent"}.get(state, "pending")
     if screen.kind == "hud":
         return "hud"
-    if screen.kind == "unknown" and not popup_seen(recognize):
+    if pages.nothing_recognised(screen, recognize):
         return "pending"
     return "other"
 
@@ -388,8 +386,9 @@ def swipe(rt, begin, end, ms, accept) -> bool:
 
 
 def open_gifts(rt) -> bool:
-    """From the 商城 page to the 甄选礼包 tab: a guarded tap on its label (unselected on both tap frames), after at
-    most LEFT_SWIPES guarded swipes of the left tab list while the label is positively not in it."""
+    """From the 商城 page to the 甄选礼包 tab: a guarded tap on its label (unselected on both tap frames; a tap frame
+    that is not raises pages.FrameMismatch with that frame, no second attempt), after at most LEFT_SWIPES guarded
+    swipes of the left tab list while the label is positively not in it."""
     frame = None
     for swipes in range(LEFT_SWIPES + 1):
         frame, recognize = watch(rt, "打开商城" if swipes == 0 else "滑动商城左侧的页签列表",
@@ -407,7 +406,7 @@ def open_gifts(rt) -> bool:
                 box, zones = gifts_tab(recognize), price_zones(recognize)
                 return (box is not None and tab_gold(frame, box) < TAB_SELECTED and zones is not None
                         and not any(_overlaps(box, zone) for zone in zones))
-            if not pages.tap_on_page(rt, TITLE, GIFTS_TAB, accept=unselected):
+            if not pages.tap_on_page(rt, TITLE, GIFTS_TAB, accept=unselected, retry=False):
                 return False
             frame, _recognize = settled(rt, "点了「甄选礼包」", source=("unselected",))
             return frame is not None
@@ -427,16 +426,18 @@ def open_gifts(rt) -> bool:
 
 def leave(rt) -> bool:
     """Back to the HUD: only from a fresh frame of the 商城 page still on 甄选礼包, by the back arrow (both tap frames
-    on 甄选礼包), then the HUD must follow (watch); anything else stops with that frame saved."""
+    on 甄选礼包, no second attempt), then the HUD must follow (watch); anything else stops with that frame saved."""
     frame, _recognize = watch(rt, "离开之前确认商城", ("gifts",), seconds=TRANSITION_ALLOWANCE)
     if frame is None:
         return False
     try:
-        if not pages.tap_on_page(rt, TITLE, actions.BACK_ARROW, accept=on_gifts):
+        if not pages.tap_on_page(rt, TITLE, actions.BACK_ARROW, accept=on_gifts, retry=False):
             return False
+    except pages.FrameMismatch as error:  # the tap frame that was not the 商城 page on 甄选礼包
+        raise Stop(f"离开商城时：{error}", [error.frame]) from error
     except pages.GuardRefusal:
         raise
-    except pages.PageMismatch as error:
+    except pages.PageMismatch as error:  # no stable frame (the focus kept changing): no frame decided anything
         raise Stop(f"离开商城时：{error}", [frame_now(rt)]) from error
     frame, _recognize = watch(rt, "点了商城的返回箭头", ("hud",), source=("gifts",), seconds=OPEN_WAIT)
     return frame is not None
@@ -449,7 +450,11 @@ def scan(rt):
         return None
     cards, swipes, unchanged, last_begin = {}, 0, 0, None
     while True:
-        for name, card in read_gifts(recognize).items():
+        try:
+            gifts = read_gifts(recognize)
+        except Stop as error:  # read on this frame
+            raise Stop(str(error), error.frames or [frame]) from error
+        for name, card in gifts.items():
             if name in cards:
                 continue
             if card.state not in ("sold_out", "claimable"):
@@ -514,7 +519,10 @@ def run(rt) -> bool:
     from navigation.models import NavigationError
     cards = None
     try:
-        if not pages.to_hud(rt):
+        start = []
+        if not pages.to_hud(rt, rejected=lambda frame, reason: start.append((frame, reason))):
+            for frame, reason in start:  # the screen the task would not start from (e.g. a popup)
+                rt.diagnostic("android_weekly_start", f"开始时不在大世界，也没法安全地回去：{reason}", image=frame)
             return fail(rt, "没能回到大世界")
         if not rt.key("shop"):
             return False
@@ -530,6 +538,8 @@ def run(rt) -> bool:
             return False
     except Stop as error:
         return stopped(rt, str(error), error.frames)
+    except pages.FrameMismatch as error:  # a tap or swipe frame that was not the expected state: no retry
+        return stopped(rt, str(error), [error.frame])
     except (pages.GuardRefusal, actions.ScreenUnrecognised, NavigationError) as error:
         # Saved here: a diagnostic saved earlier in the run (the frame before the first list swipe) keeps the
         # generic failure capture from saving this one.

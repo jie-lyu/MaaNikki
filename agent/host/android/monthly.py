@@ -149,19 +149,6 @@ def look(rt):
     return kind, view, frame, screen, recognize
 
 
-def nothing_recognised(screen, recognize) -> bool:
-    """An unrecognised screen on which nothing at all was recognised (no quit title or 取消, no modal close mark, no
-    duck, no back arrow, and every one of those checks ran): what a screen in transition looks like. A screen with
-    any of them is something else and is not waited through."""
-    if screen is None or screen.kind != "unknown":
-        return False
-    for node in (actions.QUIT_TITLE, actions.QUIT_CANCEL, actions.MODAL_CLOSE, actions.HUD_DUCK, actions.BACK_ARROW):
-        result = recognize(node)
-        if result is None or actions._hit(result):
-            return False
-    return True
-
-
 def expected(tab, button=None):
     """``accept(frame, recognize)`` for pages.tap_on_page: the frame is the settled 奇迹之旅 page on ``tab`` (its
     content showing, the only tab selected) and, when given, with the button in state ``button``."""
@@ -182,7 +169,7 @@ class Stop(Exception):
 def wait_state(rt, what, done, source):
     """Poll fresh frames until ``done(kind, view)`` holds and return that view. Frames for which ``source(screen,
     kind, view)`` holds (the state being left) are waited through up to OPEN_WAIT; a frame on which nothing is
-    recognised yet (nothing_recognised) or the 奇迹之旅 page between tabs only within TRANSITION_ALLOWANCE; any other
+    recognised yet (pages.nothing_recognised) or the 奇迹之旅 page between tabs only within TRANSITION_ALLOWANCE; any other
     frame (another page, the quit title, an unknown popup's close mark, ...), or the time running out, saves that
     frame and stops. None when the run stopped."""
     start = time.monotonic()
@@ -194,7 +181,7 @@ def wait_state(rt, what, done, source):
             if done(kind, view):
                 return view
             elapsed = time.monotonic() - start
-            transition = kind == "unsettled" or (kind == "other" and nothing_recognised(screen, recognize))
+            transition = kind == "unsettled" or (kind == "other" and pages.nothing_recognised(screen, recognize))
             if not (source(screen, kind, view) or (transition and elapsed <= TRANSITION_ALLOWANCE)):
                 raise Stop(f"{what}时出现了不该出现的画面", [frame])
             if elapsed >= OPEN_WAIT:
