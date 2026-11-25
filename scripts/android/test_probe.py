@@ -142,6 +142,19 @@ class ProbeTests(unittest.TestCase):
             probe.run_steps(device, [{"tap": [1, 2], "key": 4}], out=None)
         self.assertEqual(controller.events, [])
 
+    def test_shell_input_is_logged_and_checks_the_exit_status(self):
+        device, controller = self.device()
+        controller.post_shell = lambda command, timeout: Job(True, "__exit=0\n" if command.startswith("input ") else "")
+        self.assertTrue(device.shell_input("gamepad keyevent KEYCODE_BUTTON_A"))
+        controller.post_shell = lambda command, timeout: Job(True, "Error: Unknown command\n__exit=1\n")
+        self.assertFalse(device.shell_input("bogus"))
+        records = self.records()
+        self.assertEqual([r["command"] for r in records], ["input", "input"])
+        self.assertEqual([r["ok"] for r in records], [True, False])
+        with self.assertRaises(probe.ProbeError):
+            device.shell_input("keyevent 4; reboot")
+        self.assertEqual(len(self.records()), 2)
+
     def test_full_roi_override(self):
         whole = [0, 0, 1280, 720]
         ocr = {"recognition": {"type": "OCR", "param": {"roi": [1, 2, 3, 4], "expected": ["x"]}}}

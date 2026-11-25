@@ -33,6 +33,7 @@ A gesture or steps file is a JSON list of steps, run in order on one connection:
     {"swipe": [X1, Y1, X2, Y2], "ms": 300}
     {"key": KEYCODE}
     {"text": "..."}
+    {"input": "gamepad keyevent KEYCODE_BUTTON_A"}   `adb shell input ...` (sources the controller lacks)
     {"wait": MS}
     {"capture": "NAME"}                 save a 720p frame as NAME.png under --out
     {"reco": ["NODE", ...]}             recognize on a fresh frame, printed and kept in the report
@@ -178,6 +179,28 @@ class Device:
     def text(self, value) -> bool:
         return self._send("text", [value], lambda: self.controller.post_input_text(value))
 
+    def shell_input(self, arguments: str) -> bool:
+        """`input <arguments>` on the device (for sources the controller has no call for, e.g. gamepad).
+
+        Only the `input` command: anything else is a shell command, not an input, and goes through `shell`.
+        """
+        if not re.fullmatch(r"[\w .:-]+", arguments):
+            raise ProbeError(f"unexpected characters in input arguments {arguments!r}")
+        command = f"input {arguments}; echo __exit=$?"
+        def job():
+            return self.controller.post_shell(command, 10000)
+        started = time.perf_counter()
+        try:
+            result = job().wait()
+        except BaseException:
+            self.log.write("input", [arguments], None, error="interrupted or raised while waiting")
+            raise
+        output = result.get() if result.succeeded else None
+        ok = bool(output is not None and "__exit=0" in output)
+        self.log.write("input", [arguments], ok, ms=round((time.perf_counter() - started) * 1000, 1),
+                       output=(output or "").replace("__exit=0", "").strip()[:300] or None)
+        return ok
+
     def drag(self, x1, y1, x2, y2, ms, contact=0, steps=10) -> bool:
         """Touch down and move in `steps` even moves over `ms`; the contact stays held."""
         if not self.down(x1, y1, contact):
@@ -217,6 +240,10 @@ def connect(args):
         raise ProbeError(f"AdbController could not connect to {args.serial} with input={args.input} "
                          f"screencap={args.screencap}; see {log_dir / 'maafw.log'}")
     connect_ms = (time.perf_counter() - started) * 1000
+    # The core learns the frame size, which it needs to scale touch coordinates, from the first capture;
+    # before that a click logs "Invalid image target size". Capture once so every input is scaled the same way.
+    if not controller.post_screencap().wait().succeeded:
+        raise ProbeError("the first capture after connecting failed")
     log = InputLog(Path(args.log), getattr(args, "purpose", None))
     device = Device(controller, log, raw=getattr(args, "raw", False), guard=not getattr(args, "no_guard", False))
     device.connect_ms = connect_ms
@@ -549,6 +576,8 @@ def _input_step(device: Device, step: dict, contact: int) -> bool:
         return device.key(int(step["key"]))
     if "text" in step:
         return device.text(str(step["text"]))
+    if "input" in step:
+        return device.shell_input(str(step["input"]))
     raise ProbeError(f"unknown step {step!r}")
 
 
