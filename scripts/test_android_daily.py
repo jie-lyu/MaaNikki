@@ -34,7 +34,12 @@ PLACES = {"daily_title.png": (0, 0), "daily_tabs_zhaoxi.jpg": (15, 100), "daily_
           "daily_circles_claimed.png": (1162, 115), "daily_circles_locked.png": (1162, 115),
           "daily_left_zhaoxi.jpg": (15, 585), "daily_left_xinghai.jpg": (15, 585),
           "daily_right_zhaoxi_check.jpg": (700, 585), "daily_right_zhaoxi_go.jpg": (700, 585),
-          "daily_right_xinghai.jpg": (700, 585), "calendar_title.png": (0, 0), "calendar_cards.jpg": (140, 340)}
+          "daily_right_xinghai.jpg": (700, 585), "calendar_title.png": (0, 0), "calendar_cards.jpg": (140, 340),
+          "daily_layer_tabs_zhaoxi.jpg": (15, 100), "daily_layer_tabs_xinghai.jpg": (15, 100),
+          "daily_layer_column_zhaoxi.jpg": (1160, 100), "daily_layer_column_xinghai.jpg": (1160, 100),
+          "monthly_layer_tabs.jpg": (15, 100), "monthly_layer_column.jpg": (1160, 100),
+          "reward_layer_title.png": (540, 140), "reward_layer_hint.png": (520, 620),
+          "redeem_success_layer.jpg": (230, 140)}
 PAGES = {
     # device survey (100 lit), device run 1 (the 立即前往 wish selected), device run 2 (100 claimed), 星海拾光 at 0
     "zhaoxi lit": ("daily_tabs_zhaoxi.jpg", "daily_circles_lit.png", "daily_left_zhaoxi.jpg",
@@ -63,6 +68,21 @@ def compose(fixtures, names, background=(60, 40, 45)):
 
 def page(fixtures, name):
     return compose(fixtures, ("daily_title.png", "daily_refresh.png", *PAGES[name]))
+
+
+# The 「恭喜获得」 layer. No layer over 每日灵感 was saved on the device: daily_layer_* are the device frames of
+# 朝夕心愿 (device run 2, after the claim) and 星海拾光 put under the blur and dim fitted on 奇迹之旅 device run 1
+# (daily.UNDER_CELLS); monthly_layer_* are crops of that run's real layer frame over 奇迹之旅, and
+# redeem_success_layer.jpg the real layer after a redeemed code (redeem device run 2): layers over other pages.
+LAYERS = {"zhaoxi": ("daily_layer_tabs_zhaoxi.jpg", "daily_layer_column_zhaoxi.jpg"),
+          "xinghai": ("daily_layer_tabs_xinghai.jpg", "daily_layer_column_xinghai.jpg"),
+          "monthly": ("monthly_layer_tabs.jpg", "monthly_layer_column.jpg")}
+
+
+def layer(fixtures, name):
+    if name == "redeem":
+        return compose(fixtures, ("redeem_success_layer.jpg",), background=(40, 35, 45))
+    return compose(fixtures, (*LAYERS[name], "reward_layer_title.png", "reward_layer_hint.png"), background=(30, 28, 36))
 '''
 exec(COMPOSE)
 
@@ -114,9 +134,13 @@ def daily_page(name, score, **kwargs):
 CALENDAR = (Screen("page", {"back": BACK}, title=daily.CALENDAR), np.zeros((720, 1280, 3), np.uint8),
             lambda node, override=None: {actions.BACK_ARROW: hit(BACK),
                                          **{n: hit(CARD_BOXES[m]) for m, n in daily.CARD_NODES.items()}}.get(node, MISS))
-LAYER = (UNKNOWN, np.zeros((720, 1280, 3), np.uint8),
-         lambda node, override=None: {daily.LAYER_TITLE: hit([570, 165, 136, 42], "恭喜获得"),
-                                      daily.LAYER_HINT: hit([569, 640, 140, 19], "点击空白区域继续")}.get(node, MISS))
+LAYER_TEXTS = {daily.LAYER_TITLE: hit([570, 165, 136, 42], "恭喜获得"),
+               daily.LAYER_HINT: hit([569, 640, 140, 19], "点击空白区域继续")}
+LAYER_FRAMES = {name: layer(FIXTURES, name) for name in (*LAYERS, "redeem")}
+# The layer's texts read on each of them (the framework check below reads them for real).
+LAYER_SCREENS = {name: (UNKNOWN, frame, lambda node, override=None: LAYER_TEXTS.get(node, MISS))
+                 for name, frame in LAYER_FRAMES.items()}
+LAYER = LAYER_SCREENS["zhaoxi"]
 SHOP = (Screen("page", {"back": BACK}, title="商城"), np.zeros((720, 1280, 3), np.uint8),
         lambda node, override=None: hit(BACK) if node == actions.BACK_ARROW else MISS)
 BLANK = (UNKNOWN, np.zeros((720, 1280, 3), np.uint8), lambda node, override=None: MISS)
@@ -125,16 +149,18 @@ BLANK = (UNKNOWN, np.zeros((720, 1280, 3), np.uint8), lambda node, override=None
 class Game:
     """The 奇想日历 -> 每日灵感 screens, reacting to the taps the real pages helpers send. ``pages``: per tab, the
     page shown (a ``daily_page`` tuple); ``after_claim``: the frames shown after the claim tap, one per capture, before
-    the claimed page ("layer": the layer stays until the blank tap); ``claimed``: the page after the claim;
-    ``dismiss_closes``: whether the blank tap closes the layer; ``after_card``: frames before the page opens."""
+    the claimed page ("layer": the layer over this tab stays until the blank tap); ``claimed``: the page after the
+    claim; ``dismiss_closes``: whether the blank tap closes the layer; ``after_card``: frames before the page opens;
+    ``after_back``: frames shown after the first back arrow, one per capture, before the page it leads to."""
 
     def __init__(self, tab=daily.ZHAOXI, *, page=None, claimed=None, after_claim=(), dismiss_closes=True,
-                 after_card=(), start=None, opens_on=None):
+                 after_card=(), start=None, opens_on=None, after_back=None):
         self.where, self.tab, self.taps = "hud", tab, []
         self.page, self.claimed = page or daily_page("zhaoxi lit", 100), claimed or daily_page("zhaoxi claimed", 100)
         self.other = daily_page("xinghai", 0) if tab == daily.ZHAOXI else daily_page("zhaoxi claimed", 100)
         self.opens_on = opens_on or tab
         self.after_claim, self.after_card, self.dismiss_closes = list(after_claim), list(after_card), dismiss_closes
+        self.after_back = after_back
         self.queue = [start] if start else []
 
     def screen_now(self, rt):
@@ -145,7 +171,8 @@ class Game:
             else:
                 return item
         return {"hud": (HUD, np.zeros((720, 1280, 3), np.uint8), lambda node, override=None: MISS),
-                "calendar": CALENDAR, "layer": LAYER, "page": self.page, "other": self.other}[self.where]
+                "calendar": CALENDAR, "layer": LAYER_SCREENS[self.tab], "page": self.page,
+                "other": self.other}[self.where]
 
     def shortcut(self, rt, action):
         assert action == "calendar" and self.where == "hud"
@@ -163,6 +190,8 @@ class Game:
         if target == BACK:
             self.taps.append("back")
             self.where = {"page": "calendar", "other": "calendar", "calendar": "hud"}[self.where]
+            if self.after_back is not None:
+                self.queue, self.after_back = list(self.after_back), None
             return True
         if target == LIT_BOX:
             self.taps.append("claim")
@@ -235,6 +264,26 @@ class LookTests(unittest.TestCase):
         self.assertIsNone(daily.read_view((FRAMES["zhaoxi lit"] * .45).astype(np.uint8),
                                           page_recognizer("zhaoxi lit", 100)))
 
+    def test_the_page_beneath_the_layer(self):
+        # Review round 1: only 每日灵感 on the expected tab beneath the layer lets the dismissal tap through.
+        expected = {"zhaoxi": {daily.ZHAOXI}, "xinghai": {daily.XINGHAI}, "monthly": set(), "redeem": set()}
+        for name, frame in LAYER_FRAMES.items():
+            with self.subTest(layer=name):
+                self.assertEqual({mode for mode in daily.MODES if daily.layer_over_tab(frame, mode)}, expected[name])
+        self.assertFalse(daily.layer_over_tab(np.zeros((720, 1280, 3), np.uint8), daily.ZHAOXI))
+        # The 500 and 400 circles glow whatever they show: here lit and claimed (the 100 circle's crops moved up),
+        # under the fitted blur and dim (above the band: ~0.33 x + 20).
+        import cv2
+        x, y = daily.CIRCLE_X, daily.CIRCLE_YS[0]
+        for name in ("zhaoxi lit", "zhaoxi claimed"):
+            with self.subTest(circles=name):
+                frame = FRAMES[name].copy()
+                for index in (3, 4):
+                    top = daily.CIRCLE_YS[index]
+                    frame[top - 30:top + 30, x - 30:x + 30] = FRAMES[name][y - 30:y + 30, x - 30:x + 30]
+                under = (cv2.GaussianBlur(frame, (0, 0), 4) * .33 + 20).astype(np.uint8)
+                self.assertTrue(all(daily.gift_glow(under, index) >= daily.UNDER_GLOW for index in (3, 4)))
+
     def test_the_score_must_agree_with_the_circles(self):
         view = daily.View
         L, C, N, U = daily.LIT, daily.CLAIMED, daily.LOCKED, daily.UNKNOWN
@@ -303,8 +352,68 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(game.taps, ["calendar", f"card {daily.ZHAOXI}", "claim", "dismiss"])
         self.assertTrue(any("仍然没有关闭" in text for text in rt.logs), rt.logs)
 
+    def test_a_reward_layer_over_another_page_is_not_tapped(self):
+        # Review round 1: the redeem success layer, the 奇迹之旅 layer and the layer over the other tab (title, hint
+        # and blank point all as here): the first frame showing one stops, with that frame, before any dismissal tap.
+        for name in ("redeem", "monthly", "xinghai"):
+            with self.subTest(layer=name):
+                game = Game(after_claim=[LAYER_SCREENS[name]])
+                result, rt = play(game)
+                self.assertFalse(result)
+                self.assertEqual(game.taps, ["calendar", f"card {daily.ZHAOXI}", "claim"])
+                self.assertIs(saved(rt)[0], LAYER_FRAMES[name])
+                self.assertEqual(len(saved(rt)), 1)
+                self.assertTrue(any("认不出每日灵感的「朝夕心愿」页签" in text for text in rt.logs), rt.logs)
+
+    def test_a_reward_layer_over_another_page_on_a_tap_frame_is_not_tapped(self):
+        # The layer over 朝夕心愿 first, then another page's layer on the deciding or on the confirming frame.
+        for frames in ([LAYER, LAYER_SCREENS["redeem"]], [LAYER, LAYER, LAYER_SCREENS["redeem"]],
+                       [LAYER, LAYER, LAYER_SCREENS["monthly"]]):
+            with self.subTest(frames=len(frames), last=frames[-1][1] is LAYER_FRAMES["redeem"]):
+                game = Game(after_claim=frames)
+                result, rt = play(game)
+                self.assertFalse(result)
+                self.assertEqual(game.taps, ["calendar", f"card {daily.ZHAOXI}", "claim"])
+                self.assertIs(saved(rt)[0], frames[-1][1])
+                self.assertTrue(any("认不出每日灵感" in text for text in rt.logs), rt.logs)
+
+    def test_the_frame_the_back_arrow_leads_to_is_checked(self):
+        # Review round 1: 商城 on the frame that shows 每日灵感 gone stops with that frame (no second back arrow), and
+        # so does 每日灵感 again once 奇想日历 showed.
+        for frames, stop in (([SHOP], SHOP[1]), ([CALENDAR, daily_page("zhaoxi claimed", 100)],
+                                                 FRAMES["zhaoxi claimed"])):
+            with self.subTest(first=frames[0][0].title):
+                game = Game(page=daily_page("zhaoxi claimed", 100), after_back=frames)
+                result, rt = play(game)
+                self.assertFalse(result)
+                self.assertEqual(game.taps, ["calendar", f"card {daily.ZHAOXI}", "back"])
+                self.assertIs(saved(rt)[0], stop)
+                self.assertEqual(len(saved(rt)), 1)
+                self.assertTrue(any("不该出现" in text for text in rt.logs), rt.logs)
+
+    def test_the_other_tab_does_not_authorise_the_daily_back_arrow(self):
+        # Review round 1: the way back starts on 朝夕心愿, but a tap frame of the back arrow shows 星海拾光.
+        zhaoxi, xinghai = daily_page("zhaoxi claimed", 100), daily_page("xinghai", 0)
+
+        def runtime():
+            return SimpleNamespace(stopped=False, _frame_still_valid=Mock(return_value=True),
+                                   pause=Mock(return_value=True), TOUCH_KEY_ATTEMPTS=3, action=Mock(return_value=True))
+        for frames in ([zhaoxi, xinghai, xinghai], [zhaoxi, zhaoxi, xinghai]):
+            with self.subTest(deciding=frames[1] is xinghai):
+                rt = runtime()
+                with patch.object(pages, "screen_now", side_effect=frames + [zhaoxi] * 5), \
+                        self.assertRaises(pages.FrameMismatch) as caught:
+                    daily.back_home(rt, daily.ZHAOXI)
+                self.assertIs(caught.exception.frame, xinghai[1])
+                rt.action.assert_not_called()
+        # The expected tab on both tap frames: both arrows are tapped.
+        rt, hud = runtime(), (HUD, np.zeros((720, 1280, 3), np.uint8), lambda node, override=None: MISS)
+        with patch.object(pages, "screen_now", side_effect=[zhaoxi] * 3 + [CALENDAR] * 4 + [hud]):
+            self.assertTrue(daily.back_home(rt, daily.ZHAOXI))
+        self.assertEqual(rt.action.call_count, 2)
+
     def test_a_layer_over_text_at_the_dismissal_point_is_not_tapped(self):
-        text = (UNKNOWN, np.zeros((720, 1280, 3), np.uint8),
+        text = (UNKNOWN, LAYER[1],
                 lambda node, override=None: rows(("——满载而归的搭配师", [700, 680, 200, 25]))
                 if node == actions.PAGE_TITLE else LAYER[2](node, override))
         game = Game(after_claim=[text, text, text])
@@ -427,10 +536,8 @@ fixtures = repo / "scripts/fixtures/android"
 exec(sys.argv[2])
 frames = {name: page(fixtures, name) for name in PAGES}
 frames["calendar"] = compose(fixtures, ("calendar_title.png", "calendar_cards.jpg"))
-layer = (page(fixtures, "zhaoxi lit go") * .45).astype(np.uint8)  # the layer over the dimmed page (as in run 2)
-layer[140:220, 540:740] = cv2.imread(str(fixtures / "reward_layer_title.png"))
-layer[620:680, 520:760] = cv2.imread(str(fixtures / "reward_layer_hint.png"))
-frames["layer"] = layer
+for name in (*LAYERS, "redeem"):
+    frames[f"layer {name}"] = layer(fixtures, name)
 current, results = {}, {}
 
 class Frame(CustomController):
@@ -449,7 +556,8 @@ class Judge(CustomAction):
         screen = actions.read_screen(recognize)
         out = {"kind": screen.kind, "title": screen.title, "layer": daily.is_reward_layer(screen, recognize),
                "blank": daily.blank_at_dismiss(recognize),
-               "dismiss_refused": pages._forbidden_near(recognize, [*daily.DISMISS_POINT, 1, 1])}
+               "dismiss_refused": pages._forbidden_near(recognize, [*daily.DISMISS_POINT, 1, 1]),
+               "over": [mode for mode in daily.MODES if daily.layer_over_tab(image, mode)]}
         if screen.kind == "page" and screen.title == daily.TITLE:
             view = daily.read_view(image, recognize)
             out["view"] = view and [view.tab, view.score, list(view.circles)]
@@ -527,10 +635,13 @@ class FrameworkTests(unittest.TestCase):
         self.assertEqual((calendar["kind"], calendar["title"]), ("page", daily.CALENDAR))
         for mode, (x, y) in {"zhaoxi": (223, 380), "xinghai": (223, 660)}.items():
             self.assertLessEqual(max(abs(calendar["cards"][mode][0] - x), abs(calendar["cards"][mode][1] - y)), 6)
-        layer = out["layer"]
-        self.assertEqual((layer["kind"], layer["layer"], layer["blank"], layer["dismiss_refused"]),
-                         ("unknown", True, True, None))
-        self.assertNotIn("view", layer)
+        for name, over in (("zhaoxi", ["zhaoxi"]), ("xinghai", ["xinghai"]), ("monthly", []), ("redeem", [])):
+            with self.subTest(layer=name):
+                layer = out[f"layer {name}"]
+                self.assertEqual((layer["kind"], layer["layer"], layer["over"]), ("unknown", True, over))
+                self.assertNotIn("view", layer)
+                if name in ("zhaoxi", "xinghai"):
+                    self.assertEqual((layer["blank"], layer["dismiss_refused"]), (True, None))
 
 
 if __name__ == "__main__":

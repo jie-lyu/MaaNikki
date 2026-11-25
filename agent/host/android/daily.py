@@ -32,8 +32,11 @@ or shows a circle of any other look is not acted on (it stops, with the frame, o
 Every tap is decided and confirmed on two fresh focus-confirmed frames showing the whole expected state (pages
 helpers with retry=False), never next to a forbidden word (pages.FORBIDDEN) or a DAILY_WORDS word; a claim tap is
 never repeated. After a claim, the frames must show the same view with that circle still lit (not yet), that circle
-claimed (success once settled), the 「恭喜获得」 layer (one tap at DISMISS_POINT) or, briefly, nothing recognised; the
-first frame that is anything else stops the task with that frame saved and nothing more sent.
+claimed (success once settled), the 「恭喜获得」 layer with 每日灵感 on that tab beneath it (one tap at DISMISS_POINT;
+layer_over_tab on the frame that shows it and on both tap frames) or, briefly, nothing recognised; the first frame
+that is anything else (a reward layer over anything else among them) stops the task with that frame saved and nothing
+more sent. On the way back, the 每日灵感 back arrow needs that tab on both tap frames, and the frame that shows the page
+gone must itself be 奇想日历 or the HUD.
 """
 from __future__ import annotations
 
@@ -83,9 +86,24 @@ AFTER_DISMISS_WAIT = 5
 # left of 立即前往.
 DISMISS_POINT = (800, 705)
 DISMISS_CLEAR = [690, 662, 220, 58]  # no text may be read here on either tap frame
+# Beneath the 「恭喜获得」 layer the page is blurred (Gaussian, sigma ~4) and dimmed: per channel ~0.33 x + 8-37 above
+# y 240, ~0.14-0.26 x + 35-75 in the layer's band (y 240-460), as fitted on 奇迹之旅 device run 1 (the layer frame against
+# the page frame: mean error ~1 level above the band, 2-3.5 in it). No layer over 每日灵感 has been saved (device run 2
+# closed it without a frame), so these thresholds come from the 每日灵感 device frames put under that fit
+# (scripts/fixtures/android/daily_layer_*.jpg): the selected tab's gold cell (UNDER_CELLS, hue 8-30, saturation >= 60)
+# 0.82 warm on 朝夕心愿, 0.36-0.72 on 星海拾光 (in the band; three fits of the band), the other cell 0.00-0.12; the
+# 500 and 400 gift circles of the reward column glow (gift_glow: centre minus ring brightness) 30-46 on both tabs,
+# whatever the circles show. On the 奇迹之旅 layer frame the cells read 0.84 / 0.36 and the glow -9 / 9 (its gold
+# chest frame there), on the redeem success layer the glow 6-7.
+UNDER_CELLS = {ZHAOXI: (40, 120, 110, 95), XINGHAI: (40, 255, 110, 95)}
+UNDER_ON, UNDER_OFF = {ZHAOXI: .5, XINGHAI: .2}, {ZHAOXI: .25, XINGHAI: .1}  # the expected cell; the other cell
+UNDER_GLOW = 15
 _YY, _XX = np.mgrid[-22:23, -22:23]
 _RADIUS = np.hypot(_XX, _YY)
 _CENTRE, _INNER, _OUTER = _RADIUS < 7, (_RADIUS >= 10) & (_RADIUS <= 16), (_RADIUS >= 13) & (_RADIUS <= 19)
+_GY, _GX = np.mgrid[-34:35, -34:35]
+_GLOW_RADIUS = np.hypot(_GX, _GY)
+_GLOW_CENTRE, _GLOW_RING = _GLOW_RADIUS <= 8, (_GLOW_RADIUS >= 28) & (_GLOW_RADIUS <= 34)
 
 
 def _fraction(frame, box, lower, upper) -> float:
@@ -102,6 +120,27 @@ def star_colours(frame):
     """``(gold, lavender)`` shares of STAR_BOX."""
     return (_fraction(frame, STAR_BOX, (10, 60, 120), (35, 255, 255)),
             _fraction(frame, STAR_BOX, (120, 20, 150), (160, 255, 255)))
+
+
+def warm_share(frame, box) -> float:
+    return _fraction(frame, box, (8, 60, 0), (30, 255, 255))
+
+
+def gift_glow(frame, index) -> float:
+    """How much brighter the centre of circle ``index`` is than a ring around it (beneath the layer the white gift
+    is a blurred glow)."""
+    x, y = CIRCLE_X, CIRCLE_YS[index]
+    value = cv2.cvtColor(frame[y - 34:y + 35, x - 34:x + 35], cv2.COLOR_BGR2HSV)[..., 2].astype(float)
+    return float(value[_GLOW_CENTRE].mean() - value[_GLOW_RING].mean())
+
+
+def layer_over_tab(frame, mode) -> bool:
+    """每日灵感 on ``mode``'s tab beneath the reward layer, positively: ``mode``'s tab cell gold and the other tab's
+    cell not, and the 500 and 400 gift circles glowing in the reward column (UNDER_CELLS has the numbers)."""
+    if not all(gift_glow(frame, index) >= UNDER_GLOW for index in (3, 4)):
+        return False
+    return all(warm_share(frame, UNDER_CELLS[tab]) >= UNDER_ON[mode] if tab == mode else
+               warm_share(frame, UNDER_CELLS[tab]) <= UNDER_OFF[mode] for tab in MODES)
 
 
 def circle_measures(frame, index):
@@ -161,9 +200,9 @@ def read_score(recognize):
     return int(text) if re.fullmatch(r"0|[1-5]00", text) else None
 
 
-def read_view(frame, recognize) -> View | None:
-    """The page's state on a frame already recognised as 每日灵感, or None when it is not settled on exactly one tab
-    with that tab's content, the reward column's label and a score showing."""
+def shown_tab(frame, recognize) -> str | None:
+    """The tab a frame already recognised as 每日灵感 shows: exactly one tab selected and that tab's content showing,
+    else None."""
     selected = [mode for mode in MODES
                 if actions._hit(recognize(TAB_NODES[mode])) and tab_gold(frame, mode) >= TAB_SELECTED]
     if len(selected) != 1 or any(tab_gold(frame, mode) > TAB_OFF for mode in MODES if mode != selected[0]):
@@ -172,7 +211,14 @@ def read_view(frame, recognize) -> View | None:
     shop, (gold, lavender) = actions._hit(recognize(SHOP_LABEL)), star_colours(frame)
     content = (not shop and gold >= STAR_GOLD and lavender <= STAR_OTHER) if mode == ZHAOXI else \
         (shop and lavender >= STAR_LAVENDER and gold <= STAR_OTHER)
-    if not content or not actions._hit(recognize(REFRESH)):
+    return mode if content else None
+
+
+def read_view(frame, recognize) -> View | None:
+    """The page's state on a frame already recognised as 每日灵感, or None when it is not settled on exactly one tab
+    with that tab's content, the reward column's label and a score showing."""
+    mode = shown_tab(frame, recognize)
+    if mode is None or not actions._hit(recognize(REFRESH)):
         return None
     score = read_score(recognize)
     if score is None:
@@ -208,9 +254,9 @@ def guarded_accept(node, check=None, override=None):
 
 
 def is_reward_layer(screen, recognize) -> bool:
-    """The 「恭喜获得」 layer, positively: no page, HUD, modal or quit dialog recognised, the quit and modal checks ran
-    and found nothing, the layer's title and its bottom hint read. (Not seen over 每日灵感 yet: the page beneath is
-    not checked.)"""
+    """The 「恭喜获得」 layer's texts, positively: no page, HUD, modal or quit dialog recognised, the quit and modal
+    checks ran and found nothing, the layer's title and its bottom hint read. Over any page: whether 每日灵感 is
+    beneath it is layer_over_tab's question, asked before the layer is tapped."""
     if screen is None or screen.kind != "unknown":
         return False
     for node in (actions.QUIT_TITLE, actions.QUIT_CANCEL, actions.MODAL_CLOSE):
@@ -347,18 +393,22 @@ def settle(rt, mode) -> View | None:
 
 def dismiss_layer(rt, mode, expected) -> bool:
     """One guarded tap on blank space of the reward layer (pages.tap_on_layer: the layer recognised with nothing
-    read around the point, on both tap frames). A tap frame that is not the layer decides: the page back on
-    ``mode`` with a view in ``expected`` continues (nothing was sent); anything else saves it and stops."""
+    read around the point and 每日灵感 on ``mode``'s tab beneath it, on both tap frames). A tap frame that is not
+    that layer decides: the page back on ``mode`` with a view in ``expected`` continues (nothing was sent); anything
+    else, a reward layer over anything else among them, saves it and stops."""
     try:
-        return pages.tap_on_layer(rt, "每日灵感上的「恭喜获得」奖励层",
+        return pages.tap_on_layer(rt, f"「{NAMES[mode]}」上的「恭喜获得」奖励层",
                                   lambda screen, recognize: is_reward_layer(screen, recognize)
-                                  and blank_at_dismiss(recognize), DISMISS_POINT)
+                                  and blank_at_dismiss(recognize), DISMISS_POINT,
+                                  verify=lambda frame: layer_over_tab(frame, mode))
     except pages.LayerMismatch as mismatch:
         if rt.stopped:
             return False
         kind, view = classify(rt, mismatch.screen, mismatch.frame, mismatch.recognize)
         if kind == "view" and view in expected:
             return True
+        if kind == "layer" and not layer_over_tab(mismatch.frame, mode):
+            raise Stop(f"「恭喜获得」奖励层下面认不出每日灵感的「{NAMES[mode]}」页签，没有点", [mismatch.frame]) from None
         raise Stop("「恭喜获得」奖励层在点之前变了，但画面没有回到每日灵感", [mismatch.frame]) from None
 
 
@@ -398,6 +448,8 @@ def claim(rt, mode, index, before) -> View | None:
             settled_at, settled_frames = None, 0
             if dismissed:
                 pass  # still the layer after the one tap: waited for until the deadline
+            elif not layer_over_tab(frame, mode):
+                raise Stop(f"领取{what}之后出现的「恭喜获得」奖励层下面认不出每日灵感的「{NAMES[mode]}」页签，没有点", [frame])
             else:
                 dismissed = True
                 if not dismiss_layer(rt, mode, (pending, done)):
@@ -423,10 +475,16 @@ def claim(rt, mode, index, before) -> View | None:
     raise Stop(f"领取{what}之后没有看到它变成已领取", [frame])
 
 
-def back_home(rt, attempts: int = 3) -> bool:
-    """The way back after the task: the back arrow, one attempt each, only on a page titled exactly 每日灵感 or 奇想日历
-    (tap_on_page with retry=False), and no other back arrow until fresh frames show that page gone (pages.left_page).
-    Anything else stops with that frame."""
+def back_home(rt, mode, attempts: int = 3) -> bool:
+    """The way back after the task: the back arrow, one attempt each, only on a page titled exactly 每日灵感 showing
+    ``mode``'s tab (shown_tab) or 奇想日历 (tap_on_page with retry=False: a tap frame that is not raises FrameMismatch
+    with that frame), and no other back arrow until fresh frames show that page gone (pages.left_page). The very frame
+    that shows it gone must be the HUD or, after 每日灵感, 奇想日历; any other page there (商城, ...), 每日灵感 again
+    once it was left, or anything else stops with that frame."""
+    titles = (TITLE, CALENDAR)
+
+    def on_tab(frame_, recognize_):
+        return shown_tab(frame_, recognize_) == mode
     for _ in range(attempts):
         screen, frame, _recognize = pages.screen_now(rt)
         if frame is None:
@@ -435,10 +493,11 @@ def back_home(rt, attempts: int = 3) -> bool:
             continue
         if screen.kind == "hud":
             return True
-        if screen.kind != "page" or screen.title not in (TITLE, CALENDAR):
+        if screen.kind != "page" or screen.title not in titles:
             raise Stop("回大世界时出现了不该出现的画面", [frame])
         title = screen.title
-        if not pages.tap_on_page(rt, title, actions.BACK_ARROW, retry=False, exact=True):
+        if not pages.tap_on_page(rt, title, actions.BACK_ARROW, accept=on_tab if title == TITLE else None,
+                                 retry=False, exact=True):
             return False
         state, frame, after = pages.left_page(rt, title)
         if state is None:
@@ -448,6 +507,9 @@ def back_home(rt, attempts: int = 3) -> bool:
                        [frame])
         if after.kind == "hud":
             return True
+        if not (title == TITLE and after.kind == "page" and after.title == CALENDAR):
+            raise Stop(f"点了「{title}」的返回箭头之后出现了不该出现的页面（{after.title}）", [frame])
+        titles = (CALENDAR,)
     raise Stop("回大世界时返回次数用完了", [])
 
 
@@ -472,7 +534,7 @@ def collect(rt, mode) -> bool:
     claimed = sum(look_ == CLAIMED for look_ in view.circles)
     rt.log(f"{name}：领取了 {len(lit)} 个奖励。" if lit else
            f"{name}：没有可领取的奖励（已领取 {claimed} 个，积分 {view.score}）。")
-    return back_home(rt)
+    return back_home(rt, mode)
 
 
 def run(rt, mode) -> bool:
