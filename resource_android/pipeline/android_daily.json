@@ -1,0 +1,60 @@
+{
+  "MaaNikki_Android_CalendarZhaoxiCard": {
+    "recognition": "OCR",
+    "roi": [150, 352, 160, 56],
+    "expected": "^朝夕心愿$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_CalendarXinghaiCard": {
+    "recognition": "OCR",
+    "roi": [150, 632, 160, 56],
+    "expected": "^星海拾光$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_DailyZhaoxiTab": {
+    "recognition": "OCR",
+    "roi": [20, 165, 135, 62],
+    "expected": "^朝夕心愿$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_DailyXinghaiTab": {
+    "recognition": "OCR",
+    "roi": [20, 300, 135, 62],
+    "expected": "^星海拾光$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_DailyRefresh": {
+    "recognition": "OCR",
+    "roi": [1080, 42, 180, 48],
+    "expected": "^每日4点刷新$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_DailyScore": {
+    "recognition": "OCR",
+    "roi": [1170, 510, 60, 35],
+    "expected": "^(0|[1-5]00)$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_DailyCircleLit": {
+    "recognition": "ColorMatch",
+    "roi": [1172, 403, 52, 52],
+    "method": 40,
+    "lower": [0, 35, 150],
+    "upper": [30, 255, 255],
+    "count": 700,
+    "connected": true,
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_XinghaiShop": {
+    "recognition": "OCR",
+    "roi": [15, 650, 125, 50],
+    "expected": "^星光小铺$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_DailyWords": {
+    "recognition": "OCR",
+    "roi": [0, 0, 1280, 720],
+    "expected": "前往|小铺|购买|升级",
+    "action": "DoNothing"
+  }
+}

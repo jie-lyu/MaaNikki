@@ -127,7 +127,8 @@ class TaskListTests(unittest.TestCase):
         verified, experimental, excluded = android.task_tiers()
         self.assertEqual(verified, frozenset())
         self.assertEqual(experimental, frozenset({"MaaNikki_AndroidCheck", "MaaNikki_Mailbox", "MaaNikki_MonthlyPass",
-                                                 "MaaNikki_WeeklyFreeGifts", "MaaNikki_RedeemCodes"}))
+                                                 "MaaNikki_WeeklyFreeGifts", "MaaNikki_RedeemCodes", "MaaNikki_Zhaoxi",
+                                                 "MaaNikki_Xinghai"}))
         self.assertEqual(excluded, {})
 
     def test_admission_notices_and_refusals_follow_the_android_list(self):

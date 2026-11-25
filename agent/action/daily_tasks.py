@@ -683,6 +683,13 @@ class DailyTasksAction(CustomAction):
         mode = options.get("mode")
         if mode not in ("zhaoxi", "xinghai"):
             return False
+        from host import capabilities, game_backend
+        if capabilities(game_backend()).touch_actions_only:
+            # The phone layout has its own flow and taps (Windows does not ship it): it only reads the score and
+            # claims the lit reward circles. It branches before DailyRun is built and reads no task option.
+            from host.android import daily
+            runtime = Executors(context)
+            return daily.run(runtime, mode) and not runtime.stopped
         run = DailyRun(context, mode, argv.task_detail.task_id)
         result = run.run_daily()
         return bool(result and not run.stopped)
