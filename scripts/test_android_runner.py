@@ -137,6 +137,9 @@ class RunnerTests(unittest.TestCase):
 
             def post_stop(self):
                 calls["post_stop"] += 1
+                if calls.get("data_root"):
+                    request = Path(calls["data_root"]) / "config" / "android-input" / "stop.request"
+                    calls.setdefault("stop_request_at_post_stop", []).append(request.exists())
                 return types.SimpleNamespace(wait=lambda: None)
 
         class Controller:
@@ -206,6 +209,12 @@ class RunnerTests(unittest.TestCase):
             stack.enter_context(patch.object(runner, "RUN_LOG", Path(tmp) / "runs.jsonl"))
             stack.enter_context(patch("builtins.print"))
             stack.enter_context(patch("sys.stderr"))
+            if runner.os.name == "nt":  # no flock on Windows: inject the owner lock (the real one runs on macOS)
+                from types import SimpleNamespace
+                sys.path.insert(0, str(Path(runner.__file__).resolve().parents[2] / "agent"))
+                import host
+                stack.enter_context(patch.object(host, "take_owner_lock",
+                                                 return_value=SimpleNamespace(close=lambda: None)))
             argv = ["run", "MaaNikki_AndroidCheck", "--purpose", "t", "--data-root", str(Path(tmp) / "data")]
             for index in range(runs):
                 if index:
@@ -219,12 +228,75 @@ class RunnerTests(unittest.TestCase):
         modules, calls, children, Child = self.fake_framework(
             interrupt_runs={1}, child_waits=lambda child, count: count == 1 and child.calls.count("wait") == 1)
         with tempfile.TemporaryDirectory() as tmp:
+            calls["data_root"] = Path(tmp) / "data"
             results, records = self.run_fakes(tmp, modules, Child, runs=2)
         self.assertEqual(results, [2, 0])
         self.assertEqual((records[0]["status"], records[0]["stop_requested"]), ("interrupted", True))
+        self.assertEqual(records[0]["touch_at_stop"], "clear")
         self.assertEqual(calls["post_stop"], 1)
+        self.assertEqual(calls["stop_request_at_post_stop"], [True])  # the handshake came before the stop
         self.assertEqual(children[0].calls[:2], ["wait", "terminate"])  # reaped before the runner returned
         self.assertEqual(records[1]["status"], "succeeded")
+
+    def test_the_stop_request_comes_first_and_a_reserved_touch_finishes_before_the_tasker_stops(self):
+        import tempfile
+        import threading
+        order = []
+        tasker = Mock()
+        tasker.post_stop.side_effect = lambda: (order.append("post_stop"), Mock(wait=lambda: None))[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / "config" / "android-input" / "touch.json"
+            request = marker.parent / "stop.request"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("{}")  # a touch reserved when the stop comes
+
+            def agent():  # finishes its touch a little later
+                deadline = time.monotonic() + 2
+                while not request.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                order.append("request seen")
+                time.sleep(0.2)
+                order.append("touch released")
+                marker.unlink()
+            worker = threading.Thread(target=agent)
+            worker.start()
+            record = {}
+            self.assertTrue(runner.stop_tasker(tasker, root, record))
+            worker.join()
+            self.assertEqual(order, ["request seen", "touch released", "post_stop"])
+            self.assertEqual(record["touch_at_stop"], "clear")
+            self.assertTrue(request.exists())  # left for the agent until the next run starts
+            self.assertEqual(list(marker.parent.glob("*.tmp")), [])  # written atomically
+
+            # A marker that outlives the bound: the tasker is still stopped, and the record says so.
+            marker.write_text("{}")
+            stopper = Mock()
+            stopper.post_stop.return_value = Mock(wait=lambda: None)
+            record = {}
+            with patch.object(runner, "STOP_TOUCH_WAIT", 0.1), patch("sys.stderr"):
+                self.assertTrue(runner.stop_tasker(stopper, root, record))
+            self.assertEqual(record["touch_at_stop"], "still reserved")
+            stopper.post_stop.assert_called_once()
+        self.assertFalse(runner.stop_tasker(None, Path("/nonexistent"), {}))  # nothing to stop: no handshake
+
+    def test_a_stale_stop_request_is_removed_before_the_agent_starts(self):
+        import tempfile
+        modules, calls, children, Child = self.fake_framework()
+        with tempfile.TemporaryDirectory() as tmp:
+            request = Path(tmp) / "data" / "config" / "android-input" / "stop.request"
+            request.parent.mkdir(parents=True)
+            request.write_text("stop")
+            seen = []
+            original = Child.__init__
+
+            def spawned(self, *args, **kwargs):
+                seen.append(request.exists())
+                original(self, *args, **kwargs)
+            with patch.object(Child, "__init__", spawned):
+                results, records = self.run_fakes(tmp, modules, Child)
+        self.assertEqual(results, [0])
+        self.assertEqual(seen, [False])
 
     def test_a_ctrl_c_during_teardown_is_deferred_until_the_agent_is_reaped(self):
         import _thread

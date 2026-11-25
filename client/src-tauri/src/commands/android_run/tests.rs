@@ -13,6 +13,8 @@ const M: &str = "mac";
 
 fn timing() -> Timing {
     Timing {
+        touch_wait: Duration::from_millis(300),
+        touch_poll: Duration::from_millis(10),
         tasker_stop: Duration::from_millis(200),
         child_exit: Duration::from_millis(1500),
         lock_wait: Duration::from_millis(400),
@@ -63,7 +65,7 @@ fn macos() -> ControllerConfig {
 fn state() -> (Arc<MaaState>, PathBuf) {
     let dir = temp_dir();
     let mut state = MaaState::default();
-    state.android_run = AndroidRunSlot::for_tests(dir.clone(), timing());
+    state.android_run = AndroidRunSlot::for_tests(dir.clone(), timing(), adb_configured);
     {
         let mut instances = state.instances.lock().unwrap();
         for (id, config) in [(A, adb()), (B, adb()), (W, win32()), (M, macos())] {
@@ -73,6 +75,20 @@ fn state() -> (Arc<MaaState>, PathBuf) {
         }
     }
     (Arc::new(state), dir)
+}
+
+/// The claim's connection check without native handles: the instance's controller is an Adb one that is not
+/// waiting for a reconnect (the production check also needs a connected handle; see the test for it).
+fn adb_configured(state: &MaaState, instance_id: &str) -> Result<(), String> {
+    let instances = state.instances.lock().unwrap();
+    match instances.get(instance_id) {
+        Some(instance)
+            if matches!(instance.controller_config, Some(ControllerConfig::Adb { .. })) && !instance.controller_stopped =>
+        {
+            Ok(())
+        }
+        _ => Err(NOT_CONNECTED.to_string()),
+    }
 }
 
 fn set_phase(state: &MaaState, phase: Phase) {
@@ -96,6 +112,15 @@ impl RunEvents for Recorded {
     }
     fn message(&self, instance_id: &str, line: &str) {
         self.0.lock().unwrap().push((instance_id.to_string(), format!("message: {}", line)));
+    }
+    fn retire(&self, instance_id: &str, task_id: i64, started: bool) {
+        self.0.lock().unwrap().push((instance_id.to_string(), format!("retire {} started={}", task_id, started)));
+    }
+}
+
+impl Recorded {
+    fn kinds(&self) -> Vec<String> {
+        self.0.lock().unwrap().iter().map(|(_, kind)| kind.clone()).collect()
     }
 }
 
@@ -146,6 +171,7 @@ fn running(state: &Arc<MaaState>, token: u64, child: Option<Child>, events: &Arc
     let mut inner = lock(&state.android_run.inner);
     inner.phase = Phase::Running { token, instance_id: A.into() };
     inner.run = Some(handles(child, events));
+    inner.progress = RunProgress { posted: vec![11, 12], ..RunProgress::default() };
 }
 
 fn status(state: &MaaState, selected: &str) -> String {
@@ -305,13 +331,20 @@ fn every_operation_on_a_busy_instance_is_refused_with_a_reason() {
 }
 
 #[test]
-fn direct_clicks_are_refused_for_every_adb_instance_but_not_for_desktop_ones() {
+fn direct_clicks_are_refused_for_every_adb_instance_under_the_clicks_own_lock() {
     let _serial = serial();
+    use crate::commands::maa_core::post_click_impl;
     let (state, _dir) = state();
-    assert_eq!(refuse_click(&state, A).err().as_deref(), Some(DIRECT_CLICK_REFUSED));
-    assert_eq!(refuse_click(&state, W), Ok(()));
-    assert_eq!(refuse_click(&state, M), Ok(()));
-    assert_eq!(refuse_click(&state, "missing"), Ok(()));  // the shared code reports the missing instance
+    // The type is checked where the controller is picked (no native handle here: a desktop instance gets the
+    // shared "not connected" answer, an Adb one the refusal before any controller is looked at).
+    assert_eq!(post_click_impl(&state, A, 1, 1).err().as_deref(), Some(DIRECT_CLICK_REFUSED));
+    assert_eq!(post_click_impl(&state, W, 1, 1).err().as_deref(), Some("Controller not connected"));
+    assert_eq!(post_click_impl(&state, M, 1, 1).err().as_deref(), Some("Controller not connected"));
+    assert_eq!(post_click_impl(&state, "missing", 1, 1).err().as_deref(), Some("Instance not found"));
+    let instances = state.instances.lock().unwrap();
+    assert_eq!(refuse_click_on(&instances[A]).err().as_deref(), Some(DIRECT_CLICK_REFUSED));
+    assert_eq!(refuse_click_on(&instances[W]), Ok(()));
+    assert_eq!(refuse_click_on(&instances[M]), Ok(()));
 }
 
 #[test]
@@ -498,7 +531,8 @@ fn a_user_stop_while_running_fails_the_unfinished_tasks_and_finishes() {
     assert_eq!(stop_if_busy(&state, A), Some(Ok(())));  // idempotent while finishing
     assert_eq!(claim(&state, A).err().as_deref(), Some(STILL_FINISHING));
     wait_for_idle(&state);
-    assert_eq!(events.0.lock().unwrap().as_slice(), &[(A.to_string(), "task-stopped".to_string())]);
+    // Task 11 ended through its own callback; task 12 was running and is retired from the statistics once.
+    assert_eq!(events.kinds(), ["retire 12 started=true", "task-stopped"]);
     // Nothing of the slot's for another instance, or once idle: the shared code handles it.
     assert_eq!(stop_if_busy(&state, A), None);
     assert_eq!(stop_if_busy(&state, W), None);
@@ -579,6 +613,121 @@ fn a_finishing_job_of_an_older_token_does_not_touch_a_newer_phase() {
     set_phase(&state, newer.clone());
     job.run();
     assert_eq!(state.android_run.phase(), newer);
+}
+
+#[test]
+fn every_unfinished_task_is_retired_exactly_once_when_a_run_is_cut_short() {
+    let _serial = serial();
+    // A user stop with one task running and one never started.
+    let (state, _dir) = state();
+    let events = Arc::new(Recorded::default());
+    running(&state, 3, None, &events);
+    apply_task_event(&state, 3, "Tasker.Task.Starting", r#"{"task_id":11}"#);
+    assert_eq!(stop_if_busy(&state, A), Some(Ok(())));
+    wait_for_idle(&state);
+    assert_eq!(stop_if_busy(&state, A), None);
+    assert_eq!(apply_task_event(&state, 3, "Tasker.Task.Failed", r#"{"task_id":11}"#).0, Applied::Ignored);
+    assert_eq!(events.kinds(), ["retire 11 started=true", "retire 12 started=false", "task-stopped"]);
+
+    // An internal post_stop after the first task finished: only the second is retired.
+    let (state, _dir) = self::state();
+    let events = Arc::new(Recorded::default());
+    running(&state, 4, None, &events);
+    apply_task_event(&state, 4, "Tasker.Task.Succeeded", r#"{"task_id":11}"#);
+    let (_, job) = apply_task_event(&state, 4, "Tasker.Task.Succeeded", r#"{"task_id":0,"entry":"MaaTaskerPostStop"}"#);
+    job.unwrap().run();
+    assert_eq!(events.kinds(), ["retire 12 started=false", "tasks-completed"]);
+
+    // A run whose tasks all end through their callbacks retires nothing extra.
+    let (state, _dir) = self::state();
+    let events = Arc::new(Recorded::default());
+    running(&state, 5, None, &events);
+    apply_task_event(&state, 5, "Tasker.Task.Succeeded", r#"{"task_id":11}"#);
+    let (_, job) = apply_task_event(&state, 5, "Tasker.Task.Failed", r#"{"task_id":12}"#);
+    job.unwrap().run();
+    assert_eq!(events.kinds(), ["tasks-completed"]);
+}
+
+#[test]
+fn the_tasker_is_stopped_only_after_the_stop_request_and_a_reserved_touch_finishing() {
+    let _serial = serial();
+    let dir = temp_dir();
+    let lock_dir: Result<PathBuf, String> = Ok(dir.clone());
+    let marker = dir.join("touch.json");
+    let request = dir.join("stop.request");
+    std::fs::write(&marker, "{}").unwrap();  // the agent has a touch reserved when the stop comes
+    let order = Arc::new(Mutex::new(Vec::<&str>::new()));
+    let agent = {
+        let (order, marker, request) = (Arc::clone(&order), marker.clone(), request.clone());
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !request.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            order.lock().unwrap().push("request seen");
+            std::thread::sleep(Duration::from_millis(100));
+            order.lock().unwrap().push("touch released");
+            std::fs::remove_file(&marker).unwrap();
+        })
+    };
+    let posted = Arc::clone(&order);
+    assert!(stop_after_handshake(&lock_dir, timing(), move || posted.lock().unwrap().push("post_stop")));
+    agent.join().unwrap();
+    assert_eq!(order.lock().unwrap().as_slice(), ["request seen", "touch released", "post_stop"]);
+    assert!(request.exists(), "the request stays for the agent until the next start removes it");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().filter(|e| {
+        e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".tmp")
+    }).count(), 0);
+
+    // A reservation that outlives the bound: the tasker is still stopped, and the caller is told.
+    std::fs::write(&marker, "{}").unwrap();
+    let started = Instant::now();
+    let stopped = Arc::new(Mutex::new(false));
+    let flag = Arc::clone(&stopped);
+    assert!(!stop_after_handshake(&lock_dir, timing(), move || *flag.lock().unwrap() = true));
+    assert!(*stopped.lock().unwrap());
+    assert!(started.elapsed() >= timing().touch_wait);
+    // No data directory: no handshake possible, the tasker is still stopped.
+    let stopped = Arc::new(Mutex::new(false));
+    let flag = Arc::clone(&stopped);
+    assert!(!stop_after_handshake(&Err("no data dir".into()), timing(), move || *flag.lock().unwrap() = true));
+    assert!(*stopped.lock().unwrap());
+}
+
+#[test]
+fn a_start_removes_a_stale_stop_request_before_any_agent_exists() {
+    let _serial = serial();
+    let (state, dir) = state();
+    std::fs::write(dir.join("stop.request"), "{}").unwrap();
+    // Refused claims leave it alone (another run may still be stopping).
+    set_phase(&state, Phase::Finishing { token: 1, instance_id: A.into(), released: false });
+    assert!(claim(&state, A).is_err());
+    assert!(dir.join("stop.request").exists());
+    set_phase(&state, Phase::Idle);
+    let holder = hold_lock(&dir);
+    assert_eq!(claim(&state, A).err().as_deref(), Some(OWNER_LOCK_BUSY));
+    assert!(dir.join("stop.request").exists());
+    drop(holder);
+    let claimed = claim(&state, A).unwrap();
+    assert!(!dir.join("stop.request").exists());
+    drop(claimed);
+}
+
+#[test]
+fn the_slot_is_claimed_only_for_a_connected_adb_instance() {
+    let _serial = serial();
+    let (state, _dir) = state();
+    for id in [W, M, "missing"] {
+        assert!(claim(&state, id).is_err(), "{}", id);
+        assert_eq!(state.android_run.phase(), Phase::Idle);
+    }
+    state.instances.lock().unwrap().get_mut(A).unwrap().controller_stopped = true;
+    assert_eq!(claim(&state, A).err().as_deref(), Some(NOT_CONNECTED));
+    state.instances.lock().unwrap().get_mut(A).unwrap().controller_stopped = false;
+    drop(claim(&state, A).unwrap());
+    // The production check also needs a connected native controller handle (none in unit tests).
+    assert_eq!(instance_is_connected_adb(&state, A).err().as_deref(), Some(NOT_CONNECTED));
+    assert_eq!(instance_is_connected_adb(&state, M).err().as_deref(), Some(NOT_CONNECTED));
 }
 
 // ----------------------------------------------------------------------------

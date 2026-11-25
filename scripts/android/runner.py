@@ -30,6 +30,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -204,6 +205,7 @@ def run(args) -> int:
     adb_alive(args.adb, args.serial)
     record["marker_recovery"] = check_unconfirmed(data_root, args.clear_unconfirmed,
                                                   lambda: device_reading(args.adb, args.serial), args.serial)
+    clear_stop_request(data_root)
     Tasker.set_log_dir(str(log_dir))
     agent_binary = ROOT / ".venv" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / \
         "site-packages" / "MaaAgentBinary"
@@ -242,12 +244,12 @@ def run(args) -> int:
         record["nodes"] = [getattr(node, "name", None) for node in (getattr(detail, "nodes", None) or [])][-10:]
     except KeyboardInterrupt:
         record["status"] = "interrupted"
-        record["stop_requested"] = stop_tasker(tasker)
+        record["stop_requested"] = stop_tasker(tasker, data_root, record)
         raise RunnerError("运行被中断（Ctrl-C）；已请求停止任务。") from None
     except RunnerError as error:
         record["status"] = "error"
         record["error"] = str(error)
-        record["stop_requested"] = stop_tasker(tasker)
+        record["stop_requested"] = stop_tasker(tasker, data_root, record)
         raise
     finally:
         # Once the agent exists, a Ctrl-C during cleanup is deferred until the child is reaped and the run record is
@@ -393,10 +395,69 @@ def log_recovery(data_root: Path, fingerprint: str, since, device, how: str) -> 
         return False
 
 
-def stop_tasker(tasker) -> bool:
-    """Ask a running task to stop and wait a bounded time; False when there was nothing to stop or it overran."""
+STOP_TOUCH_WAIT = 5.0
+STOP_TOUCH_POLL = 0.05
+
+
+def input_dir(data_root: Path) -> Path:
+    return data_root / "config" / "android-input"
+
+
+def clear_stop_request(data_root: Path) -> None:
+    """Before the agent is spawned: remove a stop request a stopped run left (config/android-input/stop.request), under
+    the agent's owner lock so no agent of this data root is running meanwhile. The lock file is never removed."""
+    request = input_dir(data_root) / "stop.request"
+    if not request.exists():
+        return
+    sys.path.insert(0, str(ROOT / "agent"))
+    from host import UnsupportedInput, take_owner_lock
+    try:
+        handle = take_owner_lock(input_dir(data_root) / "owner.lock")
+    except UnsupportedInput as error:
+        raise RunnerError(f"清除上一次的停止请求之前没能拿到 owner.lock：{error}") from None
+    try:
+        request.unlink(missing_ok=True)
+    except OSError as error:
+        raise RunnerError(f"无法清除上一次的停止请求 {request}：{error}") from None
+    finally:
+        handle.close()
+
+
+def request_stop(data_root: Path, seconds: float | None = None, poll: float | None = None) -> str:
+    """The stop handshake with the agent (DeviceInputState.stop_requested): write stop.request atomically, then wait
+    (bounded) until touch.json is gone, so a touch already reserved finishes before the tasker is stopped and no
+    new one is sent. Returns "clear", "still reserved" (the marker outlived the wait: the touch may be unconfirmed,
+    and the agent's own marker handling keeps input stopped) or "request not written: ..."."""
+    directory = input_dir(data_root)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        staging = directory / f"stop.request.{os.getpid()}.tmp"
+        staging.write_text(json.dumps({"pid": os.getpid(), "time": dt.datetime.now().astimezone().isoformat(),
+                                       "nonce": os.urandom(8).hex()}), encoding="utf-8")
+        os.replace(staging, directory / "stop.request")
+    except OSError as error:
+        return f"request not written: {error}"
+    marker = directory / "touch.json"
+    deadline = time.monotonic() + (STOP_TOUCH_WAIT if seconds is None else seconds)
+    while marker.exists():
+        if time.monotonic() >= deadline:
+            return "still reserved"
+        time.sleep(STOP_TOUCH_POLL if poll is None else poll)
+    return "clear"
+
+
+def stop_tasker(tasker, data_root: Path | None = None, record: dict | None = None) -> bool:
+    """Ask a running task to stop and wait a bounded time; False when there was nothing to stop or it overran. With
+    a data root, the stop handshake (request_stop) comes first and its result goes to record["touch_at_stop"]."""
     if tasker is None:
         return False
+    if data_root is not None:
+        touch = request_stop(data_root)
+        if record is not None:
+            record["touch_at_stop"] = touch
+        if touch != "clear":
+            print(f"停止时触摸标记的状态：{touch}（可能留下没有确认的触摸；agent 自己的标记处理会继续停止输入）",
+                  file=sys.stderr)
     try:
         within(20, "停止任务", lambda: tasker.post_stop().wait())
         return True

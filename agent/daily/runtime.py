@@ -559,6 +559,10 @@ class Runtime:
                     raise ForegroundChanged("依据的截图已经过时（之后焦点变过），已取消本次输入，等待重新核对")
                 if self._stopped_now():  # Stop may have been pressed during the focus query
                     return False
+                # A stopper's request, checked with this touch reserved (see DeviceInputState.stop_requested): the
+                # framework's stop could otherwise cut into the gesture and leave its contact held.
+                if state.stop_requested():
+                    return False
                 sent = True
                 try:
                     with measure("input.action"):

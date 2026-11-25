@@ -13,6 +13,17 @@ const STOP_POLL_INTERVAL_MS = 100;
 
 const stopPromises = new Map<string, Promise<boolean>>();
 
+/**
+ * How many stops were requested per instance. An Android start compares it before submitting and after the backend
+ * answered: a Stop pressed while the start was still being prepared then wins over that start (the backend's run
+ * slot only exists once the start request arrives). Win32 and native Mac starts do not read it.
+ */
+const stopGenerations = new Map<string, number>();
+
+export function stopGeneration(instanceId: string): number {
+  return stopGenerations.get(instanceId) ?? 0;
+}
+
 async function waitForTaskStop(instanceId: string) {
   const start = Date.now();
   let lastPost = start;
@@ -47,6 +58,7 @@ function cleanupTaskState(instanceId: string) {
 }
 
 export async function stopInstanceTasks(instanceId: string): Promise<boolean> {
+  stopGenerations.set(instanceId, stopGeneration(instanceId) + 1);
   const existing = stopPromises.get(instanceId);
   if (existing) {
     return existing;

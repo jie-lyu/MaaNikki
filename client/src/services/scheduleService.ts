@@ -1,5 +1,10 @@
 import { useAppStore } from '@/stores/appStore';
-import { macTaskTiersPending, waitForMacTaskTiers } from '@/services/macTaskTiersService';
+import {
+  androidTaskTiersPendingFor,
+  macTaskTiersPending,
+  waitForAndroidTaskTiers,
+  waitForMacTaskTiers,
+} from '@/services/macTaskTiersService';
 import { loggers } from '@/utils';
 import type { Instance } from '@/types/interface';
 
@@ -239,6 +244,16 @@ class ScheduleService {
             triggeredSlots.add(slotKey);
             slotsModified = true;
             break;
+          }
+
+          // 安卓模拟器（只在 macOS 上）：只有轮到的这个实例选的是 Adb 控制器、安卓任务清单还没读到时才等它；
+          // 其他实例从不看安卓清单。等待之后服务已停止：已记下的时间槽照常保存，这个实例的时间槽不记。
+          if (androidTaskTiersPendingFor(freshInst.id)) {
+            await waitForAndroidTaskTiers();
+            if (!this.intervalId || !this.triggerFn) {
+              if (slotsModified) this.setTriggeredSlots(triggeredSlots);
+              return;
+            }
           }
 
           log.info(

@@ -144,6 +144,28 @@ class DeviceInputState:
         directory = self.directory()
         return None if directory is None else directory / "touch.json"
 
+    def stop_request(self):
+        """config/android-input/stop.request: written by whoever stops a run (the client's Android finishing, the
+        headless runner) before it waits for touch.json to go and then stops the tasker. Whoever starts a run
+        removes a stale one before it spawns the agent."""
+        directory = self.directory()
+        return None if directory is None else directory / "stop.request"
+
+    def stop_requested(self) -> bool:
+        """True when a stop was requested, or when that cannot be checked (nothing is sent then). Checked after the
+        touch is reserved: a stopper that wrote the request before the reservation is seen here, and one that wrote
+        it after finds touch.json and waits for this touch to finish before it stops the tasker."""
+        path = self.stop_request()
+        if path is None:
+            return True
+        try:
+            os.stat(path)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        return True
+
     def claim(self):
         """Make this process the only one using Android input on this host; raises UnsupportedInput otherwise."""
         with self.lock:

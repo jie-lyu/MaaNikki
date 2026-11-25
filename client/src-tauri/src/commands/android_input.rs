@@ -107,6 +107,41 @@ pub fn owner_lock_free(dir: &Path) -> Result<bool, String> {
     }
 }
 
+/// 停止的握手（与 agent 的 DeviceInputState.stop_requested、scripts/android/runner.py 的 request_stop 相同）：停止的
+/// 一方先原子地写下 `stop.request`，再等 `touch.json` 消失（已经预留的那次触摸做完），然后才让 Tasker 停下。agent 在
+/// 预留触摸之后、发送之前看到这个请求就不发送。开始的一方在启动 agent 之前删掉留下的请求。
+#[cfg(target_os = "macos")]
+pub fn write_stop_request(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("无法创建 {}：{}", dir.display(), e))?;
+    let staging = dir.join(format!("stop.request.{}.tmp", std::process::id()));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let payload = format!("{{\"pid\":{},\"time_ns\":{}}}", std::process::id(), nanos);
+    std::fs::write(&staging, payload).map_err(|e| format!("无法写入停止请求：{}", e))?;
+    std::fs::rename(&staging, dir.join("stop.request")).map_err(|e| {
+        let _ = std::fs::remove_file(&staging);
+        format!("无法写入停止请求：{}", e)
+    })
+}
+
+/// 删掉上一轮留下的停止请求（调用方保证此刻没有 agent 在运行）。
+#[cfg(target_os = "macos")]
+pub fn clear_stop_request(dir: &Path) -> Result<(), String> {
+    match std::fs::remove_file(dir.join("stop.request")) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("无法清除上一轮的停止请求：{}", e)),
+    }
+}
+
+/// 有没有已经预留、还没确认的触摸（`touch.json`）。读不出时当作有。
+#[cfg(target_os = "macos")]
+pub fn touch_reserved(dir: &Path) -> bool {
+    !matches!(std::fs::symlink_metadata(dir.join("touch.json")), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
 /// 启动时调用并记录结果。
 pub fn clear_at_startup(data_dir: &Path) {
     match clear_touch_marker(data_dir) {

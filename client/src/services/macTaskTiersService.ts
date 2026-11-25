@@ -61,30 +61,29 @@ export function instanceControllerType(state: TierState, instanceId: string): st
   return state.projectInterface?.controller.find((c) => c.name === controllerName)?.type;
 }
 
-/** Some instance has an Adb controller selected on a macOS backend, so its runs need the Android tiers. */
-function androidTiersNeeded(state: TierState): boolean {
-  return state.instances.some((inst) => usesAndroidTiers(state.backendOS, instanceControllerType(state, inst.id)));
-}
-
-/**
- * True only on a macOS backend whose Mac task tiers have not arrived yet, or whose Android tiers have not
- * arrived while an instance has an Adb controller selected. Without an Adb instance this is the Mac check
- * alone, as before; off macOS it is always false.
- */
+/** True only on a macOS backend whose task tiers have not arrived yet. */
 export function macTaskTiersPending(): boolean {
   const state = useAppStore.getState();
-  if (state.backendOS !== 'macos') return false;
-  return state.macTaskTiers === null || (state.androidTaskTiers === null && androidTiersNeeded(state));
+  return state.backendOS === 'macos' && state.macTaskTiers === null;
+}
+
+/** macTaskTiersSettled over the app store: what the scheduler waits on before deciding a slot. */
+export function waitForMacTaskTiers(timeoutMs = 30000): Promise<void> {
+  return macTaskTiersSettled(useAppStore.getState, useAppStore.subscribe, timeoutMs);
 }
 
 /**
- * What the scheduler waits on before deciding a slot: macTaskTiersSettled over the app store, and, while an
- * instance has an Adb controller selected on macOS, the Android tiers too (both are read in parallel at
- * startup, so this adds at most the difference between the two reads; the same timeout applies).
+ * True when this instance's selected controller is Adb on a macOS backend and the Android tiers have not arrived
+ * yet. The controller type is looked at first: for any other instance the Android tiers are never read, so native
+ * Mac (and Windows) scheduling is exactly the Mac-only check above.
  */
-export function waitForMacTaskTiers(timeoutMs = 30000): Promise<void> {
-  if (!androidTiersNeeded(useAppStore.getState())) {
-    return macTaskTiersSettled(useAppStore.getState, useAppStore.subscribe, timeoutMs);
-  }
-  return whenSettled(() => !macTaskTiersPending(), useAppStore.subscribe, timeoutMs);
+export function androidTaskTiersPendingFor(instanceId: string): boolean {
+  const state = useAppStore.getState();
+  if (!usesAndroidTiers(state.backendOS, instanceControllerType(state, instanceId))) return false;
+  return state.androidTaskTiers === null;
+}
+
+/** What the scheduler waits on before starting a due Adb instance: the Android tiers settled, or the timeout. */
+export function waitForAndroidTaskTiers(timeoutMs = 30000): Promise<void> {
+  return whenSettled(() => useAppStore.getState().androidTaskTiers !== null, useAppStore.subscribe, timeoutMs);
 }

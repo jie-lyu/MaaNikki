@@ -140,6 +140,9 @@ function loadScheduler({ pending }) {
     '@/services/macTaskTiersService': {
       macTaskTiersPending: () => tiers.pending,
       waitForMacTaskTiers: () => new Promise((done) => { tiers.release = () => { tiers.pending = false; done(); }; }),
+      // A native Mac instance: the per-instance Android check says no, and the Android wait is never reached.
+      androidTaskTiersPendingFor: () => false,
+      waitForAndroidTaskTiers: () => { throw new Error('a native Mac slot waited for the Android tiers'); },
     },
     '@/utils': { loggers: { task: { info() {}, warn() {}, error() {} } } },
   };

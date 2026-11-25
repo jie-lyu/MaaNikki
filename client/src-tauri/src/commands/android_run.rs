@@ -105,6 +105,9 @@ impl Phase {
 /// 收尾时的期限（测试里缩短）。
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Timing {
+    /// 停止的握手里等已经预留的触摸做完（`touch.json` 消失）的期限和间隔。
+    pub touch_wait: Duration,
+    pub touch_poll: Duration,
     pub tasker_stop: Duration,
     pub child_exit: Duration,
     pub lock_wait: Duration,
@@ -114,6 +117,8 @@ pub(crate) struct Timing {
 impl Default for Timing {
     fn default() -> Self {
         Timing {
+            touch_wait: Duration::from_secs(5),
+            touch_poll: Duration::from_millis(50),
             tasker_stop: Duration::from_secs(10),
             child_exit: Duration::from_secs(5),
             lock_wait: Duration::from_secs(10),
@@ -126,6 +131,9 @@ impl Default for Timing {
 pub(crate) trait RunEvents: Send + Sync {
     fn state_changed(&self, instance_id: &str, kind: &str);
     fn message(&self, instance_id: &str, line: &str);
+    /// 一个提交了、但这一轮结束时还没有结束回调的任务：从任务统计里注销（开始过的记一次失败的运行，没开始的
+    /// 直接丢掉）。每个任务至多一次（结束之后迟到的回调一律忽略）。遥测按整轮结束（on_run_cancelled/finished）。
+    fn retire(&self, instance_id: &str, task_id: i64, started: bool);
 }
 
 struct AppEvents(tauri::AppHandle);
@@ -137,6 +145,13 @@ impl RunEvents for AppEvents {
     fn message(&self, instance_id: &str, line: &str) {
         super::maa_agent::emit_agent_output(&self.0, instance_id, "stderr", line);
     }
+    fn retire(&self, instance_id: &str, task_id: i64, started: bool) {
+        if started {
+            super::task_stats::on_task_finished(&self.0, instance_id, task_id, false);
+        } else {
+            super::task_stats::discard_posted_task(instance_id, task_id);
+        }
+    }
 }
 
 /// 这一轮自己的句柄。
@@ -147,22 +162,56 @@ pub(crate) struct RunHandles {
     pub events: Arc<dyn RunEvents>,
 }
 
+/// 运行中这一轮的任务：提交了哪些、哪些开始过、哪些有了结束回调（收尾时据此注销其余的任务统计）。
+#[derive(Default)]
+struct RunProgress {
+    posted: Vec<i64>,
+    started: HashSet<i64>,
+    finished: HashSet<i64>,
+}
+
+impl RunProgress {
+    /// 还没有结束回调的任务（任务 ID，是否开始过），按提交顺序；取出后清空，所以每个任务只注销一次。
+    fn take_unfinished(&mut self) -> Vec<(i64, bool)> {
+        let progress = std::mem::take(self);
+        progress
+            .posted
+            .into_iter()
+            .filter(|id| !progress.finished.contains(id))
+            .map(|id| (id, progress.started.contains(&id)))
+            .collect()
+    }
+}
+
 #[derive(Default)]
 struct SlotInner {
     phase: Phase,
     run: Option<RunHandles>,
+    progress: RunProgress,
     /// 每个实例正在进行的连接数（connect_controller_impl 的入口登记，返回时注销）。
     connecting: HashMap<String, usize>,
     next_token: u64,
 }
 
 /// 整个进程唯一的安卓运行槽（放在 `MaaState` 里）。
-#[derive(Default)]
 pub struct AndroidRunSlot {
     inner: Arc<Mutex<SlotInner>>,
     /// `owner.lock` 所在目录；None 时用数据目录下的 config/android-input（测试里指向临时目录）。
     lock_dir: Option<PathBuf>,
     timing: Timing,
+    /// 取得槽时对实例连接的检查（单元测试没有原生的控制器句柄，换成只看配置的检查）。
+    connection_check: fn(&MaaState, &str) -> Result<(), String>,
+}
+
+impl Default for AndroidRunSlot {
+    fn default() -> Self {
+        AndroidRunSlot {
+            inner: Arc::default(),
+            lock_dir: None,
+            timing: Timing::default(),
+            connection_check: instance_is_connected_adb,
+        }
+    }
 }
 
 fn lock(inner: &Mutex<SlotInner>) -> MutexGuard<'_, SlotInner> {
@@ -172,8 +221,12 @@ fn lock(inner: &Mutex<SlotInner>) -> MutexGuard<'_, SlotInner> {
 
 impl AndroidRunSlot {
     #[cfg(test)]
-    pub(crate) fn for_tests(lock_dir: PathBuf, timing: Timing) -> Self {
-        AndroidRunSlot { inner: Arc::default(), lock_dir: Some(lock_dir), timing }
+    pub(crate) fn for_tests(
+        lock_dir: PathBuf,
+        timing: Timing,
+        connection_check: fn(&MaaState, &str) -> Result<(), String>,
+    ) -> Self {
+        AndroidRunSlot { inner: Arc::default(), lock_dir: Some(lock_dir), timing, connection_check }
     }
 
     fn lock_dir(&self) -> Result<PathBuf, String> {
@@ -225,13 +278,10 @@ pub fn refuse_while_busy(state: &MaaState, instance_id: &str, op: Op) -> Result<
 }
 
 /// 直接点击：安卓运行期间拒绝，而且 Adb 实例一律拒绝（直接点击绕过了 agent 核对画面和记录的触摸路径）。
-pub fn refuse_click(state: &MaaState, instance_id: &str) -> Result<(), String> {
-    refuse_while_busy(state, instance_id, Op::Click)?;
-    let instances = state.instances.lock().map_err(|e| e.to_string())?;
-    if matches!(
-        instances.get(instance_id).and_then(|inst| inst.controller_config.as_ref()),
-        Some(ControllerConfig::Adb { .. })
-    ) {
+/// 直接点击发往 Adb 控制器时拒绝。post_click_impl 在选出要发送的控制器的同一把实例锁里调用，所以检查和发送之间
+/// 连接不会换成 Adb（配置和句柄在同一把锁里一起发布）。
+pub fn refuse_click_on(instance: &InstanceRuntime) -> Result<(), String> {
+    if matches!(instance.controller_config, Some(ControllerConfig::Adb { .. })) {
         return Err(DIRECT_CLICK_REFUSED.to_string());
     }
     Ok(())
@@ -363,18 +413,24 @@ pub async fn start(
     controller_info: Option<ControllerInfo>,
     refusals: Vec<Option<String>>,
 ) -> Result<Vec<i64>, String> {
-    let state = Arc::clone(maa_state);
     let app_for_output = app.clone();
     let id_for_output = instance_id.clone();
-    let result = tauri::async_runtime::spawn(async move {
-        start_owned(
-            app, state, instance_id, tasks, agent_configs, cwd, tcp_compat_mode, pi_envs, reset_state,
-            controller_info, refusals,
-        )
+    // 槽在任何等待或派生任务之前同步取得：从这一刻起，对这个实例的停止都会落到这一轮（取消它），不会走共用的
+    // 停止路径而被这次开始错过。
+    let claimed = batch_refusal(&tasks, agent_configs.as_deref(), reset_state)
+        .map(str::to_string)
+        .or_else(|| refusals.iter().all(Option::is_some).then(|| refusals.iter().flatten().next().cloned().unwrap_or_default()))
+        .map_or_else(|| claim(maa_state, &instance_id), Err);
+    let result = match claimed {
+        Err(reason) => Err(reason),
+        Ok(claim) => tauri::async_runtime::spawn(async move {
+            start_owned(app, claim, tasks, agent_configs, cwd, tcp_compat_mode, pi_envs, controller_info, refusals)
+                .await
+        })
         .await
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+        .and_then(|result| result),
+    };
     if let Err(reason) = &result {
         if reason != CANCELLED {
             super::maa_agent::emit_agent_output(&app_for_output, &id_for_output, "stderr", reason);
@@ -410,23 +466,17 @@ pub(crate) fn batch_refusal(
 #[allow(clippy::too_many_arguments)]
 async fn start_owned(
     app: tauri::AppHandle,
-    state: Arc<MaaState>,
-    instance_id: String,
+    claim: StartClaim,
     tasks: Vec<TaskConfig>,
     agent_configs: Option<Vec<AgentConfig>>,
     cwd: String,
     tcp_compat_mode: bool,
     pi_envs: Option<HashMap<String, String>>,
-    reset_state: bool,
     controller_info: Option<ControllerInfo>,
     refusals: Vec<Option<String>>,
 ) -> Result<Vec<i64>, String> {
-    if let Some(reason) = batch_refusal(&tasks, agent_configs.as_deref(), reset_state) {
-        return Err(reason.to_string());
-    }
-    if refusals.iter().all(Option::is_some) {
-        return Err(refusals.into_iter().flatten().next().unwrap_or_default());
-    }
+    let state = Arc::clone(&claim.state);
+    let instance_id = claim.instance_id.clone();
     let agent = agent_configs.and_then(|configs| configs.into_iter().next()).ok_or(ONE_AGENT_ONLY)?;
     // 交给 agent 的运行计划只列出会执行的任务（与共用流程相同）。
     let mut pi_envs = pi_envs.unwrap_or_default();
@@ -442,7 +492,6 @@ async fn start_owned(
         }
     }
 
-    let claim = claim(&state, &instance_id)?;
     let token = claim.token;
     info!("[android_run] start on {} (token {})", instance_id, token);
 
@@ -568,6 +617,11 @@ fn post_tasks(
         }
         // 安卓上不应用任务选项（风险 16）：提交的覆盖一律是 "{}"。
         match tasker.post_task(&task.entry, super::utils::ANDROID_PIPELINE_OVERRIDE) {
+            // An invalid id (0: the framework refused the post, e.g. the emulator went away) counts as not posted.
+            Ok(job) if job.id <= 0 => {
+                warn!("[android_run] posting {} returned the invalid task id {}", task.entry, job.id);
+                run_state.statuses.insert(selected_id, "failed".to_string());
+            }
             Ok(job) => {
                 info!("[android_run] posted {} as task {}", task.entry, job.id);
                 ids.push(job.id);
@@ -600,7 +654,9 @@ fn post_tasks(
     ids
 }
 
-/// 取得槽：只有在空闲、这个实例没有进行中的连接、而且 `owner.lock` 此刻能拿到（拿到后立即放开）时。
+/// 取得槽：只有在空闲、这个实例没有进行中的连接、它当前的控制器是已连接的 Adb、而且 `owner.lock` 此刻能拿到
+/// （拿到后立即放开）时。取得之后删掉上一轮留下的停止请求（此刻没有这个数据目录的 agent 在运行：槽空闲、锁空着）。
+/// 同步执行，开始的路径在任何等待之前调用它。
 fn claim(state: &Arc<MaaState>, instance_id: &str) -> Result<StartClaim, String> {
     let slot = &state.android_run;
     let mut inner = lock(&slot.inner);
@@ -614,16 +670,30 @@ fn claim(state: &Arc<MaaState>, instance_id: &str) -> Result<StartClaim, String>
     if inner.connecting.get(instance_id).is_some_and(|count| *count > 0) {
         return Err(STILL_CONNECTING.to_string());
     }
+    // 槽锁 → 实例锁：连接在发布控制器之前一直登记着（见 enter_connect），所以这里看到的就是这一轮要用的连接。
+    (slot.connection_check)(state, instance_id)?;
     let dir = slot.lock_dir()?;
     match super::android_input::owner_lock_free(&dir) {
         Ok(true) => {}
         Ok(false) => return Err(OWNER_LOCK_BUSY.to_string()),
         Err(e) => return Err(format!("无法检查安卓模拟器的输入锁：{}", e)),
     }
+    super::android_input::clear_stop_request(&dir)?;
     inner.next_token += 1;
     let token = inner.next_token;
     inner.phase = Phase::Starting { token, instance_id: instance_id.to_string(), cancelled: false };
     Ok(StartClaim { state: Arc::clone(state), instance_id: instance_id.to_string(), token })
+}
+
+/// 实例当前的控制器是已连接、没有因停止而待重连的 Adb 控制器（配置和句柄在同一把锁里一起发布）。
+pub(crate) fn instance_is_connected_adb(state: &MaaState, instance_id: &str) -> Result<(), String> {
+    let instances = state.instances.lock().map_err(|e| e.to_string())?;
+    let instance = instances.get(instance_id).ok_or("Instance not found")?;
+    let adb = matches!(instance.controller_config, Some(ControllerConfig::Adb { .. }));
+    if !adb || instance.controller_stopped || !instance.controller.as_ref().is_some_and(|c| c.connected()) {
+        return Err(NOT_CONNECTED.to_string());
+    }
+    Ok(())
 }
 
 /// 一次开始取得的槽。丢弃时，如果槽仍是这次的「启动中」（开始在启动 agent 之前就失败或被取消，没有要收尾的
@@ -666,6 +736,7 @@ impl StartClaim {
             Ok(ids) if !ids.is_empty() => {
                 inner.phase = Phase::Running { token: self.token, instance_id: self.instance_id.clone() };
                 inner.run = Some(handles);
+                inner.progress = RunProgress { posted: ids.clone(), ..RunProgress::default() };
                 (Ok(ids), None)
             }
             Ok(ids) => (Ok(ids), Some(self.finish_with(&mut inner, handles, "tasks-completed"))),
@@ -687,6 +758,7 @@ impl StartClaim {
             instance_id: self.instance_id.clone(),
             handles,
             kind,
+            unfinished: Vec::new(),  // nothing was posted
         }
     }
 }
@@ -805,8 +877,10 @@ pub(crate) fn apply_task_event(
         if let Some(selected_id) = run_state.mappings.get(&task_id).cloned() {
             run_state.statuses.insert(selected_id, "running".to_string());
         }
+        inner.progress.started.insert(task_id);
         return (Applied::Started(task_id), None);
     }
+    inner.progress.finished.insert(task_id);
     if let Some(selected_id) = run_state.mappings.get(&task_id).cloned() {
         let status = if is_succeeded { "succeeded" } else { "failed" };
         run_state.statuses.insert(selected_id, status.to_string());
@@ -863,7 +937,48 @@ fn begin_finishing(slot: &AndroidRunSlot, inner: &mut SlotInner, token: u64, kin
         instance_id,
         handles,
         kind,
+        unfinished: inner.progress.take_unfinished(),
     }
+}
+
+pub const TOUCH_UNCONFIRMED_AT_STOP: &str =
+    "停止时 agent 还有一次触摸没有确认完成（等了 5 秒），这次停止可能留下按住的触点；agent 会保持停止输入，请检查模拟器。";
+
+/// 停止的握手（android_input::write_stop_request）：先写下停止请求，再等已经预留的触摸做完（`touch.json` 消失，
+/// 有期限），然后才 `post_stop`。框架的停止会把一次正在进行的点击切成「先抬起、后按下」，留下按住的触点；
+/// agent 在预留之后看到请求就不再发送，所以握手之后不会再有新的触摸。返回 false：期限到了标记还在（可能没有
+/// 确认），照样停止，由 agent 自己的标记处理保持停止输入。
+fn stop_after_handshake(
+    lock_dir: &Result<PathBuf, String>,
+    timing: Timing,
+    post_stop: impl FnOnce(),
+) -> bool {
+    let clear = match lock_dir {
+        Ok(dir) => match super::android_input::write_stop_request(dir) {
+            Ok(()) => {
+                let deadline = Instant::now() + timing.touch_wait;
+                loop {
+                    if !super::android_input::touch_reserved(dir) {
+                        break true;
+                    }
+                    if Instant::now() >= deadline {
+                        break false;
+                    }
+                    std::thread::sleep(timing.touch_poll);
+                }
+            }
+            Err(e) => {
+                warn!("[android_run] {}", e);
+                false
+            }
+        },
+        Err(e) => {
+            warn!("[android_run] cannot request the agent to stop: {}", e);
+            false
+        }
+    };
+    post_stop();
+    clear
 }
 
 struct NoEvents;
@@ -871,6 +986,7 @@ struct NoEvents;
 impl RunEvents for NoEvents {
     fn state_changed(&self, _: &str, _: &str) {}
     fn message(&self, _: &str, _: &str) {}
+    fn retire(&self, _: &str, _: i64, _: bool) {}
 }
 
 /// 一轮的收尾：停下 Tasker（有期限）、断开 agent、等子进程退出（超时强杀）、等 `owner.lock` 能拿到（有期限），
@@ -883,6 +999,8 @@ pub(crate) struct FinishJob {
     instance_id: String,
     handles: RunHandles,
     kind: &'static str,
+    /// 提交了但还没有结束回调的任务（任务 ID，是否开始过），收尾时从任务统计里注销。
+    unfinished: Vec<(i64, bool)>,
 }
 
 impl FinishJob {
@@ -894,11 +1012,20 @@ impl FinishJob {
     }
 
     pub(crate) fn run(self) {
-        let FinishJob { slot, lock_dir, timing, token, instance_id, handles, kind } = self;
+        let FinishJob { slot, lock_dir, timing, token, instance_id, handles, kind, unfinished } = self;
         let RunHandles { tasker, client, child, events } = handles;
+        for (task_id, started) in unfinished {
+            events.retire(&instance_id, task_id, started);
+        }
         if let Some(tasker) = &tasker {
             if tasker.running() {
-                let _ = tasker.post_stop();
+                let clear = stop_after_handshake(&lock_dir, timing, || {
+                    let _ = tasker.post_stop();
+                });
+                if !clear {
+                    warn!("[android_run] run {}: a touch was still reserved when the tasker was stopped", token);
+                    events.message(&instance_id, TOUCH_UNCONFIRMED_AT_STOP);
+                }
                 let deadline = Instant::now() + timing.tasker_stop;
                 while tasker.running() && Instant::now() < deadline {
                     std::thread::sleep(timing.poll);

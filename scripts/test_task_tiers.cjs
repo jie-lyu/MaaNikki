@@ -171,37 +171,115 @@ test('the Android loader reads its own command and route and words its errors fo
   assert.deepEqual(macOnly.calls, ['get_macos_task_tiers']);
 });
 
-test('the scheduler waits for the Android tiers only on macOS with an Adb instance', async () => {
+/** A store whose Android tiers record every read: the native Mac paths must never read them. */
+function watchAndroidReads(store) {
+  const reads = [];
+  let value = store.androidTaskTiers;
+  delete store.androidTaskTiers;
+  Object.defineProperty(store, 'androidTaskTiers', {
+    get() { reads.push(new Error().stack); return value; },
+    set(next) { value = next; },
+    enumerable: true,
+  });
+  return reads;
+}
+
+test('native Mac scheduling waits for the Mac tiers alone and never reads the Android tiers', async () => {
   const instance = (id, controllerName) => ({ id, name: id, controllerName });
-  // Off macOS: never pending, whatever is selected.
-  for (const os of ['windows', 'linux', '']) {
-    const { service } = loadService({ state: { backendOS: os, instances: [instance('A', 'nikki_android')] } });
+  for (const androidTaskTiers of [null, { ...androidTiers, error: 'broken' }]) {  // pending or failed
+    const { service, store, notify } = loadService({
+      state: { androidTaskTiers, instances: [instance('M', 'mac'), instance('A', 'nikki_android')] },
+    });
+    const reads = watchAndroidReads(store);
+    assert.equal(service.macTaskTiersPending(), true);  // exactly the Mac check, an Adb instance present or not
+    const waiting = service.waitForMacTaskTiers(10000);
+    store.macTaskTiers = macTiers;
+    notify();
+    await waiting;
     assert.equal(service.macTaskTiersPending(), false);
+    assert.equal(service.androidTaskTiersPendingFor('M'), false);
+    assert.equal(reads.length, 0, 'a native Mac path read the Android tiers');
   }
-  // macOS without an Adb instance: the Mac check alone, as before.
-  const macOnly = loadService({ state: { instances: [instance('M', 'mac')] } });
-  assert.equal(macOnly.service.macTaskTiersPending(), true);
-  macOnly.store.macTaskTiers = macTiers;
-  assert.equal(macOnly.service.macTaskTiersPending(), false);  // the Android tiers are not awaited
-  await macOnly.service.waitForMacTaskTiers(10000);
-  // macOS with an Adb instance: both.
-  const both = loadService({ state: { instances: [instance('M', 'mac'), instance('A', 'nikki_android')] } });
+  // Off macOS nothing is ever pending, and the Android tiers are not read either.
+  for (const os of ['windows', 'linux', '']) {
+    const { service, store } = loadService({ state: { backendOS: os, instances: [instance('A', 'nikki_android')] } });
+    const reads = watchAndroidReads(store);
+    assert.equal(service.macTaskTiersPending(), false);
+    assert.equal(service.androidTaskTiersPendingFor('A'), false);
+    assert.equal(reads.length, 0);
+  }
+});
+
+test('a due Adb instance on macOS waits for the Android tiers, chosen by its selected controller', async () => {
+  const instance = (id, controllerName) => ({ id, name: id, controllerName });
+  const { service, store, notify, listeners } = loadService({
+    state: { macTaskTiers: macTiers, instances: [instance('A', 'mac')], selectedController: { A: 'nikki_android' } },
+  });
+  assert.equal(service.instanceControllerType(store, 'A'), 'Adb');  // selectedController first, as in the store
+  assert.equal(service.androidTaskTiersPendingFor('A'), true);
   let done = false;
-  const waiting = both.service.waitForMacTaskTiers(10000).then(() => { done = true; });
-  both.store.macTaskTiers = macTiers;
-  both.notify();
+  const waiting = service.waitForAndroidTaskTiers(10000).then(() => { done = true; });
   await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(done, false);
-  assert.equal(both.service.macTaskTiersPending(), true);
-  both.store.androidTaskTiers = androidTiers;
-  both.notify();
+  store.androidTaskTiers = { ...androidTiers, error: 'unreadable' };  // a failed load settles it too
+  notify();
   await waiting;
-  assert.equal(both.listeners.size, 0);
-  assert.equal(both.service.macTaskTiersPending(), false);
-  // The selected controller (selectedController first) decides, as in the rest of the store.
-  const switched = loadService({ state: { macTaskTiers: macTiers, instances: [instance('A', 'mac')], selectedController: { A: 'nikki_android' } } });
-  assert.equal(switched.service.instanceControllerType(switched.store, 'A'), 'Adb');
-  assert.equal(switched.service.macTaskTiersPending(), true);
+  assert.equal(listeners.size, 0);
+  assert.equal(service.androidTaskTiersPendingFor('A'), false);
+});
+
+// The real ScheduleService over the real tiers service: one Mac and one Adb instance due in the same minute.
+function loadSchedulerWith(store, subscribe) {
+  const FIXED = new Date(2026, 10, 24, 21, 30, 10).getTime();
+  class FixedDate extends Date {
+    constructor(...args) { if (args.length) super(...args); else super(FIXED); }
+    static now() { return FIXED; }
+  }
+  const policy = { enabled: true, name: 'p', weekdays: [new Date(FIXED).getDay()], times: ['21:30'] };
+  for (const inst of store.instances) inst.schedulePolicies = [policy];
+  const useAppStore = { getState: () => store, subscribe };
+  const helpers = load('stores/helpers.ts', { '@/utils/optionHelpers': { findSwitchCase() {} } });
+  const tiersService = load('services/macTaskTiersService.ts', {
+    '@tauri-apps/api/core': { invoke() {} }, '@/utils/backendApi': { apiGet() {} }, '@/utils/paths': { isTauri: () => true },
+    '@/utils/logger': { loggers: { app: { warn() {} } } }, '@/stores/appStore': { useAppStore },
+    '@/stores/helpers': helpers, '@/utils/macTaskTiers': mac, '@/utils/taskTiers': tiers,
+  });
+  const storage = new Map();
+  const listeners = { addEventListener() {}, removeEventListener() {} };
+  const context = {
+    exports: {}, Date: FixedDate, setTimeout, clearTimeout, setInterval, clearInterval, JSON, console,
+    require: (id) => ({ '@/stores/appStore': { useAppStore }, '@/services/macTaskTiersService': tiersService,
+      '@/utils': { loggers: { task: { info() {}, warn() {}, error() {} } } } })[id],
+    localStorage: { getItem: (k) => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, String(v)) },
+    document: { ...listeners, visibilityState: 'visible' }, window: listeners,
+  };
+  vm.runInNewContext(ts.transpileModule(readFileSync(resolve(ROOT, 'client/src/services/scheduleService.ts'), 'utf8'), {
+    compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS },
+  }).outputText, context, { filename: 'scheduleService.ts' });
+  return context.exports.scheduleService;
+}
+
+test('the scheduler starts a due native Mac instance at once while an Adb instance waits for the Android tiers', async () => {
+  const subscribers = new Set();
+  const subscribe = (listener) => { subscribers.add(listener); return () => subscribers.delete(listener); };
+  const store = {
+    backendOS: 'macos', macTaskTiers: macTiers, androidTaskTiers: null, selectedController: {}, selectedResource: {},
+    projectInterface: { controller: [{ name: 'mac', type: 'MacOS' }, { name: 'nikki_android', type: 'Adb' }], resource: [] },
+    instances: [{ id: 'M', name: 'M', controllerName: 'mac', isRunning: false },
+                { id: 'A', name: 'A', controllerName: 'nikki_android', isRunning: false }],
+  };
+  const reads = watchAndroidReads(store);
+  const service = loadSchedulerWith(store, subscribe);
+  const started = [];
+  service.setTriggerCallback(async (inst) => { started.push([inst.id, reads.length]); return true; });
+  service.start();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(started, [['M', 0]]);  // the Mac slot ran before anything looked at the Android tiers
+  store.androidTaskTiers = androidTiers;
+  for (const listener of [...subscribers]) listener();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  service.stop();
+  assert.deepEqual(started.map(([id]) => id), ['M', 'A']);
 });
 
 test('a controller attach_resource_path loads after the resource paths; none adds nothing', () => {

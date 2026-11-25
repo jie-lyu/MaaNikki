@@ -125,7 +125,9 @@
     "TaskListTests.test_the_shipped_list_is_well_formed_and_holds_the_check_and_mailbox_on_trial",
     "UnreachableDeviceTests.test_an_unreachable_device_makes_earlier_frames_stale",
     "UnreachableDeviceTests.test_repeated_shell_failures_stop_with_adb_restart_advice",
-    "UnreachableDeviceTests.test_shell_reads_hold_the_device_input_lock"
+    "UnreachableDeviceTests.test_shell_reads_hold_the_device_input_lock",
+    "NoKeyboardOrMouseTests.test_a_stop_request_seen_with_the_touch_reserved_sends_nothing_and_frees_the_marker",
+    "NoKeyboardOrMouseTests.test_the_stop_request_lives_next_to_the_marker_and_unknown_means_requested"
    ],
    "known_failures": [],
    "skips": [
@@ -193,7 +195,9 @@
     "RunnerTests.test_the_agent_gets_the_controller_and_its_own_data_root",
     "RunnerTests.test_the_command_line",
     "RunnerTests.test_the_log_summary_quotes_the_method_lines",
-    "RunnerTests.test_the_overlay_masks_are_maatouch_and_raw_with_gzip"
+    "RunnerTests.test_the_overlay_masks_are_maatouch_and_raw_with_gzip",
+    "RunnerTests.test_the_stop_request_comes_first_and_a_reserved_touch_finishes_before_the_tasker_stops",
+    "RunnerTests.test_a_stale_stop_request_is_removed_before_the_agent_starts"
    ],
    "known_failures": [],
    "skips": []
@@ -882,7 +886,8 @@
    "tests": [
     "macos names the mailbox correctly when the launch task before it was refused",
     "macos registers no names rather than guessing by position without the mapping",
-    "windows pairs returned IDs with submitted tasks by position"
+    "windows pairs returned IDs with submitted tasks by position",
+    "every stop request is counted at once, before the stop itself is sent"
    ],
    "known_failures": [],
    "skips": []
@@ -987,8 +992,10 @@
     "an Adb instance on macOS waits for and checks the Android tiers only",
     "whenSettled resolves at once, on the change that settles it, or at the timeout",
     "the Android loader reads its own command and route and words its errors for Android",
-    "the scheduler waits for the Android tiers only on macOS with an Adb instance",
-    "a controller attach_resource_path loads after the resource paths; none adds nothing"
+    "a controller attach_resource_path loads after the resource paths; none adds nothing",
+    "native Mac scheduling waits for the Mac tiers alone and never reads the Android tiers",
+    "a due Adb instance on macOS waits for the Android tiers, chosen by its selected controller",
+    "the scheduler starts a due native Mac instance at once while an Adb instance waits for the Android tiers"
    ],
    "known_failures": [],
    "skips": []

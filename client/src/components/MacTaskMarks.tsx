@@ -7,7 +7,7 @@ import {
   experimentalHintText,
   taskMarkFor,
   tierPlatformFor,
-  tiersForController,
+  usesAndroidTiers,
   type TaskMark,
   type TierPlatform,
 } from '@/utils/taskTiers';
@@ -20,12 +20,10 @@ import { Tooltip } from './ui/Tooltip';
 export function useInstanceTaskTiers(instanceId: string | undefined): { platform: TierPlatform; tiers: MacTaskTiers | null } {
   const backendOS = useAppStore((state) => state.backendOS);
   const controllerType = useAppStore((state) => (instanceId ? instanceControllerType(state, instanceId) : undefined));
-  const macTiers = useAppStore((state) => state.macTaskTiers);
-  const androidTiers = useAppStore((state) => state.androidTaskTiers);
-  return {
-    platform: tierPlatformFor(backendOS, controllerType),
-    tiers: tiersForController(backendOS, controllerType, macTiers, androidTiers),
-  };
+  // Only an Adb instance on macOS reads the Android tiers; every other instance reads the Mac tiers alone.
+  const android = usesAndroidTiers(backendOS, controllerType);
+  const tiers = useAppStore((state) => (android ? state.androidTaskTiers : state.macTaskTiers));
+  return { platform: tierPlatformFor(backendOS, controllerType), tiers };
 }
 
 /** The mark for a pipeline entry on an instance; always null on Windows (no tiers loaded). */

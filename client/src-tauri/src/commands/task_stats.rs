@@ -307,6 +307,13 @@ pub fn register_posted_task(instance_id: &str, maa_task_id: i64, task_name: &str
     }
 }
 
+/// 提交了但从没开始的任务（安卓运行被停止或中止时）：只注销，不记为一次运行。
+pub fn discard_posted_task(instance_id: &str, maa_task_id: i64) {
+    if let Ok(mut guard) = ACTIVE_TASKS.lock() {
+        guard.remove(&(instance_id.to_string(), maa_task_id));
+    }
+}
+
 pub fn on_task_start(instance_id: &str, maa_task_id: i64) {
     if let Ok(mut guard) = ACTIVE_TASKS.lock() {
         if let Some(active) = guard.get_mut(&(instance_id.to_string(), maa_task_id)) {

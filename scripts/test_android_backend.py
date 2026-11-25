@@ -582,6 +582,48 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
                 log = (self.data_root / "logs" / "android-input.jsonl").read_text(encoding="utf-8").splitlines()
                 self.assertEqual(json.loads(log[-1])["outcome"], "cancelled")
 
+    def test_a_stop_request_seen_with_the_touch_reserved_sends_nothing_and_frees_the_marker(self):
+        # The request is there before the touch (a stopper already waiting), or appears while the touch is reserved
+        # (during the intent write): either way the agent sees it with its marker on disk and sends nothing.
+        for when in ("before", "reserved"):
+            with self.subTest(when=when), \
+                    patch.object(host, "_DEVICE_INPUT", self.fresh_state(self.data_root / when)) as state:
+                self.state = state
+                rt = self.tap_runtime()
+                request = state.stop_request()
+                request.parent.mkdir(parents=True, exist_ok=True)
+                seen = []
+                original = state.record_touch
+
+                def record(action, fields, outcome, state=state, when=when, original=original):
+                    if outcome == "sending":
+                        seen.append(state.marker().is_file())
+                        if when == "reserved":
+                            state.stop_request().write_text("stop")
+                    return original(action, fields, outcome)
+                if when == "before":
+                    request.write_text("stop")
+                with patch.object(state, "record_touch", side_effect=record), android_run(), \
+                        patch("daily.runtime.active_session", return_value=None):
+                    self.assertFalse(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
+                rt.context.run_action_direct.assert_not_called()
+                self.assertEqual(seen, [True])  # the check came with the reservation on disk
+                self.assertFalse(state.marker().exists())
+                self.assertFalse(state.halted)  # a requested stop is no unconfirmed touch
+                log = (state.root / "logs" / "android-input.jsonl").read_text(encoding="utf-8").splitlines()
+                self.assertEqual(json.loads(log[-1])["outcome"], "cancelled")
+                state._owner.close()
+
+    def test_the_stop_request_lives_next_to_the_marker_and_unknown_means_requested(self):
+        self.assertEqual(self.state.stop_request(), self.data_root / "config" / "android-input" / "stop.request")
+        self.assertFalse(self.state.stop_requested())
+        self.state.stop_request().parent.mkdir(parents=True)
+        self.state.stop_request().write_text("x")
+        self.assertTrue(self.state.stop_requested())
+        self.assertTrue(host.DeviceInputState(None).stop_requested())  # no data root: nothing is sent anyway
+        with patch("host.os.stat", side_effect=PermissionError):
+            self.assertTrue(self.fresh_state(self.data_root / "other").stop_requested())
+
     def test_each_reservation_is_unique_and_written_whole(self):
         markers = []
         rt = self.tap_runtime()

@@ -943,6 +943,9 @@ pub async fn connect_controller_impl(
     let (config, _android_connect) = super::android_run::enter_connect(&state_arc, &instance_id, config)?;
     super::maa_library::ensure_loaded(&state_arc)?;
     tokio::task::spawn_blocking(move || {
+        // 安卓模拟器：连接的登记跟着这个工作线程，直到它发布了控制器才注销（调用方的 future 被丢弃也一样）。
+        #[cfg(target_os = "macos")]
+        let _android_connect = _android_connect;
         let pool_key = (instance_id.clone(), config.clone());
         // Mac 控制器从不进入连接池，也不从池中复用：每次连接都是新的，旧连接一律交给后台退役。
         let use_pool = super::mac_connection::pool_reuse_allowed(&config);
@@ -2163,9 +2166,12 @@ pub fn maa_is_running(state: State<Arc<MaaState>>, instance_id: String) -> Resul
 pub fn post_click_impl(state: &MaaState, instance_id: &str, x: i32, y: i32) -> Result<i64, String> {
     // 安卓模拟器：直接点击一律拒绝（安卓运行期间，以及任何 Adb 实例）。
     #[cfg(target_os = "macos")]
-    super::android_run::refuse_click(state, instance_id)?;
+    super::android_run::refuse_while_busy(state, instance_id, super::android_run::Op::Click)?;
     let instances = state.instances.lock().map_err(|e| e.to_string())?;
     let instance = instances.get(instance_id).ok_or("Instance not found")?;
+    // 安卓模拟器：类型在选出控制器的同一把锁里检查（Adb 才拒绝；其他控制器照常发送）。
+    #[cfg(target_os = "macos")]
+    super::android_run::refuse_click_on(instance)?;
     let controller = instance
         .controller
         .as_ref()
