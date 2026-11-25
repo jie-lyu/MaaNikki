@@ -87,5 +87,7 @@ class GameplayAction(CustomAction):
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, cv2.error) as error:
             runtime.log(f"任务未完成：{error}。")
             if not runtime.stopped and not read_only and kind != "android_check":  # the check never sends input
-                runtime.main()
+                from host import capabilities, game_backend
+                if not capabilities(game_backend()).touch_actions_only:  # Android flows return to the HUD themselves
+                    runtime.main()
             return False

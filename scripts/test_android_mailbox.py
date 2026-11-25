@@ -1,0 +1,164 @@
+"""Android 邮件 flow (agent/host/android/mailbox.py) and page taps (pages.py): python scripts/test_android_mailbox.py"""
+from __future__ import annotations
+
+from pathlib import Path
+import json
+import sys
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "agent"))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import numpy as np  # noqa: E402
+
+from host.android import actions, mailbox, pages  # noqa: E402
+from host.android.actions import Screen  # noqa: E402
+
+
+def hit(box, text=""):
+    return SimpleNamespace(hit=True, box=box, best_result=SimpleNamespace(text=text))
+
+
+MISS = SimpleNamespace(hit=False, box=None, best_result=None)
+
+
+def page(title):
+    return Screen("page", {"back": [37, 22, 40, 40]}, title=title)
+
+
+class Rt:
+    """A runtime whose frames are scripted (screen, nodes) pairs; taps are recorded."""
+    TOUCH_KEY_ATTEMPTS = 3
+
+    def __init__(self, frames):
+        self.frames, self.clicks, self.logs, self.stopped, self.valid = list(frames), [], [], False, True
+
+    def _fresh_device_frame(self):
+        screen, nodes = self.frames.pop(0) if len(self.frames) > 1 else self.frames[0]
+        frame = np.zeros((720, 1280, 3), np.uint8)
+        self.current = (frame, screen, nodes)
+        return frame
+
+    def _recognizer_on(self, frame):
+        _f, _screen, nodes = self.current
+        return lambda node, override=None: nodes.get(node, MISS)
+
+    def _frame_still_valid(self, frame):
+        return self.valid
+
+    def action(self, name, target, source_frame):
+        self.clicks.append((name, target))
+        return True
+
+    def pause(self, seconds):
+        return True
+
+    def log(self, text):
+        self.logs.append(text)
+
+
+class PageTapTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(pages.actions, "read_screen", side_effect=lambda recognize: self.rt.current[1])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_target_on_the_expected_page_is_tapped_on_the_confirming_frame(self):
+        nodes = {"Target": hit([530, 645, 55, 50])}
+        self.rt = Rt([(page("美鸭梨"), nodes), (page("美鸭梨"), nodes)])
+        self.assertTrue(pages.tap_on_page(self.rt, "美鸭梨", "Target"))
+        self.assertEqual(self.rt.clicks, [("Click", [530, 645, 55, 50])])
+
+    def test_nothing_is_tapped_off_the_page_or_without_the_target(self):
+        for frames in ([(page("设置"), {"Target": hit([1, 1, 5, 5])})],
+                       [(page("美鸭梨"), {})],
+                       [(Screen("hud", {"duck": [30, 18, 54, 54]}), {"Target": hit([1, 1, 5, 5])})]):
+            with self.subTest(frames=frames):
+                self.rt = Rt(frames)
+                with self.assertRaises(pages.PageMismatch):
+                    pages.tap_on_page(self.rt, "美鸭梨", "Target")
+                self.assertEqual(self.rt.clicks, [])
+
+    def test_a_point_next_to_a_forbidden_word_is_not_tapped(self):
+        nodes = {"Target": hit([300, 652, 120, 30]), pages.FORBIDDEN: hit([60, 652, 120, 30], "删除已读")}
+        self.rt = Rt([(page("邮件"), nodes)])
+        with self.assertRaises(pages.PageMismatch) as caught:
+            pages.tap_on_page(self.rt, "邮件", "Target")
+        self.assertIn("删除", str(caught.exception))
+        self.assertEqual(self.rt.clicks, [])
+
+    def test_a_target_that_moved_or_a_page_that_changed_is_decided_again(self):
+        first = {"Target": hit([530, 645, 55, 50])}
+        moved = {"Target": hit([600, 645, 55, 50])}
+        self.rt = Rt([(page("美鸭梨"), first), (page("美鸭梨"), moved), (page("美鸭梨"), moved),
+                      (page("美鸭梨"), moved)])
+        self.assertTrue(pages.tap_on_page(self.rt, "美鸭梨", "Target"))
+        self.assertEqual(self.rt.clicks, [("Click", [600, 645, 55, 50])])
+
+
+class MailboxTests(unittest.TestCase):
+    def frame_with_button(self, state):
+        frame = np.zeros((720, 1280, 3), np.uint8)
+        x, y, w, h = mailbox.BUTTON_FACE
+        colour = {"disabled": (150, 152, 155), "enabled": (40, 140, 200), "odd": (90, 60, 30)}[state]
+        frame[y:y + h, x:x + w] = colour
+        return frame
+
+    def test_button_states(self):
+        self.assertEqual(mailbox.button_state(self.frame_with_button("disabled"))[0], "disabled")
+        self.assertEqual(mailbox.button_state(self.frame_with_button("enabled"))[0], "enabled")
+        self.assertEqual(mailbox.button_state(self.frame_with_button("odd"))[0], "unknown")
+
+    def run_flow(self, button, screens_after_claim=("邮件",)):
+        rt = SimpleNamespace(stopped=False, logs=[], key=Mock(return_value=True), leave_page=Mock(return_value=True),
+                             _frame_still_valid=Mock(return_value=True))
+        rt.log = rt.logs.append
+        frame = self.frame_with_button(button)
+        claim_node = {mailbox.CLAIM_ALL: hit([318, 657, 124, 30], "领取全部")}
+        mail = (page("邮件"), frame, lambda node, override=None: claim_node.get(node, MISS))
+        hud = (Screen("hud", {"duck": [30, 18, 54, 54]}), frame, lambda *a: MISS)
+        disabled = (page("邮件"), self.frame_with_button("disabled"), mail[2])
+        sequence = iter([hud, mail, disabled, hud])
+        taps = []
+        with patch.object(pages, "screen_now", side_effect=lambda rt_: next(sequence)), \
+                patch.object(pages, "wait_for", side_effect=lambda rt_, accept, seconds, step=.4: page("x")), \
+                patch.object(pages, "tap_on_page", side_effect=lambda rt_, title, node, **k: taps.append(node) or True):
+            result = mailbox.run(rt)
+        return result, rt, taps
+
+    def test_a_disabled_button_means_nothing_to_claim(self):
+        result, rt, taps = self.run_flow("disabled")
+        self.assertTrue(result)
+        self.assertEqual(taps, [mailbox.MENU_MAIL])  # the envelope only; never the claim or delete buttons
+        rt.key.assert_called_once_with("menu")
+        self.assertIn("邮箱没有可领取的附件。", rt.logs)
+
+    def test_an_enabled_button_is_claimed_and_checked_afterwards(self):
+        result, rt, taps = self.run_flow("enabled")
+        self.assertTrue(result)
+        self.assertEqual(taps, [mailbox.MENU_MAIL, mailbox.CLAIM_ALL])
+        self.assertIn("邮箱附件已全部领取。", rt.logs)
+
+    def test_an_unclear_button_stops_without_a_claim(self):
+        result, rt, taps = self.run_flow("odd")
+        self.assertFalse(result)
+        self.assertEqual(taps, [mailbox.MENU_MAIL])
+        self.assertTrue(any("状态认不出" in text for text in rt.logs))
+
+
+class ResourceTests(unittest.TestCase):
+    def test_nodes_and_tier(self):
+        nodes = json.loads((ROOT / "resource_android/pipeline/android_mailbox.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(nodes), {mailbox.MENU_MAIL, mailbox.CLAIM_ALL, pages.FORBIDDEN})
+        self.assertTrue(nodes[mailbox.MENU_MAIL]["green_mask"])
+        self.assertIn("删除", nodes[pages.FORBIDDEN]["expected"])
+        tiers = json.loads((ROOT / "agent/host/android/tasks.json").read_text(encoding="utf-8"))
+        self.assertIn("MaaNikki_Mailbox", tiers["experimental"])
+        self.assertEqual(tiers["entries"], [])  # verified only after device runs
+
+
+if __name__ == "__main__":
+    unittest.main()

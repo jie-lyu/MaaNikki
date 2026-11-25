@@ -1,0 +1,22 @@
+{
+  "MaaNikki_Android_MenuMail": {
+    "recognition": "TemplateMatch",
+    "template": "android/menu_mail.png",
+    "roi": [450, 600, 250, 120],
+    "threshold": 0.8,
+    "green_mask": true,
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_MailClaimAll": {
+    "recognition": "OCR",
+    "roi": [270, 640, 220, 64],
+    "expected": "^领取全部$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_Forbidden": {
+    "recognition": "OCR",
+    "roi": [0, 0, 1280, 720],
+    "expected": "删除|购买|充值|共鸣|确认退出",
+    "action": "DoNothing"
+  }
+}

@@ -111,7 +111,7 @@
     "TaskListTests.test_an_unreadable_list_runs_nothing",
     "TaskListTests.test_the_admission_guard_refuses_unlisted_tasks_before_task_code",
     "TaskListTests.test_the_mac_development_switch_does_not_open_android_tasks",
-    "TaskListTests.test_the_shipped_list_is_well_formed_and_holds_only_the_read_only_check",
+    "TaskListTests.test_the_shipped_list_is_well_formed_and_holds_the_check_and_mailbox_on_trial",
     "UnreachableDeviceTests.test_an_unreachable_device_makes_earlier_frames_stale",
     "UnreachableDeviceTests.test_repeated_shell_failures_stop_with_adb_restart_advice",
     "UnreachableDeviceTests.test_shell_reads_hold_the_device_input_lock"
@@ -120,6 +120,21 @@
    "skips": [
     "NoKeyboardOrMouseTests.test_only_one_agent_process_uses_android_input"
    ]
+  },
+  "test_android_mailbox.py": {
+   "tests": [
+    "MailboxTests.test_a_disabled_button_means_nothing_to_claim",
+    "MailboxTests.test_an_enabled_button_is_claimed_and_checked_afterwards",
+    "MailboxTests.test_an_unclear_button_stops_without_a_claim",
+    "MailboxTests.test_button_states",
+    "PageTapTests.test_a_point_next_to_a_forbidden_word_is_not_tapped",
+    "PageTapTests.test_a_target_on_the_expected_page_is_tapped_on_the_confirming_frame",
+    "PageTapTests.test_a_target_that_moved_or_a_page_that_changed_is_decided_again",
+    "PageTapTests.test_nothing_is_tapped_off_the_page_or_without_the_target",
+    "ResourceTests.test_nodes_and_tier"
+   ],
+   "known_failures": [],
+   "skips": []
   },
   "test_android_overlay.py": {
    "tests": [
