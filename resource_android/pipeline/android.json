@@ -11,10 +11,11 @@
     "expected": "^取消$",
     "action": "DoNothing"
   },
-  "MaaNikki_Android_RedeemModal": {
-    "recognition": "OCR",
-    "roi": [540, 160, 200, 70],
-    "expected": "^兑换奖励$",
+  "MaaNikki_Android_ModalClose": {
+    "recognition": "TemplateMatch",
+    "template": "android/modal_close.png",
+    "roi": [500, 60, 780, 460],
+    "threshold": 0.9,
     "action": "DoNothing"
   },
   "MaaNikki_Android_HudDuck": {
@@ -35,6 +36,12 @@
     "recognition": "OCR",
     "roi": [600, 55, 680, 40],
     "expected": "换装",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_PageTitle": {
+    "recognition": "OCR",
+    "roi": [80, 15, 300, 55],
+    "expected": ".+",
     "action": "DoNothing"
   }
 }

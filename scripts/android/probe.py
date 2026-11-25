@@ -1171,8 +1171,8 @@ def android_screen(recognize) -> dict:
     plans = {}
     for action in sorted(actions.ACTIONS):
         try:
-            target, completes = actions.plan_tap(action, screen, recognize)
-            plans[action] = {"tap": target, "completes": completes}
+            plan = actions.plan_tap(action, screen, recognize)
+            plans[action] = {"tap": plan.target, "key": plan.key, "completes": plan.completes}
         except actions.ScreenUnrecognised as error:
             plans[action] = {"refused": str(error)}
     return {"screen": screen.kind, "targets": screen.targets, "reason": screen.reason, "plans": plans}

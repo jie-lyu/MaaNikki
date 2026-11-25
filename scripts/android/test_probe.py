@@ -195,11 +195,14 @@ class ProbeTests(unittest.TestCase):
 
     def test_screen_reports_the_action_table_without_input(self):
         from types import SimpleNamespace
-        hits = {"MaaNikki_Android_BackArrow": SimpleNamespace(hit=True, box=[37, 22, 40, 40], best_result=None)}
+        hits = {"MaaNikki_Android_BackArrow": SimpleNamespace(hit=True, box=[37, 22, 40, 40], best_result=None),
+                "MaaNikki_Android_PageTitle": SimpleNamespace(hit=True, box=[96, 26, 80, 30],
+                                                              best_result=SimpleNamespace(text="设置"))}
         miss = SimpleNamespace(hit=False, box=None, best_result=None)
         result = probe.android_screen(lambda node, override=None: hits.get(node, miss))
         self.assertEqual(result["screen"], "page")
-        self.assertEqual(result["plans"]["menu"], {"tap": [37, 22, 40, 40], "completes": True})
+        self.assertEqual(result["plans"]["leave"], {"tap": [37, 22, 40, 40], "key": "back", "completes": True})
+        self.assertIn("refused", result["plans"]["menu"])
         self.assertIn("refused", result["plans"]["shop"])
         args = probe.build_parser().parse_args(["screen", "--frame", "a.png", "b.png"])
         self.assertEqual((args.func, args.frame), (probe.cmd_screen, ["a.png", "b.png"]))

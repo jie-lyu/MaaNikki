@@ -563,40 +563,79 @@ class Runtime:
 
     TOUCH_KEY_ATTEMPTS = 3
 
+    def leave_page(self, delay=0.35):
+        """Android: leave the current screen (a modal by its close mark, a page by its back arrow, the quit
+        confirmation by 取消); True at once on the open-world HUD. The PC counterpart is pressing Esc."""
+        if self.stopped:
+            return False
+        if not capabilities(game_backend()).touch_actions_only:
+            raise NotImplementedError("leave_page is the Android counterpart of key('menu') on a page")
+        return self._touch_key("leave", delay)
+
     def _touch_key(self, name, delay):
-        """Android: a named game action as one tap chosen on one recognised, focus-confirmed frame
-        (host.android.actions). The quit confirmation is cancelled first if it is showing."""
+        """Android: a named game action as at most one tap, decided on one recognised, focus-confirmed frame and
+        confirmed on a fresh one, which the tap carries as its source (host.android.actions). The quit
+        confirmation is cancelled first if it is showing."""
         from host import UnsupportedInput
         from host.android import actions
         from navigation.models import NavigationError
+        from task_control import ForegroundChanged
         if name not in actions.ACTIONS:
             raise UnsupportedInput(f"安卓模拟器上还不支持「{name}」这个游戏动作，任务已停止。")
+        guard_taps = 0
+        focus_change = None
+
+        def sent_so_far():
+            return f"已点过 {guard_taps} 次退出确认框的「取消」" if guard_taps else "没有发送任何输入"
         for _attempt in range(self.TOUCH_KEY_ATTEMPTS):
             if self.stopped:
                 return False
-            self.invalidate_frame()
-            frame = self.capture()
-            if frame is None:
+            decided = self._fresh_device_frame()
+            if decided is None:
                 return False
-
-            def recognize(node, override=None, frame=frame):
-                return self.recognize(node, override, image=frame)
+            recognize = self._recognizer_on(decided)
             try:
                 screen = actions.read_screen(recognize)
-                target, completes = actions.plan_tap(name, screen, recognize)
+                plan = actions.plan_tap(name, screen, recognize)
             except actions.ScreenUnrecognised as error:
-                if not self._frame_still_valid(frame):
+                if not self._frame_still_valid(decided):
                     continue  # focus changed while recognising: decide again on a new frame
-                raise NavigationError(f"{error}，没有发送任何输入。") from error
-            if not self._frame_still_valid(frame):
-                continue
-            if not self.action("Click", target=target, source_frame=frame):
+                raise NavigationError(f"{error}，{sent_so_far()}。") from error
+            if plan.target is None:
+                return True  # nothing to do (e.g. leaving while already in the open world)
+            # Right before sending: the same screen with the same thing in the same place on a fresh frame, which
+            # the tap then carries, so a page that changed during the (long) search is not tapped.
+            confirming = self._fresh_device_frame()
+            if confirming is None:
                 return False
-            if completes:
+            target = actions.confirm_tap(plan, screen, self._recognizer_on(confirming))
+            if target is None or not self._frame_still_valid(confirming):
+                continue
+            try:
+                if not self.action("Click", target=target, source_frame=confirming):
+                    return False
+            except ForegroundChanged as error:
+                focus_change = error  # cancelled before sending: decide again within the same limit
+                continue
+            if plan.completes:
                 return self.pause(delay)
+            guard_taps += 1
             self.pause(delay)  # the quit confirmation was cancelled: look again before the asked action
-        raise NavigationError(f"「{actions.ACTION_NAMES[name]}」连续 {self.TOUCH_KEY_ATTEMPTS} 次没能在稳定的画面上完成判断，"
-                              "已停止。")
+        if focus_change is not None and not guard_taps:
+            raise focus_change
+        raise NavigationError(f"「{actions.ACTION_NAMES[name]}」连续 {self.TOUCH_KEY_ATTEMPTS} 次没能在稳定的画面上完成，"
+                              f"{sent_so_far()}，已停止。")
+
+    def _fresh_device_frame(self):
+        self.invalidate_frame()
+        return self.capture()
+
+    def _recognizer_on(self, frame):
+        """Recognition on ``frame`` without a focus poll per call (the frame's mark is checked before any tap)."""
+        def recognize(node, override=None):
+            with measure("recognition.native"):
+                return self.context.run_recognition(node, frame, {node: override} if override else None)
+        return recognize
 
     def _frame_still_valid(self, frame):
         return device_input().marks_of(frame) == (self._focus_generation, device_input().epoch)
