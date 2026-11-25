@@ -225,11 +225,12 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(records[1]["status"], "succeeded")
 
     def test_a_ctrl_c_during_teardown_is_deferred_until_the_agent_is_reaped(self):
-        import os
+        import _thread
         import signal
         import tempfile
-        modules, calls, children, Child = self.fake_framework(
-            on_disconnect=lambda: os.kill(os.getpid(), signal.SIGINT))
+        # interrupt_main raises SIGINT's handler in the main thread on every OS (os.kill(SIGINT) would terminate
+        # the whole test process on Windows).
+        modules, calls, children, Child = self.fake_framework(on_disconnect=_thread.interrupt_main)
         with tempfile.TemporaryDirectory() as tmp:
             results, records = self.run_fakes(tmp, modules, Child)
         self.assertEqual(results, [130])
@@ -237,6 +238,21 @@ class RunnerTests(unittest.TestCase):
         self.assertIs(records[0]["interrupted_during_cleanup"], True)
         self.assertEqual(records[0]["agent_exit"], 0)
         self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)  # restored
+
+    def test_a_ctrl_c_while_the_record_is_collected_still_writes_it(self):
+        import _thread
+        import tempfile
+        modules, calls, children, Child = self.fake_framework()
+        original = runner.agent_messages
+
+        def interrupted(*args):
+            _thread.interrupt_main()  # Ctrl-C while the agent's messages are collected
+            return original(*args)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(runner, "agent_messages", interrupted):
+            results, records = self.run_fakes(tmp, modules, Child)
+        self.assertEqual(results, [130])
+        self.assertEqual(len(records), 1)
+        self.assertIs(records[0]["interrupted_during_cleanup"], True)
 
     def test_an_agent_that_cannot_be_reaped_fails_the_run(self):
         import tempfile

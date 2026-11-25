@@ -248,8 +248,8 @@ def run(args) -> int:
         record["stop_requested"] = stop_tasker(tasker)
         raise
     finally:
-        # Once the agent exists, a Ctrl-C during cleanup is deferred: the child is always reaped and the record
-        # always written.
+        # Once the agent exists, a Ctrl-C during cleanup is deferred until the child is reaped and the run record is
+        # written and printed.
         deferred = []
         previous = signal.signal(signal.SIGINT, lambda *_: deferred.append(True)) \
             if threading.current_thread() is threading.main_thread() else None
@@ -260,22 +260,24 @@ def run(args) -> int:
                 record["disconnect"] = "timed out or failed"
             record["agent_exit"] = reap(child)
             agent_log.close()
+            if record["agent_exit"] == "unreaped":
+                record["status"] = "error"
+                record["error"] = "agent 子进程没能结束（终止和强制结束都没有确认）"
+            log_file = log_dir / "maafw.log"
+            record["methods"] = methods_in_log(log_file.read_text(encoding="utf-8", errors="replace")) \
+                if log_file.exists() else None
+            record["agent_messages"] = agent_messages(data_root, started)
+            if deferred:
+                record["interrupted_during_cleanup"] = True
+            RUN_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with RUN_LOG.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            print(json.dumps(record, ensure_ascii=False, indent=1))
         finally:
             if previous is not None:
                 signal.signal(signal.SIGINT, previous)
         if deferred:
             record["interrupted_during_cleanup"] = True
-        if record["agent_exit"] == "unreaped":
-            record["status"] = "error"
-            record["error"] = "agent 子进程没能结束（终止和强制结束都没有确认）"
-        log_file = log_dir / "maafw.log"
-        record["methods"] = methods_in_log(log_file.read_text(encoding="utf-8", errors="replace")) \
-            if log_file.exists() else None
-        record["agent_messages"] = agent_messages(data_root, started)
-        RUN_LOG.parent.mkdir(parents=True, exist_ok=True)
-        with RUN_LOG.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-        print(json.dumps(record, ensure_ascii=False, indent=1))
     if record.get("interrupted_during_cleanup"):
         return 130
     return 0 if record.get("status") == "succeeded" else 1

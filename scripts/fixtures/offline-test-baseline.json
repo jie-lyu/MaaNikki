@@ -146,6 +146,7 @@
    "tests": [
     "RunnerTests.test_a_blocking_step_that_overruns_ends_with_the_adb_advice",
     "RunnerTests.test_a_ctrl_c_during_teardown_is_deferred_until_the_agent_is_reaped",
+    "RunnerTests.test_a_ctrl_c_while_the_record_is_collected_still_writes_it",
     "RunnerTests.test_an_agent_that_cannot_be_reaped_fails_the_run",
     "RunnerTests.test_an_interrupted_run_stops_the_task_reaps_the_agent_and_the_next_run_works",
     "RunnerTests.test_options_resolve_to_defaults_or_the_chosen_case",
