@@ -38,6 +38,19 @@ def focus_lost_mode(mode) -> str:
             return "pause"  # nothing here can bring the game back; never tell the player it will
     return mode
 
+def message_override(focus):
+    """The override that shows ``focus`` messages through MaaNikki_Daily_Message.
+
+    On a touch-only target (Android) the node's recognition, action and next are pinned as well: an earlier
+    override in the same task could otherwise give the message node an action that reaches the device.
+    """
+    node = {"focus": focus}
+    from host import capabilities, game_backend
+    if capabilities(game_backend()).touch_actions_only:
+        node.update(recognition="DirectHit", action="DoNothing", next=[], interrupt=[], on_error=[])
+    return {"MaaNikki_Daily_Message": node}
+
+
 class TaskStopped(NavigationError):
     pass
 
@@ -91,6 +104,8 @@ class ForegroundSession:
         self.account_generation = None
         self.account_mismatch = False
         self._frame_failure = None
+        # Set when a touch on an Android device was not confirmed released: every Runtime of this run stops.
+        self.input_unconfirmed = False
         self.evidence = FailureEvidence()
 
     def register(self, inputs):
@@ -106,8 +121,7 @@ class ForegroundSession:
         return self._controller
 
     def notify(self, message):
-        self.context.run_task("MaaNikki_Daily_Message", {
-            "MaaNikki_Daily_Message": {"focus": {"Node.Action.Starting": message}}})
+        self.context.run_task("MaaNikki_Daily_Message", message_override({"Node.Action.Starting": message}))
 
     def validate_frame(self, frame):
         """Reject incompatible coordinates once, before any recovery can click."""
@@ -349,7 +363,7 @@ class ForegroundSession:
             self._cached_stopping = False
 
     def stopped(self, *, fresh=False):
-        if self._frame_failure:
+        if self._frame_failure or self.input_unconfirmed:
             return True
         now = wall_time.monotonic()
         if (not fresh and self._stop_poll_interval > 0 and self._stop_checked_at is not None

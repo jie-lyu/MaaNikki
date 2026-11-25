@@ -35,6 +35,23 @@ def native_key_fields(action, fields):
     return {**fields, "key": [native_key(item) for item in key] if isinstance(key, list) else native_key(key)}
 
 
+# Android: an unconfirmed touch outside any task session (scripts, tests) stops every Runtime of this process.
+_INPUT_UNCONFIRMED_WITHOUT_SESSION = False
+
+
+def _android_dispatch(context, action, fields):
+    """Send a validated tap or swipe with every parameter spelled out, through run_action_direct: no pipeline node
+    is involved, so nothing an earlier override set on one can be inherited (offsets, contact, hover-only)."""
+    from maa.pipeline import JClick, JSwipe
+    if action == "Click":
+        return context.run_action_direct("Click", JClick(
+            target=list(fields["target"]), target_offset=(0, 0, 0, 0), contact=0, pressure=1))
+    return context.run_action_direct("Swipe", JSwipe(
+        starting=0, begin=list(fields["begin"]), begin_offset=(0, 0, 0, 0), end=[list(fields["end"])],
+        end_offset=[(0, 0, 0, 0)], end_hold=[0], duration=[fields.get("duration", 200)], only_hover=False,
+        contact=0, pressure=1))
+
+
 class Runtime:
     OBSERVATION_MAX_AGE = .25
 
@@ -70,6 +87,8 @@ class Runtime:
         if self.navigation_halted:
             return True
         session = active_session()
+        if session is None and _INPUT_UNCONFIRMED_WITHOUT_SESSION:
+            return True
         return session.stopped() if session else self.context.tasker.stopping
 
     def background_mode(self):
@@ -237,9 +256,9 @@ class Runtime:
         saved = write_message(text, display)
         # A failed detail file must not silently swallow diagnostic messages.
         if not stopped and (display or not saved):
-            self.context.run_task("MaaNikki_Daily_Message", {
-                "MaaNikki_Daily_Message": {"focus": {
-                    "Node.Action.Starting": display if saved else text}}})
+            from task_control import message_override
+            self.context.run_task("MaaNikki_Daily_Message", message_override({
+                "Node.Action.Starting": display if saved else text}))
         session = active_session()
         if session is not None and not detail and not stopped and display:
             clean = display.strip()
@@ -467,27 +486,55 @@ class Runtime:
             # Never dispatch fallback Seize actions when the game is unfocused.
             inputs.check(require_foreground=True)
         if touch_only:
-            # Right before the tap: the frame it was decided on must still be current and the game must have focus
-            # on the device now (a positive reading, no waiting); otherwise the caller re-checks the page.
-            self.check_focus()
-            from task_control import ForegroundChanged
-            if focus_generation is not None and self._focus_generation != focus_generation:
-                raise ForegroundChanged("前台切换后已取消本次输入，等待重新核对")
-            if not self._device_focus_now():
-                raise ForegroundChanged("设备上游戏不在前台，已取消本次输入，等待重新核对")
+            return self._dispatch_touch(action, fields, focus_generation)
         fields = native_key_fields(action, fields)
         with measure("input.action"):
             result = self.context.run_action("MaaNikki_Daily_Action", pipeline_override={
                 "MaaNikki_Daily_Action": {"action": action, **fields}})
         succeeded = result is not None and result.success
-        if touch_only and not succeeded:
-            # The tap or swipe may have gone down without coming up: nothing more is sent in this run.
-            self.navigation_halted = True
-            from host import InputUnconfirmed
-            raise InputUnconfirmed(f"安卓模拟器上的「{action}」没有确认完成（可能留下按住的触点），任务已停止，请检查模拟器。")
         if succeeded and action == "Click" and ui_click:
             return self.pause(.1) and self.ui.unhover()
         return succeeded
+
+    def _dispatch_touch(self, action, fields, focus_generation):
+        """Android: the last checks and the dispatch of a validated tap or swipe."""
+        from task_control import ForegroundChanged
+        # The frame the decision was made on must still be current: no focus loss observed since the last capture
+        # (a session's focus generation, or this Runtime's own device-focus readings), and the caller's token too.
+        self.check_focus()
+        if focus_generation is not None and self._focus_generation != focus_generation:
+            raise ForegroundChanged("前台切换后已取消本次输入，等待重新核对")
+        if getattr(self, "_capture_marks", None) != (self._focus_generation, self._device_focus_epoch()):
+            raise ForegroundChanged("截图之后焦点变过，已取消本次输入，等待重新核对")
+        if not self._device_focus_now():
+            raise ForegroundChanged("设备上游戏不在前台，已取消本次输入，等待重新核对")
+        try:
+            with measure("input.action"):
+                result = _android_dispatch(self.context, action, fields)
+            succeeded = result is not None and bool(result.success)
+        except BaseException:
+            self._halt_unconfirmed()
+            raise
+        if not succeeded:
+            self._halt_unconfirmed()
+            from host import InputUnconfirmed
+            raise InputUnconfirmed(f"安卓模拟器上的「{action}」没有确认完成（可能留下按住的触点），任务已停止，请检查模拟器。")
+        if action == "Click":
+            return self.pause(.1) and self.ui.unhover()
+        return True
+
+    def _halt_unconfirmed(self):
+        """The touch may have gone down without coming up: nothing more is sent in this run, by any Runtime."""
+        global _INPUT_UNCONFIRMED_WITHOUT_SESSION
+        self.navigation_halted = True
+        session = active_session()
+        if session is not None:
+            session.input_unconfirmed = True
+        else:
+            _INPUT_UNCONFIRMED_WITHOUT_SESSION = True
+
+    def _device_focus_epoch(self):
+        return getattr(self, "_focus_epoch", 0)
 
     def key(self, value, delay=0.35):
         # Integer keys are physical UI shortcuts / legacy physical recordings.
@@ -555,7 +602,10 @@ class Runtime:
             session = active_session()
             inputs = session.ensure_adapter() if session is not None else None
         target = inputs if inputs is not None else self._sessionless_target()
-        return bool(target.foreground())
+        focused = bool(target.foreground())
+        if not focused:
+            self._focus_epoch = self._device_focus_epoch() + 1
+        return focused
 
     def _device_focus_ready(self):
         """Android: True when the game has focus on the device now; otherwise wait for it (a pause, also in
@@ -569,6 +619,7 @@ class Runtime:
             target = self._sessionless_target()
             if target.foreground():
                 return True
+            self._focus_epoch = self._device_focus_epoch() + 1  # an observed loss: frames before it are stale
             if not target.exists():
                 from navigation.models import GameWindowClosed
                 raise GameWindowClosed("模拟器里的游戏已经退出。")
@@ -576,6 +627,7 @@ class Runtime:
             return False
         if inputs.foreground():
             return True
+        self._focus_epoch = self._device_focus_epoch() + 1
         inputs.check(require_foreground=True)
         return False
 
@@ -730,6 +782,8 @@ class Runtime:
                     image = adjusted
             self.evidence.remember_frame(image, self._focus_generation)
             self.validate_frame(image)
+            if device_focus:
+                self._capture_marks = (self._focus_generation, self._device_focus_epoch())
             return image
 
     def recognize(self, node, fields=None, image=None):

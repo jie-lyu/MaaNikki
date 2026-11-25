@@ -9,7 +9,7 @@ from performance import action_profile
 from game_view import ALLOWED_FRAME_SIZES, is_clipped_game_frame
 from host import capabilities, game_backend, task_entry_supported, task_refusal_reason, task_start_notice
 from message_log import message_scope
-from task_control import TaskStopped, task_session
+from task_control import TaskStopped, message_override, task_session
 
 from maa.agent.agent_server import AgentServer
 
@@ -71,8 +71,7 @@ def _write_start_notice(context, task_id, entry):
     try:
         notice = task_start_notice(entry)
         if notice:
-            context.run_task("MaaNikki_Daily_Message", {
-                "MaaNikki_Daily_Message": {"focus": {"Node.Action.Starting": notice}}})
+            context.run_task("MaaNikki_Daily_Message", message_override({"Node.Action.Starting": notice}))
     except Exception:
         traceback.print_exc()
 
@@ -92,9 +91,8 @@ def agent_action(name, *, stop_on_failure=False):
                 # Before any task code, input or capture: a saved preset, a schedule or a feature
                 # entry may ask for a task this desktop's backend does not support yet.
                 try:
-                    context.run_task("MaaNikki_Daily_Message", {
-                        "MaaNikki_Daily_Message": {"focus": {
-                            "Node.Action.Starting": f"{entry} 不在当前系统开放：{task_refusal_reason(entry)}"}}})
+                    context.run_task("MaaNikki_Daily_Message", message_override({
+                        "Node.Action.Starting": f"{entry} 不在当前系统开放：{task_refusal_reason(entry)}"}))
                 except Exception:
                     traceback.print_exc()
                 return False
@@ -135,9 +133,8 @@ def agent_action(name, *, stop_on_failure=False):
                         profile.succeeded = False
                     traceback.print_exc()
                     try:
-                        context.run_task("MaaNikki_Daily_Message", {
-                            "MaaNikki_Daily_Message": {"focus": {
-                                "Node.Action.Starting": f"{argv.node_name} 未完成：{error}。"}}})
+                        context.run_task("MaaNikki_Daily_Message", message_override({
+                            "Node.Action.Starting": f"{argv.node_name} 未完成：{error}。"}))
                     except Exception:
                         pass
                     return False

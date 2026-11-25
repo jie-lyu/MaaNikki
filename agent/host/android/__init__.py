@@ -40,8 +40,12 @@ def check_touch_fields(action, fields) -> None:
                 or any(type(v) is not int for v in value)):
             raise UnsupportedInput(f"安卓模拟器上的点击位置 {name}={value!r} 无效。")
         x, y = value[0], value[1]
-        w, h = (value[2], value[3]) if len(value) == 4 else (0, 0)
-        if w < 0 or h < 0 or not (0 <= x and x + w <= width and 0 <= y and y + h <= height):
+        if len(value) == 4:
+            w, h = value[2], value[3]
+            inside = w > 0 and h > 0 and 0 <= x and x + w <= width and 0 <= y and y + h <= height
+        else:
+            inside = 0 <= x < width and 0 <= y < height
+        if not inside:
             raise UnsupportedInput(f"安卓模拟器上的点击位置 {name}={list(value)} 超出画面。")
     if action == "Click" and "target" not in fields:
         raise UnsupportedInput("安卓模拟器上的点击需要明确的位置。")

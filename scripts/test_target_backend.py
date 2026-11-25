@@ -242,6 +242,15 @@ class Win32DispatchUnchangedTests(unittest.TestCase):
             self.assertFalse(host.capabilities(host.game_backend()).touch_actions_only)
 
 
+class MessagesUnchangedTests(unittest.TestCase):
+    def test_message_overrides_are_exactly_as_before_on_windows_and_macos(self):
+        from task_control import message_override
+        for name, controller in (("win32", None), ("win32", WINDOWS_CONTROLLER), ("macos", MACOS_CONTROLLER)):
+            with desktop(name, controller):
+                self.assertEqual(message_override({"Node.Action.Starting": "x"}),
+                                 {"MaaNikki_Daily_Message": {"focus": {"Node.Action.Starting": "x"}}})
+
+
 class Win32SessionStartupTests(unittest.TestCase):
     def test_the_first_foreground_wait_still_nudges_focus_with_alt_up(self):
         from navigation.controller import ForegroundInput
