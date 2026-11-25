@@ -16,6 +16,9 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "agent"))
 sys.path.insert(0, str(ROOT / "scripts"))
+# The entry test imports the gameplay action (agent registration imports maa); Windows CI's embedded Python has the
+# maa package without its bin folder, so the runtime is taken from ./maafw, as in test_android_backend.py.
+os.environ.setdefault("MAAFW_BINARY_PATH", str(ROOT / "maafw"))
 
 import numpy as np  # noqa: E402
 
