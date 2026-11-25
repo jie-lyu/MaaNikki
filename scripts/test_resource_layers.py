@@ -70,6 +70,14 @@ def shipped_templates() -> set[str]:
     return names
 
 
+def symlink_or_skip(test, link: Path, target_path: Path, *, directory=False):
+    """Symlinks need a privilege Windows may not grant; these checks are then skipped (listed as allowed skips)."""
+    try:
+        link.symlink_to(target_path, target_is_directory=directory)
+    except (OSError, NotImplementedError) as error:
+        test.skipTest(f"cannot create symlinks here: {error}")
+
+
 def write_png(path: Path, value: int):
     path.parent.mkdir(parents=True, exist_ok=True)
     image = np.zeros((24, 24, 3), np.uint8)
@@ -99,6 +107,13 @@ class WindowsResolutionUnchangedTests(unittest.TestCase):
                 for name in names:
                     self.assertEqual(resolve_resource_image(name, BASE), (root / name).resolve(), name)
 
+    def test_direct_loaders_outside_the_catalog_resolve_as_before(self):
+        root = (BASE / "image").resolve()
+        with target("win32", WINDOWS_CONTROLLER):
+            for name in ("nikki/common/crystal_edge_ring.png",):  # daily/starsea.py
+                self.assertTrue((root / name).is_file(), name)
+                self.assertEqual(resolve_resource_image(name, BASE), (root / name).resolve())
+
     def test_escaping_paths_are_still_refused(self):
         with target("win32", WINDOWS_CONTROLLER):
             self.assertIsNone(resolve_resource_image("../../interface.json", BASE))
@@ -125,7 +140,7 @@ class AndroidOverlayTests(unittest.TestCase):
             "A": {"template": "game/a.png", "roi": [0, 0, 10, 10]},
             "B": {"template": "game/b.png", "roi": [1, 1, 10, 10]}}, "materials": {"M": {"type": "plant"}}}))
         (self.android / "image/game/catalog.json").write_text(json.dumps({"assets": {
-            "A": {"template": "game/a.png", "roi": [5, 5, 12, 12]},
+            "A": {"roi": [5, 5, 12, 12]},
             "PhoneOnly": {"template": "game/phone.png", "roi": [0, 0, 8, 8]}}}))
 
     def tearDown(self):
@@ -141,11 +156,32 @@ class AndroidOverlayTests(unittest.TestCase):
                              (self.base / "image/game/missing.png").resolve())
             self.assertIsNone(resolve_resource_image("../../x.png", self.base))
 
+    def test_an_overlay_file_is_not_vetoed_by_the_base_and_an_escaping_overlay_is_skipped(self):
+        outside = self.tmp / "outside.png"
+        write_png(outside, 10)
+        symlink_or_skip(self, self.base / "image/game/c.png", outside)     # base file leaves image/
+        write_png(self.android / "image/game/c.png", 210)                    # overlay holds a proper file
+        symlink_or_skip(self, self.android / "image/game/b.png", outside)  # overlay file leaves image/
+        with target("macos", ADB_CONTROLLER):
+            self.assertEqual(resolve_resource_image("game/c.png", self.base),
+                             (self.android / "image/game/c.png").resolve())
+            self.assertEqual(resolve_resource_image("game/b.png", self.base),
+                             (self.base / "image/game/b.png").resolve())
+
+    def test_a_linked_image_directory_resolves_the_same_in_game_ui_and_ui_template(self):
+        from daily.ui import GameUI
+        shared = self.tmp / "shared-sprites"
+        shutil.move(str(self.base / "image"), str(shared))
+        symlink_or_skip(self, self.base / "image", shared, directory=True)
+        with target("macos", MACOS_CONTROLLER):
+            self.assertEqual(GameUI(None, self.base).asset_path("game/b.png"), (shared / "game/b.png").resolve())
+            self.assertEqual(resolve_resource_image("game/b.png", self.base), (shared / "game/b.png").resolve())
+
     def test_catalog_entries_merge_with_the_top_layer_winning(self):
         from daily.ui import catalog
         with target("macos", ADB_CONTROLLER):
             merged = catalog(self.base)
-        self.assertEqual(merged["assets"]["A"]["roi"], [5, 5, 12, 12])
+        self.assertEqual(merged["assets"]["A"], {"template": "game/a.png", "roi": [5, 5, 12, 12]})  # field by field
         self.assertEqual(merged["assets"]["B"]["roi"], [1, 1, 10, 10])
         self.assertIn("PhoneOnly", merged["assets"])
         self.assertEqual(merged["materials"], {"M": {"type": "plant"}})
@@ -162,7 +198,7 @@ class AndroidOverlayTests(unittest.TestCase):
             frame[10:26, 10:26] = 200  # matches only the phone-layout template's brightness
             box, detail = UITemplateRecognition._match_spec(
                 frame, {"roi": [0, 0, 40, 40], "template": "game/a.png", "gray_limit": [150, 255], "threshold": .9},
-                (self.base / "image").resolve())
+                self.base)
         self.assertIsNotNone(box, detail)
 
 
@@ -175,20 +211,22 @@ from maa.controller import CustomController
 from maa.resource import Resource
 from maa.tasker import Tasker
 
+repo = Path(sys.argv[1])
 tmp = Path(tempfile.mkdtemp(prefix="maanikki-bundles-"))
 try:
-    pattern = np.zeros((24, 24, 3), np.uint8)
-    pattern[4:12, 4:20], pattern[12:20, 4:12] = 255, 128  # the template present in the frame
-    other = np.full((24, 24, 3), 90, np.uint8)
-    for bundle, image in (("base", other), ("android", pattern)):
+    rng = np.random.default_rng(7)
+    present = rng.integers(0, 255, (24, 24, 3), dtype=np.uint8)  # the pattern in the frame
+    absent = rng.integers(0, 255, (24, 24, 3), dtype=np.uint8)   # a different, equally textured pattern
+    for bundle, image in (("base", absent), ("android", present)):
         (tmp / bundle / "pipeline").mkdir(parents=True)
         (tmp / bundle / "image").mkdir()
         cv2.imwrite(str(tmp / bundle / "image" / "mark.png"), image)
     node = {"recognition": "TemplateMatch", "template": "mark.png", "threshold": 0.95, "action": "DoNothing"}
-    (tmp / "base/pipeline/p.json").write_text(json.dumps({"Mark": {**node, "roi": [0, 0, 8, 8]}}))
-    (tmp / "android/pipeline/p.json").write_text(json.dumps({"Mark": {**node, "roi": [0, 0, 64, 64]}}))
+    # Both layers search the whole region where the pattern is; only the image differs between them.
+    (tmp / "base/pipeline/p.json").write_text(json.dumps({"Mark": {**node, "roi": [0, 0, 128, 128]}}))
+    (tmp / "android/pipeline/p.json").write_text(json.dumps({"Mark": {**node, "roi": [0, 0, 120, 120]}}))
     frame = np.zeros((720, 1280, 3), np.uint8)
-    frame[20:44, 20:44] = pattern
+    frame[20:44, 20:44] = present
 
     class Frame(CustomController):
         def connect(self): return True
@@ -204,14 +242,21 @@ try:
     def recognize(bundles):
         resource = Resource()
         for bundle in bundles:
-            assert resource.post_bundle(tmp / bundle).wait().succeeded
+            assert resource.post_bundle(bundle if isinstance(bundle, Path) else tmp / bundle).wait().succeeded
         tasker = Tasker()
         assert tasker.bind(resource, controller)
         detail = tasker.post_task("Mark").wait().get()
         hit = bool(detail and detail.nodes and detail.nodes[-1].recognition and detail.nodes[-1].recognition.hit)
         return resource.get_node_data("Mark")["recognition"]["param"]["roi"], hit
 
-    print(json.dumps({"base": recognize(["base"]), "layered": recognize(["base", "android"])}))
+    outcome = {"base": recognize(["base"]), "layered": recognize(["base", "android"])}
+    (tmp / "android/image/mark.png").unlink()  # control: same layered nodes, no overriding image
+    outcome["layered_without_image"] = recognize(["base", "android"])
+    # The repository's own layer loads on top of the real resources.
+    real = Resource()
+    outcome["real_layers"] = [real.post_bundle(repo / "resource").wait().succeeded,
+                              real.post_bundle(repo / "resource_android").wait().succeeded]
+    print(json.dumps(outcome))
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 """
@@ -225,12 +270,15 @@ class FrameworkLayeringTests(unittest.TestCase):
     def test_the_later_bundle_overrides_nodes_and_same_name_images_when_loaded_before_recognition(self):
         import subprocess
         env = {**os.environ, "MAAFW_BINARY_PATH": str(ROOT / "maafw")}
-        result = subprocess.run([sys.executable, "-I", "-B", "-c", FRAMEWORK_CHECK], capture_output=True,
-                                text=True, timeout=120, env=env, cwd=tempfile.gettempdir())
+        result = subprocess.run([sys.executable, "-I", "-B", "-c", FRAMEWORK_CHECK, str(ROOT)], capture_output=True,
+                                text=True, timeout=300, env=env, cwd=tempfile.gettempdir())
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
         outcome = json.loads(result.stdout.strip().splitlines()[-1])
-        self.assertEqual(outcome["base"], [[0, 0, 8, 8], False])
-        self.assertEqual(outcome["layered"], [[0, 0, 64, 64], True])  # the later bundle's node and image
+        self.assertEqual(outcome["base"], [[0, 0, 128, 128], False])
+        self.assertEqual(outcome["layered"], [[0, 0, 120, 120], True])  # the later bundle's node and image
+        # Without the overriding image the same nodes miss: the hit came from the image, not the region.
+        self.assertEqual(outcome["layered_without_image"], [[0, 0, 120, 120], False])
+        self.assertEqual(outcome["real_layers"], [True, True])
 
 
 if __name__ == "__main__":

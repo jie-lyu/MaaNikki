@@ -226,7 +226,13 @@ def _catalog(layers):
             entries = data.get(name, {})
             if not isinstance(entries, dict):
                 raise ValueError("图像资源索引格式无效，请重新保存截图资源。")
-            value[name] = {**value[name], **entries}
+            merged = dict(value[name])
+            for key, entry in entries.items():
+                # Field by field: an override that only moves the roi keeps the base entry's template.
+                base_entry = merged.get(key)
+                merged[key] = ({**base_entry, **entry} if isinstance(base_entry, dict) and isinstance(entry, dict)
+                               else entry)
+            value[name] = merged
     return value
 
 

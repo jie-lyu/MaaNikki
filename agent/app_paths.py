@@ -69,17 +69,16 @@ def resource_layers(base: Path | None = None) -> tuple[Path, ...]:
 
 
 def resolve_resource_image(relative, base: Path | None = None) -> Path | None:
-    """The image file for ``relative`` (a path under image/) in the topmost layer that has it; with no layer holding
-    it, the base layer's path, exactly as before (existing or not). None when the path leaves image/, so callers
-    keep their own error messages."""
-    chosen = base_path = None
-    for layer in resource_layers(base):
+    """The image file for ``relative`` (a path under image/): the topmost overriding layer that holds it inside its
+    own image/ directory, else the base layer's path exactly as before (existing or not). None when the base path
+    leaves image/, so callers keep their own error messages. An overriding layer whose file is missing or leaves its
+    image/ directory is skipped, never a veto."""
+    layers = resource_layers(base)
+    for layer in reversed(layers[1:]):
         root = (layer / "image").resolve()
         path = (root / relative).resolve()
-        if not path.is_relative_to(root):
-            return None
-        if base_path is None:
-            base_path = path
-        if path.is_file():
-            chosen = path
-    return chosen or base_path
+        if path.is_relative_to(root) and path.is_file():
+            return path
+    root = (layers[0] / "image").resolve()
+    path = (root / relative).resolve()
+    return path if path.is_relative_to(root) else None
