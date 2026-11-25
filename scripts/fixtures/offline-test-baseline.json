@@ -11,6 +11,7 @@
   "test_android_backend.py": {
    "tests": [
     "CapabilityTests.test_no_desktop_window_services",
+    "DeviceFocusCaptureTests.test_a_focus_loss_seen_elsewhere_during_the_capture_discards_the_frame",
     "DeviceFocusCaptureTests.test_a_frame_whose_focus_was_lost_by_the_end_is_discarded",
     "DeviceFocusCaptureTests.test_a_frame_with_focus_before_and_after_is_kept",
     "DeviceFocusCaptureTests.test_without_focus_before_it_waits_and_captures_only_then",
@@ -18,10 +19,13 @@
     "MessageAndSessionTests.test_an_unconfirmed_touch_stops_the_session",
     "MessageAndSessionTests.test_messages_pin_their_node_on_android",
     "NoKeyboardOrMouseTests.test_a_focus_loss_observed_after_the_capture_cancels_a_tap_without_a_token",
+    "NoKeyboardOrMouseTests.test_a_focus_loss_seen_by_another_runtime_makes_frames_stale",
+    "NoKeyboardOrMouseTests.test_a_fresh_capture_does_not_authorise_a_target_from_an_older_frame",
     "NoKeyboardOrMouseTests.test_a_swipe_is_sent_fully_specified",
     "NoKeyboardOrMouseTests.test_a_tap_is_dispatched_with_device_focus_confirmed_right_before",
+    "NoKeyboardOrMouseTests.test_a_tap_needs_its_source_frame",
     "NoKeyboardOrMouseTests.test_a_tap_without_device_focus_or_on_an_old_frame_is_cancelled",
-    "NoKeyboardOrMouseTests.test_an_unconfirmed_tap_halts_every_runtime_of_the_run",
+    "NoKeyboardOrMouseTests.test_an_unconfirmed_tap_halts_every_runtime_and_the_queue",
     "NoKeyboardOrMouseTests.test_child_tasks_do_not_run",
     "NoKeyboardOrMouseTests.test_every_key_is_refused",
     "NoKeyboardOrMouseTests.test_integer_key_actions_are_refused_before_dispatch",

@@ -42,7 +42,8 @@ def check_touch_fields(action, fields) -> None:
         x, y = value[0], value[1]
         if len(value) == 4:
             w, h = value[2], value[3]
-            inside = w > 0 and h > 0 and 0 <= x and x + w <= width and 0 <= y and y + h <= height
+            # A rectangle is tapped at its rounded centre; keep it off the last row and column so that never rounds out.
+            inside = w > 0 and h > 0 and 0 <= x and x + w < width and 0 <= y and y + h < height
         else:
             inside = 0 <= x < width and 0 <= y < height
         if not inside:

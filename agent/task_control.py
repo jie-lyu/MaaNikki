@@ -47,7 +47,8 @@ def message_override(focus):
     node = {"focus": focus}
     from host import capabilities, game_backend
     if capabilities(game_backend()).touch_actions_only:
-        node.update(recognition="DirectHit", action="DoNothing", next=[], interrupt=[], on_error=[])
+        # (MaaFramework 5.16.1 rejects an "interrupt" field here, even empty.)
+        node.update(recognition="DirectHit", action="DoNothing", next=[], on_error=[])
     return {"MaaNikki_Daily_Message": node}
 
 

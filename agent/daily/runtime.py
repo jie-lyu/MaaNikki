@@ -35,8 +35,39 @@ def native_key_fields(action, fields):
     return {**fields, "key": [native_key(item) for item in key] if isinstance(key, list) else native_key(key)}
 
 
-# Android: an unconfirmed touch outside any task session (scripts, tests) stops every Runtime of this process.
-_INPUT_UNCONFIRMED_WITHOUT_SESSION = False
+class _AndroidInputState:
+    """Process-wide state of input to an Android device (only ever changed on that target).
+
+    - halted: a touch was not confirmed released; nothing more is sent by this process (every Runtime, every
+      session, every queued task) until MaaNikki is restarted.
+    - epoch: advanced by every observed loss of device focus, by any Runtime; a frame captured before it is stale.
+    - marks: (focus generation, epoch) recorded for each captured frame, so a tap is checked against the frame it
+      was decided on, not against whatever was captured last.
+    - lock: one touch at a time, with the halt and the marks checked inside it right before dispatch.
+    """
+
+    def __init__(self):
+        import threading
+        self.lock = threading.RLock()
+        self.halted = False
+        self.epoch = 0
+        self._marks = {}
+
+    def observed_loss(self):
+        with self.lock:
+            self.epoch += 1
+
+    def mark(self, frame, generation):
+        with self.lock:
+            self._marks = {key: value for key, value in self._marks.items() if value[0]() is not None}
+            self._marks[id(frame)] = (weakref.ref(frame), (generation, self.epoch))
+
+    def marks_of(self, frame):
+        entry = self._marks.get(id(frame)) if frame is not None else None
+        return entry[1] if entry is not None and entry[0]() is frame else None
+
+
+_ANDROID = _AndroidInputState()
 
 
 def _android_dispatch(context, action, fields):
@@ -86,9 +117,9 @@ class Runtime:
     def stopped(self):
         if self.navigation_halted:
             return True
-        session = active_session()
-        if session is None and _INPUT_UNCONFIRMED_WITHOUT_SESSION:
+        if _ANDROID.halted:
             return True
+        session = active_session()
         return session.stopped() if session else self.context.tasker.stopping
 
     def background_mode(self):
@@ -401,11 +432,14 @@ class Runtime:
                     fields.get("begin"), fields.get("end"), fields.get("duration", 300), capture_size=cap_size))
         return None
 
-    def action(self, action, *, ui_click=True, focus_generation=None, **fields):
+    def action(self, action, *, ui_click=True, focus_generation=None, source_frame=None, **fields):
         touch_only = capabilities(game_backend()).touch_actions_only
         if touch_only:
             from host.android import check_touch_fields
             check_touch_fields(action, {k: v for k, v in fields.items() if k != "window_cursor_pos"})
+            if source_frame is None:
+                from host import UnsupportedInput
+                raise UnsupportedInput("安卓模拟器上的点击必须说明它依据的是哪一张截图，这一步暂不支持。")
         if self.stopped:
             return False
         self.check_focus()
@@ -486,7 +520,7 @@ class Runtime:
             # Never dispatch fallback Seize actions when the game is unfocused.
             inputs.check(require_foreground=True)
         if touch_only:
-            return self._dispatch_touch(action, fields, focus_generation)
+            return self._dispatch_touch(action, fields, focus_generation, source_frame)
         fields = native_key_fields(action, fields)
         with measure("input.action"):
             result = self.context.run_action("MaaNikki_Daily_Action", pipeline_override={
@@ -496,45 +530,53 @@ class Runtime:
             return self.pause(.1) and self.ui.unhover()
         return succeeded
 
-    def _dispatch_touch(self, action, fields, focus_generation):
-        """Android: the last checks and the dispatch of a validated tap or swipe."""
+    def _dispatch_touch(self, action, fields, focus_generation, source_frame):
+        """Android: the last checks and the dispatch of a validated tap or swipe decided on ``source_frame``."""
         from task_control import ForegroundChanged
-        # The frame the decision was made on must still be current: no focus loss observed since the last capture
-        # (a session's focus generation, or this Runtime's own device-focus readings), and the caller's token too.
         self.check_focus()
         if focus_generation is not None and self._focus_generation != focus_generation:
             raise ForegroundChanged("前台切换后已取消本次输入，等待重新核对")
-        if getattr(self, "_capture_marks", None) != (self._focus_generation, self._device_focus_epoch()):
-            raise ForegroundChanged("截图之后焦点变过，已取消本次输入，等待重新核对")
+        # The frame the decision was made on must have been captured with device focus confirmed, and no focus loss
+        # may have been observed since (by any Runtime), nor a session resume.
+        if _ANDROID.marks_of(source_frame) != (self._focus_generation, _ANDROID.epoch):
+            raise ForegroundChanged("依据的截图已经过时（之后焦点变过），已取消本次输入，等待重新核对")
         if not self._device_focus_now():
             raise ForegroundChanged("设备上游戏不在前台，已取消本次输入，等待重新核对")
-        try:
-            with measure("input.action"):
-                result = _android_dispatch(self.context, action, fields)
-            succeeded = result is not None and bool(result.success)
-        except BaseException:
-            self._halt_unconfirmed()
-            raise
-        if not succeeded:
-            self._halt_unconfirmed()
-            from host import InputUnconfirmed
-            raise InputUnconfirmed(f"安卓模拟器上的「{action}」没有确认完成（可能留下按住的触点），任务已停止，请检查模拟器。")
+        with _ANDROID.lock:
+            # Inside the lock, right before sending: another caller may have halted input or seen focus go.
+            if _ANDROID.halted or self.stopped:
+                return False
+            if _ANDROID.marks_of(source_frame) != (self._focus_generation, _ANDROID.epoch):
+                raise ForegroundChanged("依据的截图已经过时（之后焦点变过），已取消本次输入，等待重新核对")
+            try:
+                with measure("input.action"):
+                    result = _android_dispatch(self.context, action, fields)
+                succeeded = result is not None and bool(result.success)
+            except BaseException:
+                self._halt_unconfirmed()
+                raise
+            if not succeeded:
+                self._halt_unconfirmed()
+                from host import InputUnconfirmed
+                raise InputUnconfirmed(f"安卓模拟器上的「{action}」没有确认完成（可能留下按住的触点），已停止所有输入；"
+                                       "请检查模拟器后重新启动 MaaNikki。")
         if action == "Click":
             return self.pause(.1) and self.ui.unhover()
         return True
 
     def _halt_unconfirmed(self):
-        """The touch may have gone down without coming up: nothing more is sent in this run, by any Runtime."""
-        global _INPUT_UNCONFIRMED_WITHOUT_SESSION
+        """The touch may have gone down without coming up: nothing more is sent by this process, and the tasker's
+        queue is stopped so later tasks of the batch do not start."""
+        with _ANDROID.lock:
+            _ANDROID.halted = True
         self.navigation_halted = True
         session = active_session()
         if session is not None:
             session.input_unconfirmed = True
-        else:
-            _INPUT_UNCONFIRMED_WITHOUT_SESSION = True
-
-    def _device_focus_epoch(self):
-        return getattr(self, "_focus_epoch", 0)
+        try:
+            self.context.tasker.post_stop()
+        except Exception:
+            pass
 
     def key(self, value, delay=0.35):
         # Integer keys are physical UI shortcuts / legacy physical recordings.
@@ -604,7 +646,7 @@ class Runtime:
         target = inputs if inputs is not None else self._sessionless_target()
         focused = bool(target.foreground())
         if not focused:
-            self._focus_epoch = self._device_focus_epoch() + 1
+            _ANDROID.observed_loss()
         return focused
 
     def _device_focus_ready(self):
@@ -619,7 +661,7 @@ class Runtime:
             target = self._sessionless_target()
             if target.foreground():
                 return True
-            self._focus_epoch = self._device_focus_epoch() + 1  # an observed loss: frames before it are stale
+            _ANDROID.observed_loss()  # frames captured before this are stale
             if not target.exists():
                 from navigation.models import GameWindowClosed
                 raise GameWindowClosed("模拟器里的游戏已经退出。")
@@ -627,7 +669,7 @@ class Runtime:
             return False
         if inputs.foreground():
             return True
-        self._focus_epoch = self._device_focus_epoch() + 1
+        _ANDROID.observed_loss()
         inputs.check(require_foreground=True)
         return False
 
@@ -731,6 +773,7 @@ class Runtime:
             if device_focus and not self._device_focus_ready():
                 continue
             obs_gen = self.observation_generation()
+            epoch = _ANDROID.epoch
             with measure("capture"):
                 with measure("capture.post"):
                     result = self.controller.post_screencap()
@@ -762,8 +805,9 @@ class Runtime:
             if obs_gen != self.observation_generation():
                 count("capture.discarded")
                 continue
-            if device_focus and image is not None and image.size and not self._device_focus_ready():
-                count("capture.discarded")  # another app may have been in front on the device during the capture
+            if device_focus and image is not None and image.size and (
+                    not self._device_focus_ready() or _ANDROID.epoch != epoch):
+                count("capture.discarded")  # focus was (or was seen) away from the game while capturing
                 continue
             if image is None or image.size == 0:
                 inputs = self._active_inputs()
@@ -783,7 +827,7 @@ class Runtime:
             self.evidence.remember_frame(image, self._focus_generation)
             self.validate_frame(image)
             if device_focus:
-                self._capture_marks = (self._focus_generation, self._device_focus_epoch())
+                _ANDROID.mark(image, self._focus_generation)
             return image
 
     def recognize(self, node, fields=None, image=None):

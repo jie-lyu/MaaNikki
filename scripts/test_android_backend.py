@@ -255,7 +255,18 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(all(c.startswith(("dumpsys window", "pidof")) for c in controller.commands))
 
 
-class NoKeyboardOrMouseTests(unittest.TestCase):
+class FreshAndroidState(unittest.TestCase):
+    """Every test starts with fresh process-wide Android input state (halt flag, focus epoch, frame marks)."""
+
+    def setUp(self):
+        import daily.runtime as runtime_module
+        self.runtime_module = runtime_module
+        patcher = patch.object(runtime_module, "_ANDROID", runtime_module._AndroidInputState())
+        self.state = patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class NoKeyboardOrMouseTests(FreshAndroidState):
     """No key code, mouse button or relative move reaches the device from an Android run."""
 
     def test_every_key_is_refused(self):
@@ -297,9 +308,12 @@ class NoKeyboardOrMouseTests(unittest.TestCase):
         rt.context.run_action.assert_not_called()
 
     def tap_runtime(self, *, focused=True, success=True):
+        import numpy as np
         rt = self.runtime()
         rt.context.run_action_direct = Mock(return_value=SimpleNamespace(success=success))
-        rt._capture_marks = (0, 0)  # the decision's frame, captured at focus generation 0 and epoch 0
+        rt.context.tasker.post_stop = Mock()
+        self.frame = np.zeros((720, 1280, 3), np.uint8)
+        self.state.mark(self.frame, 0)  # the decision's frame, captured at focus generation 0
         rt._target_point = lambda target, name: (target[0] + target[2] // 2, target[1] + target[3] // 2)
         rt._validate_pointer_targets = Mock(return_value=(1280, 720))
         rt.pause = Mock(return_value=True)
@@ -310,7 +324,7 @@ class NoKeyboardOrMouseTests(unittest.TestCase):
     def test_a_tap_is_dispatched_with_device_focus_confirmed_right_before(self):
         rt = self.tap_runtime()
         with android_run(), patch("daily.runtime.active_session", return_value=None):
-            self.assertTrue(rt.action("Click", target=[100, 200, 40, 20]))
+            self.assertTrue(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
         rt.context.run_action.assert_not_called()  # no pipeline node: nothing inherited
         action, param = rt.context.run_action_direct.call_args.args[:2]
         self.assertEqual(action, "Click")
@@ -320,12 +334,45 @@ class NoKeyboardOrMouseTests(unittest.TestCase):
     def test_a_swipe_is_sent_fully_specified(self):
         rt = self.tap_runtime()
         with android_run(), patch("daily.runtime.active_session", return_value=None):
-            self.assertTrue(rt.action("Swipe", begin=[100, 100], end=[300, 100], duration=300))
+            self.assertTrue(rt.action("Swipe", begin=[100, 100], end=[300, 100], duration=300, source_frame=self.frame))
         action, param = rt.context.run_action_direct.call_args.args[:2]
         self.assertEqual(action, "Swipe")
         self.assertEqual((param.begin, param.end, param.duration, param.only_hover, param.contact,
                           param.begin_offset, param.end_offset),
                          ([100, 100], [[300, 100]], [300], False, 0, (0, 0, 0, 0), [(0, 0, 0, 0)]))
+
+    def test_a_tap_needs_its_source_frame(self):
+        rt = self.tap_runtime()
+        with android_run(), patch("daily.runtime.active_session", return_value=None), \
+                self.assertRaises(host.UnsupportedInput):
+            rt.action("Click", target=[100, 200, 40, 20])
+        rt.context.run_action_direct.assert_not_called()
+
+    def test_a_fresh_capture_does_not_authorise_a_target_from_an_older_frame(self):
+        import numpy as np
+        from task_control import ForegroundChanged
+        rt = self.tap_runtime()
+        old = self.frame
+        self.state.observed_loss()                 # seen by any Runtime
+        new = np.ones((720, 1280, 3), np.uint8)
+        self.state.mark(new, 0)                     # captured after focus came back
+        with android_run(), patch("daily.runtime.active_session", return_value=None):
+            with self.assertRaises(ForegroundChanged):
+                rt.action("Click", target=[100, 200, 40, 20], source_frame=old)
+            self.assertTrue(rt.action("Click", target=[100, 200, 40, 20], source_frame=new))
+        self.assertEqual(rt.context.run_action_direct.call_count, 1)
+
+    def test_a_focus_loss_seen_by_another_runtime_makes_frames_stale(self):
+        from task_control import ForegroundChanged
+        rt = self.tap_runtime()
+        other = self.tap_runtime()
+        other._device_target.foreground = Mock(return_value=False)
+        frame = self.frame
+        self.state.mark(frame, 0)
+        with android_run(), patch("daily.runtime.active_session", return_value=None):
+            self.assertFalse(other._device_focus_now())
+            with self.assertRaises(ForegroundChanged):
+                rt.action("Click", target=[100, 200, 40, 20], source_frame=frame)
 
     def test_a_focus_loss_observed_after_the_capture_cancels_a_tap_without_a_token(self):
         from task_control import ForegroundChanged
@@ -336,7 +383,7 @@ class NoKeyboardOrMouseTests(unittest.TestCase):
                 patch("daily.runtime.wall_time.sleep"):
             self.assertFalse(rt._device_focus_ready())
             with self.assertRaises(ForegroundChanged):
-                rt.action("Click", target=[100, 200, 40, 20])
+                rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
         rt.context.run_action_direct.assert_not_called()
 
     def test_a_tap_without_device_focus_or_on_an_old_frame_is_cancelled(self):
@@ -344,29 +391,31 @@ class NoKeyboardOrMouseTests(unittest.TestCase):
         rt = self.tap_runtime(focused=False)
         with android_run(), patch("daily.runtime.active_session", return_value=None), \
                 self.assertRaises(ForegroundChanged):
-            rt.action("Click", target=[100, 200, 40, 20])
+            rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
         rt = self.tap_runtime()
         rt._focus_generation = 8  # the decision was made on generation 7
         with android_run(), patch("daily.runtime.active_session", return_value=None), \
                 self.assertRaises(ForegroundChanged):
-            rt.action("Click", target=[100, 200, 40, 20], focus_generation=7)
+            rt.action("Click", target=[100, 200, 40, 20], focus_generation=7, source_frame=self.frame)
         rt.context.run_action_direct.assert_not_called()
 
-    def test_an_unconfirmed_tap_halts_every_runtime_of_the_run(self):
-        import daily.runtime as runtime_module
+    def test_an_unconfirmed_tap_halts_every_runtime_and_the_queue(self):
         for failure in ("rejected", "raised"):
             with self.subTest(failure=failure), \
-                    patch.object(runtime_module, "_INPUT_UNCONFIRMED_WITHOUT_SESSION", False):
+                    patch.object(self.runtime_module, "_ANDROID", self.runtime_module._AndroidInputState()) as state:
+                self.state = state
                 rt = self.tap_runtime(success=False)
                 if failure == "raised":
                     rt.context.run_action_direct.side_effect = RuntimeError("result unreadable")
                 other = self.tap_runtime()
                 with android_run(), patch("daily.runtime.active_session", return_value=None):
                     with self.assertRaises((host.InputUnconfirmed, RuntimeError)):
-                        rt.action("Swipe", begin=[100, 100], end=[300, 100], duration=300)
+                        rt.action("Swipe", begin=[100, 100], end=[300, 100], duration=300, source_frame=self.frame)
+                    self.assertTrue(state.halted)
                     self.assertTrue(rt.stopped)
                     self.assertTrue(other.stopped)  # another Runtime in the same process
-                    self.assertFalse(other.action("Click", target=[10, 10, 4, 4]))
+                    self.assertFalse(other.action("Click", target=[10, 10, 4, 4], source_frame=self.frame))
+                rt.context.tasker.post_stop.assert_called_once()  # later tasks of the batch do not start
                 other.context.run_action_direct.assert_not_called()
         session = SimpleNamespace(input_unconfirmed=False)
         rt = self.tap_runtime(success=False)
@@ -384,11 +433,12 @@ class NoKeyboardOrMouseTests(unittest.TestCase):
                                    ("Click", {"target": [1280, 10]}),
                                    ("Click", {"target": [20, 720]}),
                                    ("Click", {"target": [5, 5, 0, 10]}),
+                                   ("Click", {"target": [1279, 719, 1, 1]}),
                                    ("Click", {"target": [-1, 5]}),
                                    ("Click", {}),
                                    ("Swipe", {"begin": [1, 1], "end": [5, 5], "duration": -1})):
                 with self.subTest(action=action, fields=fields), self.assertRaises(host.UnsupportedInput):
-                    rt.action(action, **fields)
+                    rt.action(action, source_frame=self.frame, **fields)
         rt.context.run_action_direct.assert_not_called()
 
     def test_child_tasks_do_not_run(self):
@@ -464,7 +514,7 @@ class NoKeyboardOrMouseTests(unittest.TestCase):
             inputs.native.relative_move(5, 0)
 
 
-class DeviceFocusCaptureTests(unittest.TestCase):
+class DeviceFocusCaptureTests(FreshAndroidState):
     """Runtime keeps a frame only when the game had focus on the device right before and right after it."""
 
     def runtime(self, focus):
@@ -502,13 +552,27 @@ class DeviceFocusCaptureTests(unittest.TestCase):
         inputs.check.assert_called_once_with(require_foreground=True)
         self.assertEqual(rt.controller.post_screencap.call_count, 1)
 
+    def test_a_focus_loss_seen_elsewhere_during_the_capture_discards_the_frame(self):
+        rt, inputs = self.runtime([True, True, True, True])
+        original = rt.controller.post_screencap.side_effect
+
+        def capture_while_another_runtime_sees_the_launcher():
+            if rt.controller.post_screencap.call_count == 1:
+                self.state.observed_loss()
+            return original()
+        rt.controller.post_screencap.side_effect = capture_while_another_runtime_sees_the_launcher
+        with android_run(), patch("daily.runtime.active_session", return_value=None):
+            image = rt._capture()
+        self.assertEqual(int(image[0, 0, 0]), 2)
+        self.assertEqual(self.state.marks_of(image), (0, 1))
+
     def test_a_frame_whose_focus_was_lost_by_the_end_is_discarded(self):
         image, rt, inputs = self.capture([True, False, True, True])
         self.assertEqual(int(image[0, 0, 0]), 2)  # the first frame was thrown away
         self.assertEqual(rt.controller.post_screencap.call_count, 2)
 
 
-class SessionlessCaptureTests(unittest.TestCase):
+class SessionlessCaptureTests(FreshAndroidState):
     def test_without_a_session_capture_still_needs_a_positive_focus_reading(self):
         import numpy as np
         from daily.runtime import Runtime
@@ -539,7 +603,7 @@ class SessionlessCaptureTests(unittest.TestCase):
         self.assertGreaterEqual(sum("mCurrentFocus" in c for c in controller.commands), 3)
 
 
-class SessionlessExitTests(unittest.TestCase):
+class SessionlessExitTests(FreshAndroidState):
     def test_sessionless_capture_ends_when_the_game_has_exited(self):
         from daily.runtime import Runtime
         from navigation.models import GameWindowClosed
@@ -564,7 +628,7 @@ class MessageAndSessionTests(unittest.TestCase):
         with android_run():
             node = message_override({"Node.Action.Starting": "x"})["MaaNikki_Daily_Message"]
         self.assertEqual(node, {"focus": {"Node.Action.Starting": "x"}, "recognition": "DirectHit",
-                                "action": "DoNothing", "next": [], "interrupt": [], "on_error": []})
+                                "action": "DoNothing", "next": [], "on_error": []})
 
     def test_an_unconfirmed_touch_stops_the_session(self):
         from task_control import ForegroundSession
