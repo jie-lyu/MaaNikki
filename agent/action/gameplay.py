@@ -73,6 +73,13 @@ class GameplayAction(CustomAction):
                 from daily.mailbox import Mailbox
                 return Mailbox(runtime).run()
             if kind == "redeem_codes":
+                from host import capabilities, game_backend
+                if capabilities(game_backend()).touch_actions_only:
+                    # The phone layout has its own flow, record and text input (Windows does not ship it). It
+                    # branches before RedeemCodes is built: that reads the UID the PC way (the HUD footer, then
+                    # ui.main()) for the account record, and its run() reads and writes the host clipboard.
+                    from host.android import redeem
+                    return redeem.run(runtime) and not runtime.stopped
                 from daily.redeem_codes import RedeemCodes
                 return RedeemCodes(runtime).run()
             if kind == "home":

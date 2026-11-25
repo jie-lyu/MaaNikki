@@ -221,7 +221,7 @@ class DeviceInputState:
             return False
         import datetime as _dt
         entry = {"time": _dt.datetime.now().astimezone().isoformat(timespec="milliseconds"), "pid": os.getpid(),
-                 "action": action, **{key: fields[key] for key in ("target", "begin", "end", "duration") if key in fields},
+                 "action": action, **{key: fields[key] for key in ("target", "begin", "end", "duration", "text") if key in fields},
                  "outcome": outcome}
         try:
             path = self.root / "logs" / "android-input.jsonl"

@@ -16,7 +16,7 @@
   "MaaNikki_Android_Forbidden": {
     "recognition": "OCR",
     "roi": [0, 0, 1280, 720],
-    "expected": "删除|购买|充值|共鸣|确认退出|解锁.*颂歌|恢复默认|¥|￥|兑换钻石|获取|开通",
+    "expected": "删除|购买|充值|共鸣|确认退出|解锁.*颂歌|恢复默认|¥|￥|兑换钻石|获取|开通|退出登录|切换账号|注销",
     "action": "DoNothing"
   }
 }

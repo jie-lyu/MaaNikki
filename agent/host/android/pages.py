@@ -14,7 +14,7 @@ from host.android import actions
 FORBIDDEN = "MaaNikki_Android_Forbidden"
 FORBIDDEN_MARGIN = 40  # pixels around the tap point that may not hold a forbidden word
 # The words of MaaNikki_Android_Forbidden's ``expected`` (a test keeps the two equal), to locate a word inside a row.
-FORBIDDEN_WORDS = "删除|购买|充值|共鸣|确认退出|解锁.*颂歌|恢复默认|¥|￥|兑换钻石|获取|开通"
+FORBIDDEN_WORDS = "删除|购买|充值|共鸣|确认退出|解锁.*颂歌|恢复默认|¥|￥|兑换钻石|获取|开通|退出登录|切换账号|注销"
 HUD_LABELS = tuple(actions.HUD_ROW_TEXT.split("|"))
 
 
@@ -86,12 +86,20 @@ def nothing_recognised(screen, recognize) -> bool:
     return True
 
 
-def _target(screen, recognize, title, node, override, exact=False):
-    if not is_page(screen, title) or (exact and screen.title != title):
-        raise PageMismatch(f"当前画面不是「{title}」页面")
+def is_modal(screen, title: str) -> bool:
+    return screen is not None and screen.kind == "modal" and screen.title.startswith(title)
+
+
+SCREEN_WORDS = {"page": "页面", "modal": "弹窗"}
+
+
+def _target(screen, recognize, title, node, override, exact=False, kind="page"):
+    if not (is_page(screen, title) if kind == "page" else is_modal(screen, title)) \
+            or (exact and screen.title != title):
+        raise PageMismatch(f"当前画面不是「{title}」{SCREEN_WORDS[kind]}")
     result = recognize(node, override) if override else recognize(node)
     if not actions._hit(result):
-        raise PageMismatch(f"「{title}」页面上找不到要点的东西（{node}）")
+        raise PageMismatch(f"「{title}」{SCREEN_WORDS[kind]}上找不到要点的东西（{node}）")
     return actions._box(result)
 
 
@@ -191,8 +199,9 @@ def _forbidden_near(recognize, box) -> str | None:
 
 
 def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, verify=None, accept=None,
-                retry: bool = True, exact: bool = False) -> bool:
-    """Tap ``node`` on the page titled ``title`` (decided and confirmed on fresh frames). ``verify(frame)`` and
+                retry: bool = True, exact: bool = False, kind: str = "page") -> bool:
+    """Tap ``node`` on the page titled ``title`` (decided and confirmed on fresh frames; ``kind="modal"``: on the
+    recognised modal named ``title`` instead, e.g. 兑换奖励, with the same rules). ``verify(frame)`` and
     ``accept(frame, recognize)``, when given, must hold on both of them too (e.g. a button that is enabled, the whole
     expected state of the page). False when the run stopped; PageMismatch (nothing sent) when the page, its target,
     ``verify`` or ``accept`` fails on the deciding frame; GuardRefusal when the point is next to a forbidden word.
@@ -211,7 +220,7 @@ def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, 
         if decided is None:
             return False
         try:
-            target = _target(screen, recognize, title, node, override, exact)
+            target = _target(screen, recognize, title, node, override, exact, kind)
         except PageMismatch as error:
             mismatch(str(error), screen, decided, recognize)
             raise
@@ -219,27 +228,27 @@ def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, 
         if word:
             raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止", decided)
         if (verify is not None and not verify(decided)) or (accept is not None and not accept(decided, recognize)):
-            mismatch(f"「{title}」页面上要点的东西状态不对", screen, decided, recognize)
-            raise PageMismatch(f"「{title}」页面上要点的东西状态不对")
+            mismatch(f"「{title}」{SCREEN_WORDS[kind]}上要点的东西状态不对", screen, decided, recognize)
+            raise PageMismatch(f"「{title}」{SCREEN_WORDS[kind]}上要点的东西状态不对")
         if not rt._frame_still_valid(decided):
             continue
         fresh, confirming, recognize_b = screen_now(rt)
         if confirming is None:
             return False
         try:
-            confirmed = _target(fresh, recognize_b, title, node, override, exact)
+            confirmed = _target(fresh, recognize_b, title, node, override, exact, kind)
         except PageMismatch as error:
             mismatch(f"确认时{error}", fresh, confirming, recognize_b)
             continue
         if fresh.title != screen.title or not actions._near(confirmed, target):
-            mismatch(f"确认时「{title}」页面上要点的东西不在原处", fresh, confirming, recognize_b)
+            mismatch(f"确认时「{title}」{SCREEN_WORDS[kind]}上要点的东西不在原处", fresh, confirming, recognize_b)
             continue
         word = _forbidden_near(recognize_b, confirmed)
         if word:
             raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止", confirming)
         if (verify is not None and not verify(confirming)) or \
                 (accept is not None and not accept(confirming, recognize_b)):
-            mismatch(f"确认时「{title}」页面上要点的东西状态不对", fresh, confirming, recognize_b)
+            mismatch(f"确认时「{title}」{SCREEN_WORDS[kind]}上要点的东西状态不对", fresh, confirming, recognize_b)
             continue
         if not (rt._frame_still_valid(decided) and rt._frame_still_valid(confirming)):
             continue
@@ -490,3 +499,106 @@ def tap_on_layer(rt, what: str, accept, point, *, delay: float = .5) -> bool:
             continue
         return rt.pause(delay)
     raise PageMismatch(f"连续 {rt.TOUCH_KEY_ATTEMPTS} 次没能在稳定的画面上确认{what}（焦点在变）")
+
+
+TEXT_ACTION = "InputText"  # how a text input is named in logs/android-input.jsonl
+
+
+def input_text_on_screen(rt, text: str, what: str, accept) -> bool:
+    """Type ``text`` into the focused field of a recognised screen through the framework's text input (MaaTouch: it
+    puts the text on the device's clipboard and sends a paste key; never the host clipboard, `input text` or an
+    in-game paste button). Text input is not a touch, but it is input and follows the same rules: decided on a fresh
+    focus-confirmed frame that ``accept(screen, frame, recognize)`` takes (the caller's whole expected state, e.g. the
+    modal recognised, its field focused and empty), confirmed on a second fresh frame that it also takes, both frames
+    still valid, and sent with the confirming frame as its source through send_text (logged intent first, refused
+    when a stop is requested or input is halted). False when the run stopped or the input was not sent;
+    FrameMismatch (nothing sent, no second attempt) with the first frame that ``accept`` refuses. Only a frame voided
+    by a focus change is decided again. Whether the field then holds ``text`` is for the caller to read back."""
+    from task_control import ForegroundChanged
+    for _attempt in range(rt.TOUCH_KEY_ATTEMPTS):
+        screen, decided, recognize = screen_now(rt)
+        if decided is None:
+            return False
+        if not rt._frame_still_valid(decided):
+            continue
+        if not accept(screen, decided, recognize):
+            raise FrameMismatch(f"要输入文字时画面不是{what}", screen, decided, recognize)
+        fresh, confirming, recognize_b = screen_now(rt)
+        if confirming is None:
+            return False
+        if not (rt._frame_still_valid(decided) and rt._frame_still_valid(confirming)):
+            continue
+        if not accept(fresh, confirming, recognize_b):
+            raise FrameMismatch(f"确认输入文字时画面已经不是{what}", fresh, confirming, recognize_b)
+        try:
+            return send_text(rt, text, confirming)
+        except ForegroundChanged:
+            continue
+    raise PageMismatch(f"连续 {rt.TOUCH_KEY_ATTEMPTS} 次没能在稳定的画面上确认{what}（焦点在变）")
+
+
+def send_text(rt, text: str, source_frame) -> bool:
+    """The last checks and the dispatch of one text input decided on ``source_frame``, in the order of a touch
+    (Runtime._dispatch_touch): the frame's marks still current; under the input lock, nothing halted or stopping;
+    the device's reading taken with the frame reserved as for a touch (config/android-input/touch.json, so a
+    stopper waits for it and an interrupted input is left for the runner to check), the intent logged to
+    logs/android-input.jsonl ("sending"; not sent when that line cannot be written), then no contact held when the
+    frame was captured, the game focused on the device now, the frame still current, no stop and no stop request;
+    then Controller.post_input_text and its outcome logged. A text input has no lift to confirm (it is a paste key,
+    no contact): the reservation is removed once the framework reports it done. A failure or an exception halts all
+    input and leaves the reservation (as an unconfirmed touch does): what reached the field is unknown."""
+    from host import InputUnconfirmed, UnsupportedInput, device_input
+    from task_control import ForegroundChanged
+    rt.check_focus()
+    state = device_input()
+    if state.marks_of(source_frame) != (rt._focus_generation, state.epoch):
+        raise ForegroundChanged("依据的截图已经过时（之后焦点变过），已取消本次文字输入，等待重新核对")
+    fields = {"text": text}
+    with state.lock:
+        if state.halted or rt.stopped:
+            return False
+        target = rt._sessionless_target()
+        before = state.touch_of(source_frame)
+        booted = getattr(before, "boot_id", None)
+        try:
+            state.begin_touch({"serial": target.serial, "boot_id": booted} if booted else None)
+        except BaseException:
+            if state.halted:
+                rt._halt_unconfirmed()
+            raise
+        sent = intent = False
+        try:
+            if not state.record_touch(TEXT_ACTION, fields, "sending"):
+                raise UnsupportedInput("无法写入安卓模拟器的输入记录，这次文字输入没有发送。")
+            intent = True
+            if state.halted or rt.stopped:
+                return False
+            if before is None or before.state != "none":
+                rt._halt_unconfirmed()
+                raise InputUnconfirmed("安卓模拟器上还有按住的触点（或读不出设备的触摸状态），文字没有输入，已停止所有输入；"
+                                       "请检查模拟器后重新启动 MaaNikki。")
+            if not rt._device_focus_now():
+                raise ForegroundChanged("设备上游戏不在前台，已取消本次文字输入，等待重新核对")
+            if state.marks_of(source_frame) != (rt._focus_generation, state.epoch):
+                raise ForegroundChanged("依据的截图已经过时（之后焦点变过），已取消本次文字输入，等待重新核对")
+            if rt._stopped_now() or state.stop_requested():
+                return False
+            sent = True
+            try:
+                succeeded = bool(rt.controller.post_input_text(text).wait().succeeded)
+            except BaseException as error:
+                state.record_touch(TEXT_ACTION, fields, f"raised {type(error).__name__}")
+                rt._halt_unconfirmed()
+                raise
+            state.record_touch(TEXT_ACTION, fields, "sent" if succeeded else "failed")
+        finally:
+            if not sent:
+                if intent:
+                    state.record_touch(TEXT_ACTION, fields, "cancelled")
+                rt._release_touch(state)
+        if not succeeded:
+            rt._halt_unconfirmed()
+            raise InputUnconfirmed("安卓模拟器上的文字输入没有报告完成，输入框里是什么不确定，已停止所有输入；"
+                                   "请检查模拟器后重新启动 MaaNikki。")
+        rt._release_touch(state)
+    return True
