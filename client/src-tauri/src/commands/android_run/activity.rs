@@ -9,10 +9,11 @@
 //! the duration and 0.055 s. The finger stayed down for the whole stretched swipe. (Not yet verified on the device:
 //! see docs/android-support-plan.md「实现和设备验收」.)
 //!
-//! The options: `NSActivityUserInitiatedAllowingIdleSystemSleep` turns App Nap off for the process (and with it the
-//! nap's timer coalescing) without keeping the system or the display awake; `NSActivityLatencyCritical` asks for
-//! precise timers, since the swipe is a train of 10 ms sleeps. Held only from the claim of a run to its retirement, so
-//! the energy cost is bounded by the run.
+//! The options: `NSActivityUserInitiated` turns App Nap off for the process (and with it the nap's timer coalescing)
+//! and keeps the system from idle sleep, so a user who starts the dailies and walks away does not come back to a run
+//! paused by sleep (coordinator's decision, 2026-11-26); the display may still sleep, and closing a laptop lid still
+//! sleeps the Mac and pauses the run. `NSActivityLatencyCritical` asks for precise timers, since the swipe is a train
+//! of 10 ms sleeps. Held only from the claim of a run to its retirement, so the cost is bounded by the run.
 
 use std::sync::Arc;
 
@@ -29,6 +30,12 @@ pub(crate) fn process_activity() -> BeginActivity {
     Arc::new(|| Box::new(ProcessActivity::begin()) as Activity)
 }
 
+/// No App Nap, no idle system sleep, precise timers; display sleep stays allowed.
+fn activity_options() -> objc2_foundation::NSActivityOptions {
+    use objc2_foundation::NSActivityOptions;
+    NSActivityOptions::UserInitiated | NSActivityOptions::LatencyCritical
+}
+
 struct ProcessActivity {
     token: objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2::runtime::NSObjectProtocol>>,
 }
@@ -39,13 +46,13 @@ unsafe impl Send for ProcessActivity {}
 
 impl ProcessActivity {
     fn begin() -> Self {
-        use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
-        let options = NSActivityOptions::UserInitiatedAllowingIdleSystemSleep | NSActivityOptions::LatencyCritical;
+        use objc2_foundation::{NSProcessInfo, NSString};
+        let options = activity_options();
         let token = objc2::rc::autoreleasepool(|_| {
             let reason = NSString::from_str("MaaNikki is running tasks on an Android emulator");
             NSProcessInfo::processInfo().beginActivityWithOptions_reason(options, &reason)
         });
-        info!("[android_run] process activity begun (App Nap off, latency critical) for the Android run");
+        info!("[android_run] process activity begun (App Nap off, idle system sleep off, latency critical) for the Android run");
         ProcessActivity { token }
     }
 }
@@ -67,5 +74,16 @@ mod tests {
     fn the_process_activity_begins_and_ends() {
         let activity = (super::process_activity())();
         drop(activity);
+    }
+
+    /// The run keeps the system from idle sleep but lets the display sleep.
+    #[test]
+    fn the_activity_blocks_idle_system_sleep_but_not_display_sleep() {
+        use objc2_foundation::NSActivityOptions;
+        let options = super::activity_options();
+        assert!(options.contains(NSActivityOptions::IdleSystemSleepDisabled));
+        assert!(options.contains(NSActivityOptions::UserInitiatedAllowingIdleSystemSleep));
+        assert!(options.contains(NSActivityOptions::LatencyCritical));
+        assert!(!options.contains(NSActivityOptions::IdleDisplaySleepDisabled));
     }
 }
