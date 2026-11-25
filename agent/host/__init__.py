@@ -75,6 +75,9 @@ class Capabilities:
     # The "return to the game" choice for focus loss is offered (Win32 brings the window back; macOS keeps its
     # existing behaviour). Without it a saved "return" behaves like "pause".
     refocus_game: bool = False
+    # Frames show the game only while the game has focus on the device (Android): Runtime confirms that focus
+    # right before and right after each capture and discards a frame taken without it.
+    capture_needs_device_focus: bool = False
 
 
 UNSUPPORTED = Capabilities("unsupported")
@@ -223,9 +226,14 @@ def native_key(key: int) -> int:
     """The connected controller's code for one of the agent's Win32 virtual keys.
 
     Unchanged on Win32. On macOS the single table in host/macos/keys.py; a key without a macOS
-    counterpart raises NavigationError instead of becoming 0 (which is the A key there).
+    counterpart raises NavigationError instead of becoming 0 (which is the A key there). The Android backend
+    has no keyboard: every key raises UnsupportedInput, so no key code ever reaches the device (named game
+    actions there are touch, host/android/actions.py).
     """
-    if game_backend() != "macos":
+    backend = game_backend()
+    if backend == "android":
+        raise UnsupportedInput(f"安卓模拟器上没有电脑按键（键码 {key}），这一步暂不支持。")
+    if backend != "macos":
         return key
     from host.macos.keys import UnmappedKey, translate
     try:

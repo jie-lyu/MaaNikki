@@ -523,6 +523,18 @@ class Runtime:
     def capture(self):
         return self._capture()
 
+    def _device_focus_ready(self):
+        """Android: True when the game has focus on the device now; otherwise wait for it (a pause, also in
+        background observation, which does not wait on its own) and return False so the caller captures again."""
+        inputs = self._active_inputs()
+        if inputs is None:
+            session = active_session()
+            inputs = session.ensure_adapter() if session is not None else None
+        if inputs is None or inputs.foreground():
+            return True
+        inputs.check(require_foreground=True)
+        return False
+
     def capture_parked(self, park_point, *, settle_s: float = 0.08):
         """Capture one frame while temporarily holding the cursor at ``park_point`` in window-input mode."""
         self.invalidate_frame()
@@ -615,10 +627,13 @@ class Runtime:
         inputs = self._active_inputs()
         if inputs is not None:
             self._check_inputs(inputs, session)
+        device_focus = capabilities(game_backend()).capture_needs_device_focus
         while not self.stopped:
             if available is not None and not available():
                 return None
             self.check_focus()
+            if device_focus and not self._device_focus_ready():
+                continue
             obs_gen = self.observation_generation()
             with measure("capture"):
                 with measure("capture.post"):
@@ -650,6 +665,9 @@ class Runtime:
             self.check_focus()
             if obs_gen != self.observation_generation():
                 count("capture.discarded")
+                continue
+            if device_focus and image is not None and image.size and not self._device_focus_ready():
+                count("capture.discarded")  # another app may have been in front on the device during the capture
                 continue
             if image is None or image.size == 0:
                 inputs = self._active_inputs()

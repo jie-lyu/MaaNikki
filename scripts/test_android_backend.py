@@ -107,14 +107,16 @@ class CapabilityTests(unittest.TestCase):
         with android_run():
             caps = host.capabilities(host.game_backend())
             self.assertEqual(caps.backend, "android")
-            self.assertFalse(any(getattr(caps, name) for name in caps.__dataclass_fields__ if name != "backend"))
+            enabled = {name for name in caps.__dataclass_fields__ if name != "backend" and getattr(caps, name)}
+            self.assertEqual(enabled, {"capture_needs_device_focus"})
             self.assertIsNone(host.overlay_backend())
             self.assertIsNone(host.launch_window_probes())
             with self.assertRaises(RuntimeError):
                 host.game_close_api()
             with self.assertRaises(NavigationError):
                 host.background_input_class()
-            self.assertEqual(host.native_key(77), 77)  # no macOS translation for an emulator
+            with self.assertRaises(host.UnsupportedInput):
+                host.native_key(77)  # no keyboard on an emulator
 
 
 class TargetTests(unittest.TestCase):
@@ -200,9 +202,12 @@ class TargetTests(unittest.TestCase):
         self.assertIsInstance(native, NoInput)
         self.assertIsNone(native.force_key_up(87))
         self.assertIsNone(native.force_mouse_up(1))
-        self.assertFalse(native.press_mouse(1))
+        self.assertFalse(native.supports_scene_buttons)
+        with self.assertRaises(host.UnsupportedInput):
+            native.press_mouse(1)
         self.assertFalse(native.post_window_key(87, down=True))
-        self.assertFalse(native.relative_move(5, 5))
+        with self.assertRaises(host.UnsupportedInput):
+            native.relative_move(5, 5)
         with self.assertRaises(NavigationError):
             target.geometry()
 
@@ -248,6 +253,113 @@ class SessionTests(unittest.TestCase):
                        controller.post_click_key):
             method.assert_not_called()
         self.assertTrue(all(c.startswith(("dumpsys window", "pidof")) for c in controller.commands))
+
+
+class NoKeyboardOrMouseTests(unittest.TestCase):
+    """No key code, mouse button or relative move reaches the device from an Android run."""
+
+    def test_every_key_is_refused(self):
+        from daily.runtime import native_key_fields
+        with android_run():
+            for key in (27, 18, 87, 999):
+                with self.assertRaises(host.UnsupportedInput):
+                    host.native_key(key)
+            with self.assertRaises(host.UnsupportedInput):
+                native_key_fields("ClickKey", {"key": 27})
+            self.assertEqual(native_key_fields("Click", {"target": [1, 2, 3, 4]}), {"target": [1, 2, 3, 4]})
+
+    def runtime(self):
+        from daily.runtime import Runtime
+        rt = Runtime.__new__(Runtime)
+        rt.context = SimpleNamespace(run_action=Mock(), tasker=SimpleNamespace(stopping=False))
+        rt.check_focus, rt.ensure_frame, rt.invalidate_frame = Mock(), Mock(return_value=True), Mock()
+        rt._evidence = SimpleNamespace(observe=Mock(), remember_frame=Mock())
+        rt.navigation_halted, rt._focus_generation = False, 0
+        rt._active_inputs = Mock(return_value=None)
+        rt._use_window_input = Mock(return_value=False)
+        return rt
+
+    def test_integer_key_actions_are_refused_before_dispatch(self):
+        rt = self.runtime()
+        with android_run(), patch("daily.runtime.active_session", return_value=None):
+            for action, fields in (("ClickKey", {"key": 27}), ("KeyDown", {"key": 87}), ("LongPressKey", {"key": 70})):
+                with self.subTest(action=action), self.assertRaises(host.UnsupportedInput):
+                    rt.action(action, **fields)
+        rt.context.run_action.assert_not_called()
+
+    def foreground_input(self):
+        from navigation.controller import ForegroundInput
+        controller = FakeShellController({"mCurrentFocus": FOCUS_GAME, "pidof": "4242\n__exit=0\n"})
+        controller.info = INFO
+        controller.post_key_down, controller.post_key_up = Mock(), Mock()
+        controller.post_touch_down, controller.post_touch_up = Mock(), Mock()
+        with android_run():
+            inputs = ForegroundInput(controller, lambda: False)
+        return inputs, controller
+
+    def test_named_keys_and_mouse_buttons_are_refused_and_nothing_is_released(self):
+        inputs, controller = self.foreground_input()
+        with android_run():
+            with self.assertRaises(host.UnsupportedInput):
+                inputs.hold("forward", .1)
+            with self.assertRaises(host.UnsupportedInput):
+                inputs.key_down("jump")
+            with self.assertRaises(host.UnsupportedInput):
+                inputs.click_mouse(1)
+            inputs.release()
+        self.assertEqual((inputs.held, inputs.buttons), (set(), set()))
+        for method in (controller.post_key_down, controller.post_key_up, controller.post_touch_down,
+                       controller.post_touch_up):
+            method.assert_not_called()
+
+    def test_relative_camera_moves_are_refused(self):
+        inputs, _ = self.foreground_input()
+        with self.assertRaises(host.UnsupportedInput):
+            inputs.native.relative_move(5, 0)
+
+
+class DeviceFocusCaptureTests(unittest.TestCase):
+    """Runtime keeps a frame only when the game had focus on the device right before and right after it."""
+
+    def runtime(self, focus):
+        import numpy as np
+        from daily.runtime import Runtime
+        rt = Runtime.__new__(Runtime)
+        frames = iter([np.full((720, 1280, 3), value, np.uint8) for value in (1, 2, 3, 4)])
+        rt.controller = SimpleNamespace(post_screencap=Mock(side_effect=lambda: SimpleNamespace(
+            wait=lambda: None, succeeded=True, get=lambda frame=next(frames): frame)))
+        rt.context = SimpleNamespace(tasker=SimpleNamespace(stopping=False))
+        rt.navigation_halted, rt._focus_generation = False, 0
+        rt.check_focus, rt.invalidate_frame, rt.validate_frame = Mock(), Mock(), Mock()
+        rt.observation_generation = Mock(return_value=0)
+        rt._evidence = SimpleNamespace(remember_frame=Mock())
+        readings = iter(focus)
+        inputs = SimpleNamespace(foreground=lambda: next(readings), check=Mock(), window_only=False)
+        rt._active_inputs = Mock(return_value=inputs)
+        rt._check_inputs = Mock()
+        return rt, inputs
+
+    def capture(self, focus):
+        rt, inputs = self.runtime(focus)
+        with android_run(), patch("daily.runtime.active_session", return_value=None):
+            image = rt._capture()
+        return image, rt, inputs
+
+    def test_a_frame_with_focus_before_and_after_is_kept(self):
+        image, rt, inputs = self.capture([True, True])
+        self.assertEqual(int(image[0, 0, 0]), 1)
+        inputs.check.assert_not_called()
+
+    def test_without_focus_before_it_waits_and_captures_only_then(self):
+        image, rt, inputs = self.capture([False, True, True])
+        self.assertEqual(int(image[0, 0, 0]), 1)
+        inputs.check.assert_called_once_with(require_foreground=True)
+        self.assertEqual(rt.controller.post_screencap.call_count, 1)
+
+    def test_a_frame_whose_focus_was_lost_by_the_end_is_discarded(self):
+        image, rt, inputs = self.capture([True, False, True, True])
+        self.assertEqual(int(image[0, 0, 0]), 2)  # the first frame was thrown away
+        self.assertEqual(rt.controller.post_screencap.call_count, 2)
 
 
 class FocusLostModeTests(unittest.TestCase):

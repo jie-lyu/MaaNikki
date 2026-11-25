@@ -60,7 +60,11 @@ def check_controller_info(info) -> str:
 
 
 class NoInput:
-    """Input primitives for a target whose input mapping does not exist yet: they send nothing."""
+    """Input primitives for a target without a keyboard, mouse or relative pointer: presses are refused before
+    anything counts as held (UnsupportedInput), releases send nothing."""
+
+    # ForegroundInput.mouse_down asks this before it marks a button held, so no touch-up is ever sent for it.
+    supports_scene_buttons = False
 
     def force_key_up(self, key: int) -> None:
         return None
@@ -69,13 +73,15 @@ class NoInput:
         return None
 
     def press_mouse(self, button: int) -> bool:
-        return False
+        from host import UnsupportedInput
+        raise UnsupportedInput("安卓模拟器上没有电脑鼠标按键，这一步暂不支持。")
 
     def post_window_key(self, key: int, *, down: bool) -> bool:
         return False
 
     def relative_move(self, dx: int, dy: int) -> bool:
-        return False
+        from host import UnsupportedInput
+        raise UnsupportedInput("安卓模拟器上没有相对鼠标移动，镜头需要用滑动来转，这一步暂不支持。")
 
     def last_error(self) -> int:
         return 0

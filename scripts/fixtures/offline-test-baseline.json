@@ -11,7 +11,14 @@
   "test_android_backend.py": {
    "tests": [
     "CapabilityTests.test_no_desktop_window_services",
+    "DeviceFocusCaptureTests.test_a_frame_whose_focus_was_lost_by_the_end_is_discarded",
+    "DeviceFocusCaptureTests.test_a_frame_with_focus_before_and_after_is_kept",
+    "DeviceFocusCaptureTests.test_without_focus_before_it_waits_and_captures_only_then",
     "FocusLostModeTests.test_return_to_the_game_behaves_like_pause",
+    "NoKeyboardOrMouseTests.test_every_key_is_refused",
+    "NoKeyboardOrMouseTests.test_integer_key_actions_are_refused_before_dispatch",
+    "NoKeyboardOrMouseTests.test_named_keys_and_mouse_buttons_are_refused_and_nothing_is_released",
+    "NoKeyboardOrMouseTests.test_relative_camera_moves_are_refused",
     "SessionTests.test_first_wait_with_the_launcher_in_front_sends_nothing_and_pauses_until_the_game_has_focus",
     "TargetTests.test_a_dialog_or_launcher_in_front_is_not_the_game",
     "TargetTests.test_a_shell_result_that_raises_is_unreadable",
@@ -756,6 +763,7 @@
     "GameBackendSelectionTests.test_other_controller_types_keep_the_desktop_rules",
     "GameBackendSelectionTests.test_without_a_submitted_controller_it_is_the_desktop_backend",
     "MacOSUnchangedTests.test_tiers_notices_and_keys_match_the_unsubmitted_case",
+    "Win32CaptureAndMouseUnchangedTests.test_capture_never_consults_device_focus_and_scene_buttons_stay_available",
     "Win32FocusLostModeTests.test_saved_choices_are_unchanged_on_windows_and_macos",
     "Win32SessionStartupTests.test_the_first_foreground_wait_still_nudges_focus_with_alt_up",
     "Win32UnchangedTests.test_assets_resolve_in_the_main_resource_only",

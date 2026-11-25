@@ -203,6 +203,32 @@ class Win32FocusLostModeTests(unittest.TestCase):
                 self.assertEqual(focus_lost_mode("background"), "background" if name == "win32" else "pause")
 
 
+class Win32CaptureAndMouseUnchangedTests(unittest.TestCase):
+    def test_capture_never_consults_device_focus_and_scene_buttons_stay_available(self):
+        import numpy as np
+        from daily.runtime import Runtime
+        from host.win32.target import Win32Target
+        frame = np.full((720, 1280, 3), 5, np.uint8)
+        rt = Runtime.__new__(Runtime)
+        rt.controller = SimpleNamespace(post_screencap=Mock(return_value=SimpleNamespace(
+            wait=lambda: None, succeeded=True, get=lambda: frame)))
+        rt.context = SimpleNamespace(tasker=SimpleNamespace(stopping=False))
+        rt.navigation_halted, rt._focus_generation = False, 0
+        rt.check_focus, rt.invalidate_frame, rt.validate_frame = Mock(), Mock(), Mock()
+        rt.observation_generation = Mock(return_value=0)
+        rt._evidence = SimpleNamespace(remember_frame=Mock())
+        rt._active_inputs = Mock(return_value=None)
+        rt._device_focus_ready = Mock(side_effect=AssertionError("device focus consulted"))
+        for controller in (None, WINDOWS_CONTROLLER):
+            with desktop("win32", controller), patch("daily.runtime.active_session", return_value=None):
+                self.assertIs(rt._capture(), frame)
+        win32 = Win32Target.__new__(Win32Target)
+        win32.handle = win32.hwnd = 1
+        win32.user32 = Mock()
+        native = win32.input()
+        self.assertNotEqual(getattr(native, "supports_scene_buttons", True), False)
+
+
 class Win32SessionStartupTests(unittest.TestCase):
     def test_the_first_foreground_wait_still_nudges_focus_with_alt_up(self):
         from navigation.controller import ForegroundInput

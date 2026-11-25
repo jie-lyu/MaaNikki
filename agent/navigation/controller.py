@@ -268,6 +268,11 @@ class ForegroundInput:
     def mouse_down(self, button=0):
         if button not in (0, 1, 2, 3, 4):
             raise NavigationError("鼠标按键未登记。")
+        if getattr(self.native, "supports_scene_buttons", True) is False:
+            # A target without mouse buttons (Android): refuse before the button counts as held, so the
+            # release path never sends anything for it.
+            self.native.press_mouse(button)  # raises UnsupportedInput
+            raise NavigationError("鼠标动作输入失败。")
         self.check()
         if self.scene_press_blocked():
             # macOS: the control unit presses where the cursor is and refuses outside the game window; say
