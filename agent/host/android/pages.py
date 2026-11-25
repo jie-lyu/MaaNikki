@@ -237,6 +237,15 @@ def _point_box(point):
     return [int(point[0]), int(point[1]), 1, 1]
 
 
+class SwipeMismatch(PageMismatch):
+    """A tap frame of swipe_on_page is not the expected state: that frame (``frame``) goes to the caller, to be
+    saved; nothing was sent and the swipe is not decided again."""
+
+    def __init__(self, reason, frame):
+        super().__init__(reason)
+        self.frame = frame
+
+
 def swipe_on_page(rt, title: str, begin, end, *, duration: int, accept, delay: float = .5) -> bool:
     """One swipe from the point ``begin`` to the point ``end`` on the page titled ``title``, with the rules of
     tap_on_page: decided on a fresh focus-confirmed frame that is that page and that ``accept(frame, recognize)``
@@ -244,34 +253,37 @@ def swipe_on_page(rt, title: str, begin, end, *, duration: int, accept, delay: f
     within FORBIDDEN_MARGIN of a forbidden label; confirmed on a fresh frame (same title, ``accept``, guard); both
     frames still valid; sent as a Swipe carrying the confirming frame, through the same reserved, logged and
     device-confirmed path as a tap (the device must show this gesture's own lift afterwards). False when the run
-    stopped; PageMismatch (nothing sent) when the deciding frame fails; GuardRefusal next to a forbidden word."""
+    stopped; SwipeMismatch (nothing sent, no second attempt) with the first tap frame that is not the expected state;
+    GuardRefusal next to a forbidden word. Only a frame voided by a focus change is decided again."""
     from task_control import ForegroundChanged
     points = (_point_box(begin), _point_box(end))
     for _attempt in range(rt.TOUCH_KEY_ATTEMPTS):
         screen, decided, recognize = screen_now(rt)
         if decided is None:
             return False
+        if not rt._frame_still_valid(decided):
+            continue
         if not is_page(screen, title):
-            raise PageMismatch(f"当前画面不是「{title}」页面")
+            raise SwipeMismatch(f"要滑动时画面不是「{title}」页面", decided)
         for box in points:
             word = _forbidden_near(recognize, box)
             if word:
                 raise GuardRefusal(f"要滑动的地方旁边有「{word}」，没有滑动，任务停止")
         if not accept(decided, recognize):
-            raise PageMismatch(f"「{title}」页面的状态不对，没有滑动")
-        if not rt._frame_still_valid(decided):
-            continue
+            raise SwipeMismatch(f"「{title}」页面的状态不对，没有滑动", decided)
         fresh, confirming, recognize_b = screen_now(rt)
         if confirming is None:
             return False
-        if not is_page(fresh, title) or fresh.title != screen.title:
+        if not (rt._frame_still_valid(decided) and rt._frame_still_valid(confirming)):
             continue
+        if not is_page(fresh, title) or fresh.title != screen.title:
+            raise SwipeMismatch(f"确认滑动时画面已经不是「{title}」页面", confirming)
         for box in points:
             word = _forbidden_near(recognize_b, box)
             if word:
                 raise GuardRefusal(f"要滑动的地方旁边有「{word}」，没有滑动，任务停止")
         if not accept(confirming, recognize_b):
-            continue
+            raise SwipeMismatch(f"确认滑动时「{title}」页面的状态变了，没有滑动", confirming)
         if not (rt._frame_still_valid(decided) and rt._frame_still_valid(confirming)):
             continue
         try:
@@ -281,7 +293,7 @@ def swipe_on_page(rt, title: str, begin, end, *, duration: int, accept, delay: f
         except ForegroundChanged:
             continue
         return rt.pause(delay)
-    raise PageMismatch(f"在「{title}」页面上连续 {rt.TOUCH_KEY_ATTEMPTS} 次没能在稳定的画面上确认要滑动的位置")
+    raise PageMismatch(f"在「{title}」页面上连续 {rt.TOUCH_KEY_ATTEMPTS} 次没能在稳定的画面上确认要滑动的位置（焦点在变）")
 
 
 def to_hud(rt, attempts: int = 4, *, rejected=None) -> bool:

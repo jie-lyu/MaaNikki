@@ -71,16 +71,17 @@ def list_frame(offset, *, selected=True):
 class Game:
     """A scripted 商城: the HUD, the opening event tab (甄选礼包 out of view), the left list after one swipe (the tab
     in view, unselected), then the gift list, moved ``step`` px per list swipe up to ``end`` (``stuck``: swipes do
-    nothing). ``screens``: frames shown instead of the state, one per capture, from the given list-swipe count on."""
+    nothing). ``screens``: frames shown instead of the state, one per capture, once the given number of touches has
+    been sent. ``tab_error``: the 甄选礼包 recognition cannot run."""
 
     def __init__(self, gifts=None, *, step=300, end=None, stuck=False, start="hud", screens=None,
-                 forbidden=(), prices=()):
+                 forbidden=(), prices=(), tab_error=False):
         self.gifts = gifts if gifts is not None else sold_out_week()
         last = max(g["y"] for g in self.gifts.values()) if self.gifts else 1400
         self.step, self.end = step, end if end is not None else last - 598
         self.stuck, self.where, self.offset = stuck, start, 0
         self.screens, self.forbidden, self.prices = dict(screens or {}), list(forbidden), list(prices)
-        self.touches, self.swipes = [], 0
+        self.touches, self.swipes, self.tab_error = [], 0, tab_error
 
     def titles(self):
         return {name: [g["x"] - 45, g["y"] - self.offset, 90, 28] for name, g in self.gifts.items()
@@ -92,6 +93,8 @@ class Game:
         if node == shop.PRICE_GUARD:
             return result(self.prices)
         if node == shop.GIFTS_TAB:
+            if self.tab_error:
+                return None
             return result([row("甄选礼包", TAB_BOX)]) if self.where in ("left", "gifts") else MISS
         if node == actions.BACK_ARROW:
             return result([row("", BACK_BOX)])
@@ -111,8 +114,8 @@ class Game:
         return MISS
 
     def screen_now(self, rt):
-        if self.swipes in self.screens and self.screens[self.swipes]:
-            return self.screens[self.swipes].pop(0)
+        if self.screens.get(len(self.touches)):
+            return self.screens[len(self.touches)].pop(0)
         if self.where == "hud":
             return HUD, np.zeros((720, 1280, 3), np.uint8), self.recognize
         if self.where in ("event", "left"):
@@ -148,6 +151,20 @@ class Game:
             self.where = "hud"
             return True
         raise AssertionError(f"unexpected tap {target}")
+
+
+def unknown_frame(nodes=None):
+    nodes = nodes or {}
+    return (Screen("unknown", reason="认不出当前画面"), np.zeros((720, 1280, 3), np.uint8),
+            lambda node, override=None: nodes.get(node, MISS))
+
+
+QUIT = (Screen("quit_dialog", {"cancel": [494, 480, 20, 20]}), np.full((720, 1280, 3), 7, np.uint8),
+        lambda node, override=None: MISS)
+# A popup's close mark on an otherwise unrecognised frame (e.g. an unseen dialog over the shop).
+POPUP = unknown_frame({actions.MODAL_CLOSE: result([row("", [929, 177, 36, 36])])})
+# All three gifts wholly in the list at once: no list swipe needed.
+ALL_VISIBLE = {"虹迹赠礼": gift(450, 608), "芳馨赠礼": gift(281, 839), "星实置业之礼": gift(598, 377)}
 
 
 def stop_diagnostics(rt):
@@ -238,15 +255,76 @@ class FlowTests(unittest.TestCase):
         self.assertTrue(any(f"滑了 {shop.MAX_SWIPES} 次" in line for line in rt.logs))
 
     def test_an_unrecognised_screen_during_the_scan_stops_with_nothing_more_sent(self):
-        unknown = (Screen("unknown", reason="认不出当前画面"), np.zeros((720, 1280, 3), np.uint8),
-                   lambda node, override=None: MISS)
-        game = Game(screens={2: [unknown] * 40})
+        game = Game(screens={4: [unknown_frame()] * 40})  # after list swipe 2 (left swipe, tab, swipe 1, swipe 2)
         outcome, rt = play(game)
         self.assertFalse(outcome)
         self.assertEqual(game.swipes, 2)
         self.assertNotIn("back", game.touches)
         self.assertEqual(len(stop_diagnostics(rt)), 1)
         self.assertTrue(any("第 2 次滑动礼包列表" in line and "没有停稳" in line for line in rt.logs), rt.logs)
+
+    def test_one_positively_other_frame_after_a_swipe_stops_with_that_frame(self):
+        # Review round 1 replay: one quit-dialog frame (or a popup's close mark) right after list swipe 2.
+        for other in (QUIT, POPUP):
+            with self.subTest(kind=other[0].kind):
+                game = Game(screens={4: [other]})
+                outcome, rt = play(game)
+                self.assertFalse(outcome)
+                self.assertEqual(game.swipes, 2)
+                self.assertNotIn("back", game.touches)
+                saved, = stop_diagnostics(rt)
+                self.assertIs(saved.kwargs["image"], other[1])
+                self.assertTrue(any("不该出现的画面" in line for line in rt.logs), rt.logs)
+
+    def test_one_frame_not_recognised_yet_is_waited_through(self):
+        # Nothing recognisable (no page, dialog or popup mark) for one frame: only that is forgiven, briefly.
+        game = Game(screens={4: [unknown_frame()]})
+        outcome, rt = play(game)
+        self.assertTrue(outcome)
+        self.assertEqual(stop_diagnostics(rt), [])
+
+    def test_a_mismatch_on_a_swipe_frame_stops_with_that_frame(self):
+        # The confirming frame of list swipe 2 shows another 商城 tab: no retry, that frame saved.
+        game = Game()
+        unselected = (SHOP, list_frame(300, selected=False), game.recognize)
+        settle = [(SHOP, list_frame(300), game.recognize)] * 2
+        game.screens = {3: settle + [(SHOP, list_frame(300), game.recognize), unselected]}
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.swipes, 1)
+        saved, = stop_diagnostics(rt)
+        self.assertIs(saved.kwargs["image"], unselected[1])
+
+    def test_leaving_needs_the_gifts_tab_still_selected(self):
+        game = Game(ALL_VISIBLE)
+        gifts = (SHOP, list_frame(0), game.recognize)
+        unselected = (SHOP, list_frame(0, selected=False), game.recognize)
+        game.screens = {2: [gifts, gifts, unselected]}  # settled after the tab tap, then another tab
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertNotIn("back", game.touches)
+        saved, = stop_diagnostics(rt)
+        self.assertIs(saved.kwargs["image"], unselected[1])
+
+    def test_an_unexpected_frame_after_the_back_arrow_is_saved(self):
+        game = Game()
+        game.screens = {}
+        outcome, rt = play(game)  # the plain run, to count its touches
+        count = len(game.touches)
+        game = Game(screens={count: [POPUP]})
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.touches[-1], "back")
+        names = [c.args[0] for c in rt.diagnostic.call_args_list]
+        self.assertEqual(names, ["android_weekly_before_first_swipe", "android_weekly_stop_0"])
+        self.assertIs(stop_diagnostics(rt)[0].kwargs["image"], POPUP[1])
+
+    def test_a_tab_recognition_that_could_not_run_allows_no_sidebar_swipe(self):
+        game = Game(tab_error=True)
+        outcome, rt = play(game)
+        self.assertFalse(outcome)
+        self.assertEqual(game.touches, [])
+        self.assertEqual(len(stop_diagnostics(rt)), 1)  # waited through briefly as not recognised yet, then stopped
 
     def test_no_safe_place_to_start_a_swipe_sends_nothing(self):
         # A forbidden word next to every candidate column: the list is not swiped at all.
@@ -286,6 +364,9 @@ class CardTests(unittest.TestCase):
         self.assertEqual(self.read(gift(0, 839, pill=False, counter="")).state, "unknown")
         self.assertEqual(self.read(gift(0, 839, band="7260", pill=False, counter="本周限购10/10")).state, "not_free")
         self.assertEqual(self.read(gift(0, 839)).limit, (0, 1))
+        for impossible in ("本周限购1/0", "本周限购2/1", "本周限购0/0"):  # misreads: neither sold out nor claimable
+            self.assertEqual(self.read(gift(0, 839, pill=False, counter=impossible)).state, "unknown", impossible)
+            self.assertEqual(self.read(gift(0, 839, pill=True, counter=impossible)).state, "unknown", impossible)
 
     def test_a_card_not_wholly_in_the_list_is_not_read(self):
         self.assertIsNone(self.read(gift(0, 839), title_y=240))  # the counter is under the top bar
@@ -298,6 +379,24 @@ class CardTests(unittest.TestCase):
             if node == shop.GIFT_TITLE else MISS
         with self.assertRaises(shop.Stop):
             shop.read_gifts(twice)
+
+
+class TabTests(unittest.TestCase):
+    def test_a_recognition_that_could_not_run_is_not_an_absent_tab(self):
+        frame = list_frame(0)
+        self.assertIsNone(shop.tab_state(frame, lambda node, override=None: None))
+        self.assertEqual(shop.tab_state(frame, lambda node, override=None: MISS), "absent")
+        found = lambda node, override=None: result([row("甄选礼包", TAB_BOX)])  # noqa: E731
+        self.assertEqual(shop.tab_state(frame, found), "selected")
+        self.assertEqual(shop.tab_state(list_frame(0, selected=False), found), "unselected")
+        # Only a completed recognition without the label lets the sidebar be swiped.
+        self.assertEqual(shop.shop_view(SHOP, frame, lambda node, override=None: None), "pending")
+        self.assertEqual(shop.shop_view(SHOP, frame, lambda node, override=None: MISS), "absent")
+        self.assertEqual(shop.shop_view(*QUIT), "other")
+        self.assertEqual(shop.shop_view(*POPUP), "other")
+        self.assertEqual(shop.shop_view(*unknown_frame()), "pending")
+        self.assertEqual(shop.shop_view(Screen("page", {"back": BACK_BOX}, title="奇迹之旅"), frame,
+                                        lambda node, override=None: MISS), "other")
 
 
 class SwipePointTests(unittest.TestCase):
@@ -373,12 +472,19 @@ class SwipeOnPageTests(unittest.TestCase):
         rt, patched = self.rt([self.frame(tag=1)])
         with patched, self.assertRaises(pages.PageMismatch):
             pages.swipe_on_page(rt, "商城", (1070, 640), (1070, 390), duration=1000, accept=lambda f, r: False)
-        # accept fails on every confirming frame: decided again, never sent.
-        frames = [self.frame(tag=1), self.frame(tag=2)] * 3
+        # accept fails on the confirming frame: not decided again; that frame goes back with the refusal.
+        frames = [self.frame(tag=1), self.frame(tag=2), self.frame(tag=1), self.frame(tag=1)]
         rt, patched = self.rt(frames)
-        with patched, self.assertRaises(pages.PageMismatch):
+        with patched, self.assertRaises(pages.SwipeMismatch) as raised:
             pages.swipe_on_page(rt, "商城", (1070, 640), (1070, 390), duration=1000,
                                 accept=lambda frame, recognize: frame[0, 0, 0] == 1)
+        self.assertEqual(raised.exception.frame[0, 0, 0], 2)
+        self.assertEqual(rt.sent, [])
+        # Another page on the confirming frame: the same.
+        rt, patched = self.rt([self.frame(tag=1), self.frame(screen=HUD, tag=3)])
+        with patched, self.assertRaises(pages.SwipeMismatch) as raised:
+            pages.swipe_on_page(rt, "商城", (1070, 640), (1070, 390), duration=1000, accept=lambda f, r: True)
+        self.assertEqual(raised.exception.frame[0, 0, 0], 3)
         self.assertEqual(rt.sent, [])
 
     def test_a_focus_change_at_dispatch_is_decided_again(self):
@@ -425,8 +531,11 @@ class ResourceTests(unittest.TestCase):
         tiers = json.loads((ROOT / "agent/host/android/tasks.json").read_text(encoding="utf-8"))
         self.assertIn("MaaNikki_WeeklyFreeGifts", tiers["experimental"])
         note = tiers["notes"]["MaaNikki_WeeklyFreeGifts"]
-        self.assertIn("只报告，不领取", note)
-        self.assertIn("2026-11-26", note)
+        # Shown at the task for an Adb instance (MacTaskMarks: the warning line and the hover text), against the shared
+        # description, which promises claiming: the note must say plainly that Android only checks and reports.
+        self.assertTrue(note.startswith("安卓上这一版只检查并报告"), note)
+        for words in ("从不领取", "请手动领取", "2026-11-26 在设备上完整跑通", "领取的弹窗还没见过"):
+            self.assertIn(words, note)
         self.assertEqual(tiers["entries"], [])
         if not (ROOT / "resource_android").is_dir():  # the release source archive does not list it (plan risk 13)
             self.assertFalse((ROOT / ".git").exists(), "resource_android/ is missing from the checkout")

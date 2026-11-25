@@ -260,10 +260,16 @@
     "FlowTests.test_a_card_that_cannot_be_read_stops_with_nothing_more_sent",
     "FlowTests.test_a_claimable_gift_is_reported_never_tapped_and_the_shop_is_left",
     "FlowTests.test_a_list_that_stops_moving_before_every_gift_was_seen_stops",
+    "FlowTests.test_a_mismatch_on_a_swipe_frame_stops_with_that_frame",
     "FlowTests.test_a_modal_at_the_start_sends_nothing",
     "FlowTests.test_a_sold_out_week_is_read_to_the_end_and_left_by_the_back_arrow",
+    "FlowTests.test_a_tab_recognition_that_could_not_run_allows_no_sidebar_swipe",
+    "FlowTests.test_an_unexpected_frame_after_the_back_arrow_is_saved",
     "FlowTests.test_an_unrecognised_screen_during_the_scan_stops_with_nothing_more_sent",
+    "FlowTests.test_leaving_needs_the_gifts_tab_still_selected",
     "FlowTests.test_no_safe_place_to_start_a_swipe_sends_nothing",
+    "FlowTests.test_one_frame_not_recognised_yet_is_waited_through",
+    "FlowTests.test_one_positively_other_frame_after_a_swipe_stops_with_that_frame",
     "FlowTests.test_the_counter_alone_or_the_pill_alone_means_sold_out",
     "FlowTests.test_the_number_of_swipes_is_bounded",
     "FlowTests.test_the_tab_already_selected_is_not_tapped_again",
@@ -275,7 +281,8 @@
     "SwipeOnPageTests.test_the_swipe_is_sent_on_the_confirming_frame_through_the_touch_path",
     "SwipePointTests.test_a_failed_check_offers_no_swipe",
     "SwipePointTests.test_a_price_band_excludes_the_whole_band_and_the_top_button_is_avoided",
-    "SwipePointTests.test_the_begin_point_must_be_empty_background"
+    "SwipePointTests.test_the_begin_point_must_be_empty_background",
+    "TabTests.test_a_recognition_that_could_not_run_is_not_an_absent_tab"
    ],
    "known_failures": [],
    "skips": []
