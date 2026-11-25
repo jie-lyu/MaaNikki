@@ -362,6 +362,14 @@ def judged(name: str, reco) -> dict:
             "algorithm": str(getattr(reco.algorithm, "value", reco.algorithm)), "detail": detail}
 
 
+def _jsonable(value):
+    """json.dumps fallback: recognition details can carry images (And/Or sub-results)."""
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        return f"<array {list(shape)}>"
+    return str(value)
+
+
 def _score(item):
     if not isinstance(item, dict):
         return None
@@ -549,7 +557,7 @@ def run_steps(device: Device, steps: list, *, out: Path | None, recognizer=None)
             entry["ok"] = ok
             entry["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
             report.append(entry)
-            print(json.dumps(entry, ensure_ascii=False), flush=True)
+            print(json.dumps(entry, ensure_ascii=False, default=_jsonable), flush=True)
             if not ok:
                 raise ProbeError(f"step {index} failed: {step!r}")
     finally:
@@ -685,7 +693,8 @@ def cmd_steps(args) -> int:
     device.check_foreground()
     report = run_steps(device, steps, out=Path(args.out) if args.out else None, recognizer=recognizer)
     if args.report:
-        Path(args.report).write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
+        Path(args.report).write_text(json.dumps(report, ensure_ascii=False, indent=1, default=_jsonable),
+                                      encoding="utf-8")
     return 0
 
 
@@ -695,7 +704,7 @@ def cmd_reco(args) -> int:
     else:
         controller = frame_controller(Path(args.frame))
     for result in Recognizer(controller).run_many(args.nodes, any_roi=args.any_roi):
-        print(json.dumps(result, ensure_ascii=False, default=str))
+        print(json.dumps(result, ensure_ascii=False, default=_jsonable))
     return 0
 
 
@@ -704,13 +713,13 @@ def cmd_reco_all(args) -> int:
     results = recognizer.run_many(recognition_nodes(args.filter), any_roi=args.any_roi)
     for result in results:
         if result["hit"] or result.get("widened_hit"):
-            print(json.dumps(result, ensure_ascii=False, default=str), flush=True)
+            print(json.dumps(result, ensure_ascii=False, default=_jsonable), flush=True)
     summary = {"frame": str(args.frame), "nodes": len(results), "hit": sum(r["hit"] for r in results),
                "widened_hit": sum(bool(r.get("widened_hit")) for r in results)}
     print(json.dumps(summary, ensure_ascii=False))
     if args.json:
         Path(args.json).write_text(json.dumps({"summary": summary, "results": results}, ensure_ascii=False,
-                                              indent=1, default=str), encoding="utf-8")
+                                              indent=1, default=_jsonable), encoding="utf-8")
     return 0
 
 
