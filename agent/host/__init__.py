@@ -104,13 +104,14 @@ class DeviceInputState:
     Android input on this host has one owner and is scoped to the host, not to an ADB serial (one emulator is
     reachable under several serials, e.g. 127.0.0.1:5555 and emulator-5554):
 
-    - owner: the first Android capture or touch takes an exclusive lock (config/android-input/owner.lock, held
-      until the agent process exits). Another agent process gets nothing, so capture, decision and dispatch, and
-      the focus epoch below, all belong to one process.
+    - owner: the first Android focus read, capture or touch takes an exclusive lock
+      (config/android-input/owner.lock, held until the agent process exits). Another agent process gets nothing,
+      so capture, decision and dispatch, and the focus epoch below, all belong to one process.
     - touch marker: before every touch config/android-input/touch.json is created exclusively (outside the cache
       the client can clear) and removed only after the touch is confirmed released. A marker already present
-      means an earlier touch was never confirmed: nothing is sent. MaaNikki clears the directory when it starts
-      (phase B5), which is the recovery boundary. Any storage error refuses the touch.
+      means an earlier touch was never confirmed: nothing is sent. When MaaNikki starts (phase B5) it takes the
+      same owner lock and only then removes touch.json, never the lock file: the recovery boundary. Any storage
+      error refuses the touch.
     - epoch: advanced by every observed loss of device focus (AndroidTarget records its own negative readings,
       under this lock); a frame captured before it is stale.
     - marks: (focus generation, epoch) per captured frame, recorded only if the epoch the capture started with is

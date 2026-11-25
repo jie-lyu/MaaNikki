@@ -110,9 +110,6 @@ class AndroidTarget:
             except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
                 return None
 
-    def focus_package(self) -> str | None:
-        return focused_package(self._shell("dumpsys window | grep mCurrentFocus"))
-
     def exists(self) -> bool:
         # Only a confirmed absence ends the task as "game closed"; an unreadable answer is not one. Whether the
         # task then runs or pauses is the focus check's decision: positive game focus is enough to continue.
@@ -133,7 +130,7 @@ class AndroidTarget:
             # Only the process that owns Android input reads focus: a reading elsewhere would advance an epoch
             # that the owner never sees. Raises UnsupportedInput when another agent owns it.
             state.claim()
-            package = self.focus_package()
+            package = focused_package(self._shell("dumpsys window | grep mCurrentFocus"))
             if package != GAME_PACKAGE:
                 state.observed_loss()
             return package
