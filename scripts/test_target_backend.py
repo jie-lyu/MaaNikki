@@ -229,6 +229,19 @@ class Win32CaptureAndMouseUnchangedTests(unittest.TestCase):
         self.assertNotEqual(getattr(native, "supports_scene_buttons", True), False)
 
 
+class Win32DispatchUnchangedTests(unittest.TestCase):
+    def test_child_task_overrides_and_actions_are_not_filtered_on_windows(self):
+        from daily.runtime import Runtime
+        rt = Runtime.__new__(Runtime)
+        rt.navigation_halted = False
+        rt.context = SimpleNamespace(tasker=SimpleNamespace(stopping=False), clone=Mock())
+        rt.context.clone.return_value.run_task.return_value = SimpleNamespace(status=SimpleNamespace(succeeded=True))
+        rt.invalidate_frame = Mock()
+        with desktop("win32", WINDOWS_CONTROLLER), patch("daily.runtime.active_session", return_value=None):
+            self.assertTrue(rt.run("X", {"X": {"action": "ClickKey", "key": 87}}))
+            self.assertFalse(host.capabilities(host.game_backend()).touch_actions_only)
+
+
 class Win32SessionStartupTests(unittest.TestCase):
     def test_the_first_foreground_wait_still_nudges_focus_with_alt_up(self):
         from navigation.controller import ForegroundInput

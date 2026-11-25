@@ -14,7 +14,12 @@ from __future__ import annotations
 
 from host import Capabilities
 
-CAPABILITIES = Capabilities("android", capture_needs_device_focus=True)
+CAPABILITIES = Capabilities("android", capture_needs_device_focus=True, touch_actions_only=True)
+
+# Runtime.action types an Android run may dispatch (exact spelling), and the action types a child task's override
+# may contain. The shipped pipelines use only DoNothing and Custom; custom actions call back into guarded code.
+DISPATCHABLE_ACTIONS = frozenset({"Click", "Swipe"})
+CHILD_OVERRIDE_ACTIONS = frozenset({"DoNothing", "Custom"}) | DISPATCHABLE_ACTIONS
 
 
 # The Android task list, same format as the macOS preview list (host/macos/__init__.py parse_task_tiers) and read

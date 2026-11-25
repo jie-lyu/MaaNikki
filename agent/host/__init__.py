@@ -78,6 +78,10 @@ class Capabilities:
     # Frames show the game only while the game has focus on the device (Android): Runtime confirms that focus
     # right before and right after each capture and discards a frame taken without it.
     capture_needs_device_focus: bool = False
+    # Only UI taps and swipes may be dispatched (Android): Runtime refuses every other action type, in any
+    # spelling and in child-task overrides, before anything is sent; named game actions there are touch
+    # implementations of their own (host/android/actions.py).
+    touch_actions_only: bool = False
 
 
 UNSUPPORTED = Capabilities("unsupported")

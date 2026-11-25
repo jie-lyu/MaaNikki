@@ -325,6 +325,9 @@ def relative_camera(controller, dx: int, dy: int) -> bool:
     if (type(dx) is not int or type(dy) is not int
             or abs(dx) > MAX_CAMERA_PIXELS or abs(dy) > 300):
         return False
+    from host import UnsupportedInput, capabilities, game_backend
+    if capabilities(game_backend()).touch_actions_only:
+        raise UnsupportedInput("安卓模拟器上没有相对鼠标移动，镜头需要用滑动来转，这一步暂不支持。")
     adapter = ForegroundInput(controller, lambda: False)
     from task_control import active_session
     if active_session() is not None:

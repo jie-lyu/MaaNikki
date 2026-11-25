@@ -35,6 +35,25 @@ def native_key_fields(action, fields):
     return {**fields, "key": [native_key(item) for item in key] if isinstance(key, list) else native_key(key)}
 
 
+def _refuse_child_actions(overrides):
+    """Android: a child task's override may not introduce an action type outside host.android's list."""
+    from host.android import CHILD_OVERRIDE_ACTIONS
+    from host import UnsupportedInput
+
+    def walk(value):
+        if isinstance(value, dict):
+            action = value.get("action")
+            kind = action.get("type") if isinstance(action, dict) else action
+            if kind is not None and kind not in CHILD_OVERRIDE_ACTIONS:
+                raise UnsupportedInput(f"安卓模拟器上不能发送「{kind}」，这一步暂不支持。")
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+    walk(overrides or {})
+
+
 class Runtime:
     OBSERVATION_MAX_AGE = .25
 
@@ -383,6 +402,11 @@ class Runtime:
         return None
 
     def action(self, action, *, ui_click=True, focus_generation=None, **fields):
+        if capabilities(game_backend()).touch_actions_only:
+            from host.android import DISPATCHABLE_ACTIONS
+            if action not in DISPATCHABLE_ACTIONS:
+                from host import UnsupportedInput
+                raise UnsupportedInput(f"安卓模拟器上不能发送「{action}」，这一步暂不支持。")
         if self.stopped:
             return False
         self.check_focus()
@@ -530,7 +554,17 @@ class Runtime:
         if inputs is None:
             session = active_session()
             inputs = session.ensure_adapter() if session is not None else None
-        if inputs is None or inputs.foreground():
+        if inputs is None:
+            # No session to wait in: still a positive reading from the device, never an assumption.
+            target = getattr(self, "_device_target", None)
+            if target is None:
+                from host import connect_target
+                target = self._device_target = connect_target(self.controller)
+            if target.foreground():
+                return True
+            wall_time.sleep(.3)
+            return False
+        if inputs.foreground():
             return True
         inputs.check(require_foreground=True)
         return False
@@ -728,6 +762,9 @@ class Runtime:
         return bool(result and result.hit)
 
     def input_text(self, content):
+        if capabilities(game_backend()).touch_actions_only:
+            from host import UnsupportedInput
+            raise UnsupportedInput("安卓模拟器上的文字输入还在开发中，这一步暂不支持。")
         if self.stopped:
             return False
         # Taken before the first focus check: a pause and resume consumed by it or by ensure_frame()
@@ -1075,6 +1112,8 @@ class Runtime:
                 inputs.release()
 
     def run(self, entry, overrides=None):
+        if capabilities(game_backend()).touch_actions_only:
+            _refuse_child_actions(overrides)
         if self.stopped:
             return False
         self.invalidate_frame()
