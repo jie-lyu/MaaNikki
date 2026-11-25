@@ -218,6 +218,30 @@ def check_controller_info(info) -> str:
     return serial
 
 
+def user_stop(*, ask_tasker: bool = True) -> bool:
+    """Whether the user stopped this run: the stopper's request is on disk (config/android-input/stop.request, written
+    before the framework is told to stop; DeviceInputState.stop_request), or, with ``ask_tasker``, the running task's
+    tasker reports stopping. Unlike DeviceInputState.stop_requested an unknown answer counts as no: this decides only
+    how a run that is ending reports itself (quietly as stopped instead of as a fault), never whether anything is
+    sent. Reached from shared code only through host.android_user_stop()."""
+    from host import device_input
+    path = device_input().stop_request()
+    try:
+        if path is not None and os.stat(path):
+            return True
+    except OSError:
+        pass
+    if not ask_tasker:
+        return False
+    try:
+        from task_control import active_session
+        session = active_session()
+        tasker = getattr(getattr(session, "context", None), "tasker", None)
+        return tasker is not None and bool(tasker.stopping)
+    except Exception:  # the tasker query crosses into the client; a failed query is no stop
+        return False
+
+
 class NoInput:
     """Input primitives for a target without a keyboard, mouse or relative pointer: presses are refused before
     anything counts as held (UnsupportedInput), releases send nothing."""
@@ -279,7 +303,7 @@ class AndroidTarget:
             if output is not None:
                 self._shell_failures = 0
                 return output
-            if self._stop_in_progress():
+            if user_stop():
                 # The framework's stop also stops controller operations, so reads fail although ADB is fine: such a
                 # failure is not counted. The caller gets an unreadable answer, as for any single failure (focus not
                 # confirmed, no touch confirmed), and the run ends through its own stop checks.
@@ -291,27 +315,6 @@ class AndroidTarget:
             state.observed_loss()
             raise DeviceUnreachable(f"安卓模拟器 {self.serial} 连续 {self.SHELL_FAILURE_LIMIT} 次没有回应 ADB 命令，任务已停止："
                                     "请重启 ADB server（adb kill-server; adb start-server），确认模拟器还在，再重试。")
-
-    @staticmethod
-    def _stop_in_progress() -> bool:
-        """True when this run is being stopped: the stopper's request is on disk (written before the framework is
-        told to stop; DeviceInputState.stop_request), or the running task's tasker reports stopping. Unlike
-        DeviceInputState.stop_requested an unknown answer counts as no: this only decides whether failed reads are
-        reported as an unreachable device, never whether anything is sent."""
-        from host import device_input
-        path = device_input().stop_request()
-        try:
-            if path is not None and os.stat(path):
-                return True
-        except OSError:
-            pass
-        try:
-            from task_control import active_session
-            session = active_session()
-            tasker = getattr(getattr(session, "context", None), "tasker", None)
-            return tasker is not None and bool(tasker.stopping)
-        except Exception:  # the tasker query crosses into the client; a failed query is no stop
-            return False
 
     def exists(self) -> bool:
         # Only a confirmed absence ends the task as "game closed"; an unreadable answer is not one. Whether the

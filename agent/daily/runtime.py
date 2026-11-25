@@ -283,6 +283,9 @@ class Runtime:
         return self._evidence
 
     def diagnostic(self, stage, reason, *, image=None, details=None):
+        from host import android_user_stop
+        if android_user_stop():
+            return None  # Android: after a user stop a frame is no failure scene (False on the desktop)
         return self.evidence.save(stage, reason, image=image, details=details,
                                   generation=self._focus_generation)
 
@@ -541,7 +544,10 @@ class Runtime:
                     from host import UnsupportedInput
                     raise UnsupportedInput("无法写入安卓模拟器的输入记录，这一步暂不发送。")
                 intent = True
-                if state.halted or self.stopped:
+                # A user stop seen here (e.g. requested during the intent write) cancels the unsent touch before the
+                # source frame's reading is judged: an unsent touch after a stop is a stop, not an unconfirmed one.
+                from host import android_user_stop
+                if state.halted or self.stopped or android_user_stop(ask_tasker=False):
                     return False
                 # Nothing may have been held when the source frame was captured (a contact left by anything earlier
                 # stops all input), and the dispatcher's latest event then is the baseline this touch's own lift

@@ -10,7 +10,7 @@ import traceback
 from weakref import WeakSet
 
 from client_config import node_action_params
-from host import native_key
+from host import android_user_stop, native_key
 from navigation.models import GameWindowClosed, NavigationError
 from game_view import GameFrameSizeError, require_game_frame
 from message_log import write_message
@@ -461,7 +461,8 @@ class ForegroundSession:
         return adapter.target.bring_to_foreground(adapter.controller)
 
     def _wait_until(self, adapter, ready, pause_message, resume_message, *, check_hung, bring_back):
-        if self.stopped():
+        # Android: a user stop is no focus loss to pause for (False on Windows and native Mac).
+        if self.stopped() or android_user_stop():
             raise TaskStopped("任务已停止。")
         begin = wall_time.monotonic()
         self.waiting = True
@@ -473,7 +474,7 @@ class ForegroundSession:
             refocused_at = None
             hung_since = None
             while True:
-                if self.stopped() or adapter.stopped():
+                if self.stopped() or adapter.stopped() or android_user_stop(ask_tasker=False):
                     raise TaskStopped("任务已停止。")
                 if not adapter.target.exists():
                     self.window_closed()

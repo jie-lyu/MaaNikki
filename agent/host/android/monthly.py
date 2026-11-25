@@ -314,6 +314,7 @@ def run(rt) -> bool:
 
 
 def fail(rt, reason) -> bool:
-    if not rt.stopped:
+    from host import android_user_stop
+    if not rt.stopped and not android_user_stop():  # a user stop is no failure
         rt.log(f"奇迹之旅奖励：{reason}，本项未完成。")
     return False

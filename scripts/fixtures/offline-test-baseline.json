@@ -136,7 +136,18 @@
     "StopIsNotAnAdbFaultTests.test_a_user_stop_ends_the_action_quietly",
     "StopIsNotAnAdbFaultTests.test_an_unknown_stop_state_still_reports_the_unreachable_device",
     "StopIsNotAnAdbFaultTests.test_failed_reads_after_a_stop_request_are_not_counted",
-    "StopIsNotAnAdbFaultTests.test_failed_reads_while_the_tasker_stops_are_not_counted"
+    "StopIsNotAnAdbFaultTests.test_failed_reads_while_the_tasker_stops_are_not_counted",
+    "StopIsNotAnAdbFaultTests.test_a_user_stop_whose_cached_answer_runs_out_during_the_focus_reads_ends_quietly",
+    "StopIsNotAnAdbFaultTests.test_an_action_that_ends_between_the_stop_request_and_the_framework_stop_ends_quietly",
+    "StopIsNotAnAdbFaultTests.test_an_error_after_a_stop_ends_the_action_quietly",
+    "StopIsNotAnAdbFaultTests.test_a_failed_action_without_a_stop_still_saves_its_scene",
+    "StopIsNotAnAdbFaultTests.test_an_unconfirmed_touch_is_reported_even_after_a_stop",
+    "StopIsNotAnAdbFaultTests.test_a_stop_during_a_focus_pause_ends_it_as_stopped",
+    "StopIsNotAnAdbFaultTests.test_android_diagnostic_frames_are_not_saved_after_a_stop",
+    "StopIsNotAnAdbFaultTests.test_the_android_flows_report_no_failure_after_a_stop",
+    "StopIsNotAnAdbFaultTests.test_the_desktop_ignores_a_stray_stop_request",
+    "NoKeyboardOrMouseTests.test_a_stop_requested_while_a_touch_on_an_unreadable_frame_is_reserved_cancels_it_without_halting",
+    "NoKeyboardOrMouseTests.test_a_sent_touch_whose_lift_is_unreadable_halts_and_keeps_the_marker_even_after_a_stop"
    ],
    "known_failures": [],
    "skips": [

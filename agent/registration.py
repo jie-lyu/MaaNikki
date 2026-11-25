@@ -7,7 +7,8 @@ from threading import Event, Lock
 import traceback
 from performance import action_profile
 from game_view import ALLOWED_FRAME_SIZES, is_clipped_game_frame
-from host import capabilities, game_backend, task_entry_supported, task_refusal_reason, task_start_notice
+from host import (android_user_stop, capabilities, game_backend, task_entry_supported, task_refusal_reason,
+                  task_start_notice)
 from message_log import message_scope
 from task_control import TaskStopped, message_override, task_session
 
@@ -76,6 +77,15 @@ def _write_start_notice(context, task_id, entry):
         traceback.print_exc()
 
 
+def _android_stopped(error=None):
+    """Android only: the user stopped this run, so the action ends as stopped (no failure scene, no 未完成), whatever
+    it returned or raised; except while this process holds an unconfirmed touch, which is always reported."""
+    if not android_user_stop():
+        return False  # always on Windows and native Mac
+    from host import InputUnconfirmed, device_input
+    return not isinstance(error, InputUnconfirmed) and not device_input().halted
+
+
 def agent_action(name, *, stop_on_failure=False):
     def register(cls):
         run = cls.run
@@ -108,12 +118,16 @@ def agent_action(name, *, stop_on_failure=False):
                         except TaskStopped:
                             raise
                         except Exception as error:
+                            if _android_stopped(error):
+                                raise TaskStopped("任务已停止。") from error
                             if session:
                                 session.evidence.save("action_exception", str(error), details={
                                     "node": argv.node_name, "action": name,
                                     "traceback": traceback.format_exc()[-3000:]},
                                     generation=session.generation)
                             raise
+                        if _android_stopped():
+                            raise TaskStopped("任务已停止。")
                         if (session and not result and not session.stopped()
                                 and session.evidence.saved == saved
                                 and name not in {"nikki.daily_config", "nikki.feature_settings"}):

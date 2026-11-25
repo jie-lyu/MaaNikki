@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from task_control import task_time as time
+from task_control import TaskStopped, task_time as time
 
-from host import background_input_class, connect_target, native_key
+from host import android_user_stop, background_input_class, connect_target, native_key
 from .models import GameWindowClosed, NavigationError
 from game_keys import Binding, GameKeys, MACRO_KEYS
 
@@ -62,6 +62,8 @@ class ForegroundInput:
 
     def check(self, *, require_foreground=True):
         if self.stopped():
+            if android_user_stop():  # Android: ends as stopped, not as a navigation error (False on the desktop)
+                raise TaskStopped("任务已停止。")
             raise NavigationError("已停止导航。")
         from task_control import active_session
         session = active_session()

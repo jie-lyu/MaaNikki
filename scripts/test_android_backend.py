@@ -466,79 +466,231 @@ class StopIsNotAnAdbFaultTests(FreshAndroidState):
         with patch("daily.runtime.wall_time.sleep"):
             self.assertIsNone(rt._device_touch_released(target, 900))  # unreadable: the dispatch halts as before
 
-    def run_registered(self, *, stop):
-        """A registered Android action in a real task session: running with the game in focus, then either the user
-        stops (stop.request, then post_stop) or the ADB server stops answering, and the action goes on to its next
-        capture's focus step (Runtime._device_focus_ready) on a stop answer cached from just before."""
+    QUIET = ("任务暂停", "已停止导航", "ADB", "未完成")
+
+    def run_check(self, *, stop, expire_cache=False, refuse=False, error=None):
+        """The real nikki.gameplay action (admission, task session, failure scenes) running the Android check, whose
+        body here is: the game has focus, then the user stops (stop="request": only stop.request so far;
+        "post_stop": the request, then the framework's stop, after which every controller operation fails) or the ADB
+        server dies (stop=None), and the check goes on to its next capture's focus step (Runtime._device_focus_ready)
+        on a stop answer cached from just before; with ``expire_cache`` that answer runs out during the focus reads.
+        ``refuse``: the body returns False instead (e.g. the touch guard refused the tap after the request);
+        ``error``: it raises this instead. Messages count both as shown and as only written to the log file."""
         import registration
+        from action import gameplay
         from daily.runtime import Runtime
         from task_control import _SESSIONS, active_session
         clock = SimpleNamespace(now=0.0)
-        controller = FakeShellController({"mCurrentFocus": FOCUS_GAME, "pidof": "4242\n__exit=0\n"})
+
+        class Device(FakeShellController):
+            def post_shell(inner, command, timeout):
+                if expire_cache:
+                    clock.now += .1
+                return super().post_shell(command, timeout)
+        controller = Device({"mCurrentFocus": FOCUS_GAME, "pidof": "4242\n__exit=0\n"})
         controller.info = INFO
         tasker = SimpleNamespace(controller=controller, stopping=False)
-
-        def post_stop():
-            tasker.stopping = True
-        tasker.post_stop = post_stop
+        tasker.post_stop = lambda: setattr(tasker, "stopping", True)
         notices = []
         context = SimpleNamespace(tasker=tasker, run_recognition=Mock(), get_node_data=Mock(return_value={}),
                                   run_task=Mock(side_effect=lambda entry, override: notices.append(
                                       override["MaaNikki_Daily_Message"]["focus"]["Node.Action.Starting"])))
-        outcome = {}
-        token = registration._LOCAL_REGISTRATION.set(True)
-        try:
-            @registration.agent_action("test.android_backend.stop_is_not_an_adb_fault")
-            class Probe:
-                def run(self, context, argv):
-                    session = active_session()
-                    session.ensure_adapter().check()  # the game has focus on the device
-                    session.stopped()                 # the stop answer the next steps reuse
-                    if stop:
-                        self.request_stop()
-                        context.tasker.post_stop()
-                    controller.outputs.clear()        # stopped framework, or a dead ADB server
-                    rt = Runtime.__new__(Runtime)
-                    rt.navigation_inputs = None
-                    outcome["focus"] = rt._device_focus_ready()
-                    return True
-            Probe.request_stop = lambda probe: self.request_stop()
-        finally:
-            registration._LOCAL_REGISTRATION.reset(token)
+        rt = Runtime.__new__(Runtime)
+        rt.context, rt.controller, rt.navigation_inputs, rt.navigation_halted = context, controller, None, False
+
+        def body(runtime):
+            session = active_session()
+            session.ensure_adapter().check()  # the game has focus on the device
+            session.stopped()                 # the stop answer the next steps reuse
+            if stop:
+                self.request_stop()
+            if stop == "post_stop":
+                tasker.post_stop()
+            if stop != "request":
+                controller.outputs.clear()    # stopped framework, or a dead ADB server
+            if refuse:
+                return False
+            if error is not None:
+                raise error
+            runtime._device_focus_ready()
+            return True
         _SESSIONS.clear()
         saved = []
 
         def sleep(seconds):
             clock.now += max(seconds, 1e-9)
-        argv = SimpleNamespace(task_detail=SimpleNamespace(task_id=41, entry="MaaNikki_Mailbox"),
-                               node_name="MaaNikki_Mailbox", custom_action_param="{}")
+        argv = SimpleNamespace(task_detail=SimpleNamespace(task_id=41, entry="MaaNikki_AndroidCheck"),
+                               node_name="MaaNikki_AndroidCheck", custom_action_param=json.dumps({"kind": "android_check"}))
         try:
             with android_run(), \
                     patch.object(registration, "_START_NOTICES", registration.deque(maxlen=256)), \
                     patch("registration.traceback.print_exc"), \
+                    patch.object(gameplay, "Executors", return_value=rt), \
+                    patch("host.android.check.check", side_effect=body), \
+                    patch("daily.runtime.write_message",
+                          side_effect=lambda text, display: (notices.append(text), True)[1]), \
                     patch("diagnostics.FailureEvidence.save",
                           side_effect=lambda stage, reason, **kw: saved.append((stage, reason))), \
                     patch("task_control.wall_time.monotonic", side_effect=lambda: clock.now), \
                     patch("task_control.wall_time.sleep", side_effect=sleep):
-                result = Probe().run(context, argv)
+                result = gameplay.GameplayAction().run(context, argv)
         finally:
             _SESSIONS.clear()
-            registration._ACTION_TYPES.pop("test.android_backend.stop_is_not_an_adb_fault", None)
-        return result, outcome, saved, notices
+        return result, saved, [n for n in notices if not n.startswith("本任务尚未在安卓模拟器上验证")]
+
+    def assert_quiet_stop(self, result, saved, notices):
+        self.assertFalse(result)
+        self.assertEqual(saved, [])  # no failure scene
+        self.assertFalse([n for n in notices if any(word in n for word in self.QUIET)], notices)
 
     def test_a_user_stop_ends_the_action_quietly(self):
-        result, outcome, saved, notices = self.run_registered(stop=True)
+        self.assert_quiet_stop(*self.run_check(stop="post_stop"))
+
+    def test_a_user_stop_whose_cached_answer_runs_out_during_the_focus_reads_ends_quietly(self):
+        self.assert_quiet_stop(*self.run_check(stop="post_stop", expire_cache=True))
+
+    def test_an_action_that_ends_between_the_stop_request_and_the_framework_stop_ends_quietly(self):
+        self.assert_quiet_stop(*self.run_check(stop="request"))               # it even succeeded
+        self.assert_quiet_stop(*self.run_check(stop="request", refuse=True))  # the guard refused the tap
+
+    def test_an_error_after_a_stop_ends_the_action_quietly(self):
+        for error in (RuntimeError("截图失败"), host.UnsupportedInput("这一步暂不支持"), host.DeviceUnreachable("ADB")):
+            with self.subTest(error=type(error).__name__):  # caught by the gameplay action, or by the wrapper
+                self.assert_quiet_stop(*self.run_check(stop="request", error=error))
+
+    def test_a_failed_action_without_a_stop_still_saves_its_scene(self):
+        result, saved, _notices = self.run_check(stop=None, refuse=True)
         self.assertFalse(result)
-        self.assertNotIn("focus", outcome)  # ended as stopped inside the focus wait
-        self.assertEqual(saved, [])         # no failure scene
-        self.assertFalse([n for n in notices if "ADB" in n or "未完成" in n], notices)
+        self.assertEqual([stage for stage, _reason in saved], ["action_failed"])
 
     def test_a_dead_adb_server_without_a_stop_is_still_reported(self):
-        result, outcome, saved, notices = self.run_registered(stop=False)
+        result, saved, notices = self.run_check(stop=None)
         self.assertFalse(result)
         self.assertEqual([stage for stage, _reason in saved], ["action_exception"])
         self.assertIn("没有回应 ADB 命令", saved[0][1])
         self.assertTrue(any("连续 3 次没有回应 ADB 命令" in n and "adb kill-server" in n for n in notices), notices)
+
+    def test_an_unconfirmed_touch_is_reported_even_after_a_stop(self):
+        import registration
+        self.request_stop()
+        with android_run():
+            self.assertTrue(registration._android_stopped(RuntimeError("x")))
+            self.assertFalse(registration._android_stopped(host.InputUnconfirmed("x")))
+            self.state.halted = True  # this process holds an unconfirmed touch
+            self.assertFalse(registration._android_stopped(RuntimeError("x")))
+            self.assertFalse(registration._android_stopped())
+
+    def test_a_stop_during_a_focus_pause_ends_it_as_stopped(self):
+        from navigation.controller import ForegroundInput
+        from task_control import ForegroundSession, TaskStopped
+        with android_run():
+            self.request_stop()
+            with self.assertRaises(TaskStopped):  # not NavigationError 「已停止导航」
+                ForegroundInput.check(SimpleNamespace(stopped=lambda: True))
+            self.state.stop_request().unlink()
+            session = ForegroundSession(SimpleNamespace(tasker=SimpleNamespace(stopping=False)))
+            session.notify = Mock()
+            adapter = SimpleNamespace(stopped=lambda: False, target=SimpleNamespace(exists=lambda: True),
+                                      hung=lambda: False)
+            sleeps = []
+
+            def sleep(seconds):
+                sleeps.append(seconds)
+                if len(sleeps) == 2:
+                    self.request_stop()  # the user stops while the run waits for the game to come back
+                if len(sleeps) > 50:
+                    raise AssertionError("the pause did not end")
+            with patch("task_control.wall_time.sleep", side_effect=sleep), self.assertRaises(TaskStopped):
+                session._wait_until(adapter, lambda: False, "游戏已离开前台，任务暂停", "继续", check_hung=False,
+                                    bring_back=False)
+            self.assertEqual(len(sleeps), 2)
+            session.notify.assert_called_once_with("游戏已离开前台，任务暂停")  # before the stop: a real pause
+
+    def monthly_runtime(self):
+        from daily.runtime import Runtime
+        rt = Runtime.__new__(Runtime)
+        rt.context, rt.navigation_halted, rt._focus_generation = SimpleNamespace(tasker=SimpleNamespace(stopping=False)), False, 0
+        rt._evidence, rt.log = Mock(), Mock()
+        return rt
+
+    def run_monthly_from_a_screen_it_will_not_leave(self, rt):
+        import numpy as np
+        from host.android import monthly
+        frame = np.zeros((720, 1280, 3), np.uint8)
+        with android_run(), patch("daily.runtime.active_session", return_value=None), \
+                patch("host.android.pages.to_hud", side_effect=lambda rt, rejected: (rejected(frame, "奖励层"), False)[1]):
+            self.assertFalse(monthly.run(rt))
+
+    def test_android_diagnostic_frames_are_not_saved_after_a_stop(self):
+        rt = self.monthly_runtime()
+        self.run_monthly_from_a_screen_it_will_not_leave(rt)  # no stop: the start frame is saved and reported
+        self.assertEqual(rt._evidence.save.call_args.args[0], "android_monthly_start")
+        self.assertIn("本项未完成", rt.log.call_args.args[0])
+        rt = self.monthly_runtime()
+        self.request_stop()
+        self.run_monthly_from_a_screen_it_will_not_leave(rt)
+        rt._evidence.save.assert_not_called()
+        rt.log.assert_not_called()
+
+    def test_the_android_flows_report_no_failure_after_a_stop(self):
+        from host.android import mailbox, monthly
+        for flow in (mailbox, monthly):
+            with self.subTest(flow=flow.__name__):
+                rt = SimpleNamespace(stopped=False, log=Mock())
+                with android_run():
+                    self.assertFalse(flow.fail(rt, "没能回到大世界"))
+                    rt.log.assert_called_once()
+                    rt.log.reset_mock()
+                    self.request_stop()
+                    self.assertFalse(flow.fail(rt, "没能回到大世界"))
+                    rt.log.assert_not_called()
+                    self.state.stop_request().unlink()
+
+    def desktop_run(self, name):
+        env = {k: v for k, v in os.environ.items() if k not in ("PI_CONTROLLER", "MAANIKKI_MACOS_EXTRA_TASKS")}
+        return patch.dict(os.environ, env, clear=True), patch.object(host, "platform_backend", return_value=name)
+
+    def test_the_desktop_ignores_a_stray_stop_request(self):
+        import registration
+        from daily.runtime import Runtime
+        from navigation.controller import ForegroundInput
+        from task_control import TaskStopped
+        self.request_stop()
+        token = registration._LOCAL_REGISTRATION.set(True)
+        try:
+            @registration.agent_action("test.android_backend.desktop_stray_stop_request")
+            class Probe:
+                def run(self, context, argv):
+                    if argv.node_name == "raises":
+                        raise RuntimeError("desktop failure")
+                    return False
+        finally:
+            registration._LOCAL_REGISTRATION.reset(token)
+        for name in ("win32", "macos"):
+            environment, backend = self.desktop_run(name)
+            with self.subTest(desktop=name), environment, backend:
+                self.assertFalse(host.android_user_stop())
+                session = SimpleNamespace(evidence=SimpleNamespace(saved=0, save=Mock()), stopped=lambda: False,
+                                          generation=0)
+                notices = []
+                context = SimpleNamespace(run_task=Mock(side_effect=lambda entry, override: notices.append(
+                    override["MaaNikki_Daily_Message"]["focus"]["Node.Action.Starting"])))
+                with patch("registration.task_session", return_value=nullcontext(session)), \
+                        patch("registration.traceback.print_exc"):
+                    self.assertFalse(Probe().run(context, SimpleNamespace(node_name="raises")))
+                    self.assertFalse(Probe().run(context, SimpleNamespace(node_name="returns")))
+                self.assertEqual([c.args[0] for c in session.evidence.save.call_args_list],
+                                 ["action_exception", "action_failed"])
+                self.assertEqual(notices, ["raises 未完成：desktop failure。"])
+                rt = self.monthly_runtime()
+                rt.diagnostic("desktop_stage", "reason")
+                rt._evidence.save.assert_called_once()
+                with self.assertRaises(NavigationError) as caught:
+                    ForegroundInput.check(SimpleNamespace(stopped=lambda: True))
+                self.assertNotIsInstance(caught.exception, TaskStopped)
+                self.assertEqual(str(caught.exception), "已停止导航。")
+        registration._ACTION_TYPES.pop("test.android_backend.desktop_stray_stop_request", None)
+
 
 class SessionTests(FreshAndroidState):
     """The real task session with an Android target: waits for device focus and sends no key on its own."""
@@ -865,6 +1017,42 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
                 log = (state.root / "logs" / "android-input.jsonl").read_text(encoding="utf-8").splitlines()
                 self.assertEqual(json.loads(log[-1])["outcome"], "cancelled")
                 state._owner.close()
+
+    def test_a_stop_requested_while_a_touch_on_an_unreadable_frame_is_reserved_cancels_it_without_halting(self):
+        # The frame's touch reading was unreadable (that alone would halt input), but the user's stop arrives during
+        # the intent write: the unsent touch is a stop, not an unconfirmed touch.
+        rt = self.tap_runtime()
+        self.state.mark(self.frame, 0, None)
+        original = self.state.record_touch
+
+        def record(action, fields, outcome):
+            if outcome == "sending":
+                self.state.stop_request().parent.mkdir(parents=True, exist_ok=True)
+                self.state.stop_request().write_text("stop")
+            return original(action, fields, outcome)
+        with patch.object(self.state, "record_touch", side_effect=record), android_run(), \
+                patch("daily.runtime.active_session", return_value=None):
+            self.assertFalse(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
+        rt.context.run_action_direct.assert_not_called()
+        self.assertFalse(self.state.halted)
+        self.assertFalse(self.state.marker().exists())
+        log = (self.data_root / "logs" / "android-input.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(json.loads(log[-1])["outcome"], "cancelled")
+
+    def test_a_sent_touch_whose_lift_is_unreadable_halts_and_keeps_the_marker_even_after_a_stop(self):
+        rt = self.tap_runtime()
+
+        def send(*args):
+            self.state.stop_request().parent.mkdir(parents=True, exist_ok=True)
+            self.state.stop_request().write_text("stop")  # the stop arrives while the gesture is in flight
+            return SimpleNamespace(success=True)
+        rt.context.run_action_direct.side_effect = send
+        rt._device_target.touch_snapshot = Mock(return_value=None)  # the lift cannot be read
+        with android_run(), patch("daily.runtime.active_session", return_value=None), \
+                patch("daily.runtime.wall_time.sleep"), self.assertRaises(host.InputUnconfirmed):
+            rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
+        self.assertTrue(self.state.halted)
+        self.assertTrue(self.state.marker().exists())
 
     def test_no_device_reading_comes_between_the_decision_and_the_send_but_the_focus_check(self):
         rt = self.tap_runtime()

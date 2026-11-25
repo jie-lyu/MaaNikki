@@ -305,6 +305,16 @@ _DEVICE_INPUT = None
 _DEVICE_INPUT_INIT = __import__("threading").Lock()
 
 
+def android_user_stop(*, ask_tasker: bool = True) -> bool:
+    """Whether the user stopped this Android run (host.android.target.user_stop): shared code consults it to end such
+    a run quietly as stopped, without a failure scene, an error message or a pause notice. Always False off the
+    Android backend, where nothing is read, so Windows and native Mac never see it."""
+    if not capabilities(game_backend()).touch_actions_only:
+        return False
+    from host.android.target import user_stop
+    return user_stop(ask_tasker=ask_tasker)
+
+
 def device_input() -> DeviceInputState:
     global _DEVICE_INPUT
     with _DEVICE_INPUT_INIT:

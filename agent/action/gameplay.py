@@ -92,6 +92,9 @@ class GameplayAction(CustomAction):
         except TaskStopped:
             raise
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, cv2.error) as error:
+            from host import android_user_stop
+            if android_user_stop():
+                return False  # Android: a user stop is no failure (always False on the desktop)
             runtime.log(f"任务未完成：{error}。")
             if not runtime.stopped and not read_only and kind != "android_check":  # the check never sends input
                 from host import capabilities, game_backend
