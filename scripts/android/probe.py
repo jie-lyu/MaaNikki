@@ -919,7 +919,7 @@ def _sample_input(device: Device, recognizer, sample: dict) -> None:
         sample.update(input="the quit-dialog guard could not be evaluated; nothing sent", stop=True)
         return
     if state["quit_dialog"]:
-        sample.update(_cancel_quit(device, recognizer, state))
+        _cancel_quit(device, recognizer, state, sample)
         return
     if not state["hud"] or "calendar_icon" not in state:
         sample["input"] = "skipped: the open-world HUD or its 奇想日历 shortcut is not showing"
@@ -944,24 +944,25 @@ def _sample_input(device: Device, recognizer, sample: dict) -> None:
     if "guard_error" in after:
         sample.update(stop=True)
     elif after["quit_dialog"]:
-        sample.update(_cancel_quit(device, recognizer, after))
+        _cancel_quit(device, recognizer, after, sample)
 
 
-def _cancel_quit(device: Device, recognizer, state: dict) -> dict:
-    """Tap the quit dialog's 取消 and confirm on a fresh frame that the dialog is gone; anything else stops the run."""
+def _cancel_quit(device: Device, recognizer, state: dict, sample: dict) -> None:
+    """Tap the quit dialog's 取消 and confirm on a fresh frame that the dialog is gone; anything else stops the run.
+    Results go straight into `sample`, so an exception during the check still leaves the tap on record."""
     if "quit_cancel" not in state:
-        return {"input": "quit dialog open but 取消 not found; nothing sent", "stop": True}
-    result = {"quit_cancelled": device.tap(*state["quit_cancel"])}
-    if not result["quit_cancelled"]:
-        return {**result, "stop": True}
+        sample.update(input="quit dialog open but 取消 not found; nothing sent", stop=True)
+        return
+    sample["quit_cancelled"] = device.tap(*state["quit_cancel"])
+    if not sample["quit_cancelled"]:
+        sample["stop"] = True
+        return
     time.sleep(1.5)
-    after = hud_state(recognizer)
     # Dismissed only on a fresh frame that shows the HUD with both quit checks clear (a failed capture or a still
     # visible 取消 leaves hud False).
-    result["quit_dismissed"] = bool(after["hud"])
-    if not result["quit_dismissed"]:
-        result["stop"] = True
-    return result
+    sample["quit_dismissed"] = bool(hud_state(recognizer)["hud"])
+    if not sample["quit_dismissed"]:
+        sample["stop"] = True
 
 
 # ---------------------------------------------------------------- commands

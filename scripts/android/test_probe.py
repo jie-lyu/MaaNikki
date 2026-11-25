@@ -381,6 +381,12 @@ class ProbeTests(unittest.TestCase):
             self.assertFalse(sample["quit_dismissed"])
             self.assertTrue(sample["stop"])
 
+    def test_error_while_confirming_dismissal_keeps_the_cancel_tap(self):
+        sample, controller = self._sample_with_states([self.QUIT, probe.ProbeError("focus lost")])
+        self.assertTrue(sample["quit_cancelled"])
+        self.assertIn("focus lost", sample["error"])
+        self.assertEqual(sample["window_after"], "after")
+
     def test_error_after_an_input_keeps_the_sample(self):
         device_states = [self.HUD]
         sample, controller = None, None
