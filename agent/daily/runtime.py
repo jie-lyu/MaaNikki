@@ -510,9 +510,14 @@ class Runtime:
             return self.pause(.1) and self.ui.unhover()
         return succeeded
 
-    def _dispatch_touch(self, action, fields, focus_generation, source_frame):
-        """Android: the last checks and the dispatch of a validated tap or swipe decided on ``source_frame``."""
+    def _dispatch_touch(self, action, fields, focus_generation, source_frame, send=None):
+        """Android: the last checks and the dispatch of a validated tap or swipe decided on ``source_frame``; with
+        ``send``, a gesture (Runtime.gesture) is sent by calling it instead, under the same reservation, intent log,
+        checks and device lift confirmation. ``send`` returns host.android.gesture's DONE, ABORTED (a stop seen during
+        the gesture: it lifted early, and once that lift is confirmed this returns False) or FAILED."""
         from task_control import ForegroundChanged
+        if send is not None:
+            from host.android.gesture import ABORTED, DONE
         self.check_focus()
         if focus_generation is not None and self._focus_generation != focus_generation:
             raise ForegroundChanged("前台切换后已取消本次输入，等待重新核对")
@@ -535,8 +540,7 @@ class Runtime:
                 if state.halted:
                     self._halt_unconfirmed()
                 raise
-            sent = False
-            intent = False
+            sent = intent = cut_short = False
             try:
                 # The intent is logged first (file I/O), so every check below comes after all the I/O: another caller
                 # may have halted input, the run may be stopping, or the player may have switched apps meanwhile.
@@ -574,8 +578,12 @@ class Runtime:
                 sent = True
                 try:
                     with measure("input.action"):
-                        result = _android_dispatch(self.context, action, fields)
-                    succeeded = result is not None and bool(result.success)
+                        if send is None:
+                            result = _android_dispatch(self.context, action, fields)
+                            succeeded = result is not None and bool(result.success)
+                        else:
+                            performed = send()  # every contact it put down is lifted before it returns or raises
+                            succeeded, cut_short = performed in (DONE, ABORTED), performed == ABORTED
                     outcome = "unconfirmed"
                     if succeeded:
                         # The framework reports a lift as done once it is written to MaaTouch, even when MaaTouch
@@ -588,7 +596,7 @@ class Runtime:
                                 after.state if after.state != "none" else "no new lift"
                             outcome = f"unconfirmed: device reports {why}"
                         else:
-                            outcome = "confirmed"
+                            outcome = "stopped early: confirmed" if cut_short else "confirmed"
                 except BaseException as error:
                     state.record_touch(action, fields, f"raised {type(error).__name__}")
                     self._halt_unconfirmed()
@@ -612,10 +620,47 @@ class Runtime:
                 from host import InputUnconfirmed
                 raise InputUnconfirmed(f"安卓模拟器上的「{action}」没有确认完成（可能留下按住的触点），已停止所有输入；"
                                        "请检查模拟器后重新启动 MaaNikki。")
+        if cut_short:
+            return False
         if action == "Click":
             return self.pause(.1) and self.ui.unhover()
         return True
 
+    def gesture(self, gesture, *, source_frame):
+        """Android only: send a scripted multi-contact gesture (host.android.gesture: joystick steps, the bell press)
+        decided on ``source_frame``, a current frame captured with device focus confirmed. The script is checked
+        first (contacts 0 and 1, points inside the frame, its time cap); then it takes the tap's path: refused on a
+        stop, a halt or a contact held when the frame was captured, the touch marker held and the intent logged before
+        the first down, every contact lifted in ``finally``, and the device must show the final lift with nothing held
+        before this returns, so no capture or decision happens during the gesture or before its lift is confirmed.
+        True when it ran whole and its lift was confirmed; False on a stop (before it started, or seen while it held a
+        contact: it then lifts early). Every other backend raises UnsupportedInput, as ``hold`` does on Android."""
+        from host import UnsupportedInput
+        if not capabilities(game_backend()).touch_actions_only:
+            raise UnsupportedInput("多触点手势只在安卓模拟器上使用，这里不发送。")
+        from host.android.gesture import check_gesture, perform
+        check_gesture(gesture)
+        if source_frame is None:
+            raise UnsupportedInput("安卓模拟器上的手势必须说明它依据的是哪一张截图，这一步暂不支持。")
+        if self.stopped:
+            return False
+        self.check_focus()
+        if not self.ensure_frame():
+            return False
+        self.invalidate_frame()
+        fields = gesture.log_fields()
+        self.evidence.observe("input", action=self.GESTURE_ACTION, fields=fields)
+        inputs = self._active_inputs()
+        if inputs is not None:
+            inputs.check()
+        state = device_input()
+
+        def abort():  # local checks only (no IPC or device read while a contact is held): a halt, the stop request
+            return state.halted or self.navigation_halted or state.stop_requested()
+        return self._dispatch_touch(self.GESTURE_ACTION, fields, None, source_frame,
+                                    send=lambda: perform(self.controller, gesture, abort))
+
+    GESTURE_ACTION = "Gesture"
     TOUCH_KEY_ATTEMPTS = 3
     RELEASE_READS = 6
 

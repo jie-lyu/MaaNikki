@@ -236,6 +236,27 @@
    "known_failures": [],
    "skips": []
   },
+  "test_android_gesture.py": {
+   "tests": [
+    "CapTests.test_a_gesture_over_its_cap_is_refused_before_anything_is_reserved_or_sent",
+    "CapTests.test_malformed_scripts_are_refused",
+    "CapTests.test_the_caps_themselves_are_allowed",
+    "DesktopTests.test_dispatch_still_takes_only_taps_and_swipes",
+    "DesktopTests.test_the_gesture_api_is_unreachable_on_windows_and_native_mac",
+    "JoystickTests.test_camera_drag_is_the_confirmed_swipe_and_capped",
+    "JoystickTests.test_the_joystick_script_follows_the_layout",
+    "RuleTests.test_a_failed_or_overrunning_call_lifts_and_halts",
+    "RuleTests.test_a_lift_the_device_does_not_show_halts_and_keeps_the_marker",
+    "RuleTests.test_a_marker_left_by_an_earlier_touch_refuses_the_gesture",
+    "RuleTests.test_a_stop_request_during_the_hold_lifts_early_and_is_confirmed",
+    "RuleTests.test_an_exception_mid_gesture_lifts_every_contact_and_halts",
+    "RuleTests.test_refused_on_stop_halt_held_contact_or_stale_frame",
+    "RuleTests.test_the_intent_is_logged_before_the_first_down_with_the_script",
+    "RuleTests.test_the_marker_is_held_for_the_whole_gesture_and_cleared_after_the_device_confirms"
+   ],
+   "known_failures": [],
+   "skips": []
+  },
   "test_android_mailbox.py": {
    "tests": [
     "FrameworkTests.test_the_mail_page_is_one_page_whatever_spacing_ocr_reads_in_its_title",
