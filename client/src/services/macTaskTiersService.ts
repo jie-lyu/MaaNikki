@@ -87,3 +87,33 @@ export function androidTaskTiersPendingFor(instanceId: string): boolean {
 export function waitForAndroidTaskTiers(timeoutMs = 30000): Promise<void> {
   return whenSettled(() => useAppStore.getState().androidTaskTiers !== null, useAppStore.subscribe, timeoutMs);
 }
+
+let androidTiersRequested = false;
+let stopWatchingAndroidNeed: (() => void) | null = null;
+
+/**
+ * macOS backend only (App calls it there): loads the Android task tiers into the store once some instance's selected
+ * controller is Adb, and not before. A native-only Mac setup (MacOS or Win32 controllers only) therefore never
+ * requests the Android manifest. Calling it again (a new interface load) re-arms it for one fresh load.
+ */
+export function watchAndroidTaskTiersNeed(): void {
+  androidTiersRequested = false;
+  stopWatchingAndroidNeed?.();
+  stopWatchingAndroidNeed = null;
+  const check = () => {
+    if (androidTiersRequested) return;
+    const state = useAppStore.getState();
+    const needed = state.instances.some((inst) =>
+      usesAndroidTiers(state.backendOS, instanceControllerType(state, inst.id)),
+    );
+    if (!needed) return;
+    androidTiersRequested = true;
+    stopWatchingAndroidNeed?.();
+    stopWatchingAndroidNeed = null;
+    void loadAndroidTaskTiers().then((tiers) => {
+      useAppStore.getState().setAndroidTaskTiers(tiers);
+    });
+  };
+  stopWatchingAndroidNeed = useAppStore.subscribe(check);
+  check();
+}

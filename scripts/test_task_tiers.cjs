@@ -282,6 +282,98 @@ test('the scheduler starts a due native Mac instance at once while an Adb instan
   assert.deepEqual(started.map(([id]) => id), ['M', 'A']);
 });
 
+test('the scheduler runs a due native Mac instance listed after an Adb one even if stopped during the Android wait', async () => {
+  const subscribers = new Set();
+  const subscribe = (listener) => { subscribers.add(listener); return () => subscribers.delete(listener); };
+  const store = {
+    backendOS: 'macos', macTaskTiers: macTiers, androidTaskTiers: null, selectedController: {}, selectedResource: {},
+    projectInterface: { controller: [{ name: 'mac', type: 'MacOS' }, { name: 'nikki_android', type: 'Adb' }], resource: [] },
+    instances: [{ id: 'A', name: 'A', controllerName: 'nikki_android', isRunning: false },
+                { id: 'M', name: 'M', controllerName: 'mac', isRunning: false }],
+  };
+  const reads = watchAndroidReads(store);
+  const service = loadSchedulerWith(store, subscribe);
+  const started = [];
+  service.setTriggerCallback(async (inst) => { started.push([inst.id, reads.length]); return true; });
+  service.start();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  service.stop();  // stopped during the Android tier wait
+  // Mac was decided and started without waiting; the only Android tier read is the Adb instance's own check.
+  assert.deepEqual(started, [['M', 1]]);
+  store.androidTaskTiers = androidTiers;
+  for (const listener of [...subscribers]) listener();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(started.map(([id]) => id), ['M']);  // the stopped scheduler starts nothing more
+});
+
+test('an Adb schedule disabled during the Android tier wait is not started; the store is read again after it', async () => {
+  const subscribers = new Set();
+  const subscribe = (listener) => { subscribers.add(listener); return () => subscribers.delete(listener); };
+  const store = {
+    backendOS: 'macos', macTaskTiers: macTiers, androidTaskTiers: null, selectedController: {}, selectedResource: {},
+    projectInterface: { controller: [{ name: 'mac', type: 'MacOS' }, { name: 'nikki_android', type: 'Adb' }], resource: [] },
+    instances: [{ id: 'A', name: 'A', controllerName: 'nikki_android', isRunning: false },
+                { id: 'B', name: 'B', controllerName: 'nikki_android', isRunning: false }],
+  };
+  const service = loadSchedulerWith(store, subscribe);
+  const started = [];
+  service.setTriggerCallback(async (inst) => { started.push(inst.id); return true; });
+  service.start();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(started, []);
+  // During the wait: A's policy is disabled (a fresh instance object, as the store writes it); B keeps its own.
+  store.instances = [{ ...store.instances[0], schedulePolicies: [{ ...store.instances[0].schedulePolicies[0], enabled: false }] },
+                     store.instances[1]];
+  store.androidTaskTiers = androidTiers;
+  for (const listener of [...subscribers]) listener();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  service.stop();
+  assert.deepEqual(started, ['B']);
+});
+
+test('startup with only native controllers never requests the Android manifest; an Adb selection loads it once', async () => {
+  for (const [os, controllers] of [
+    ['macos', [{ name: 'mac', type: 'MacOS' }]],
+    ['macos', [{ name: 'win', type: 'Win32' }]],
+    ['macos', [{ name: 'mac', type: 'MacOS' }, { name: 'win', type: 'Win32' }]],
+    ['windows', [{ name: 'win', type: 'Win32' }]],
+  ]) {
+    const { service, store, calls, notify } = loadService({
+      invoke: () => view(androidManifest), state: { backendOS: '', projectInterface: null, instances: [] },
+    });
+    const reads = watchAndroidReads(store);
+    // Startup as App.loadInterface does it: the backend OS first, then the interface and the saved instances.
+    store.backendOS = os;
+    if (os === 'macos') service.watchAndroidTaskTiersNeed();
+    store.projectInterface = { controller: controllers, resource: [] };
+    notify();
+    store.instances = [{ id: 'X', name: 'X' }, { id: 'Y', name: 'Y', controllerName: controllers.at(-1).name }];
+    notify();
+    store.selectedController = { X: controllers[0].name };
+    notify();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(calls, [], `${os} ${controllers.map((c) => c.type)} requested the Android manifest`);
+    assert.equal(reads.length, 0);
+  }
+  // An instance that selects the Adb controller loads it, exactly once, and only then.
+  const { service, store, calls, notify } = loadService({
+    invoke: () => view(androidManifest), state: { instances: [{ id: 'X', name: 'X', controllerName: 'mac' }] },
+  });
+  store.setAndroidTaskTiers = (tiers) => { store.androidTaskTiers = tiers; };
+  service.watchAndroidTaskTiersNeed();
+  notify();
+  assert.deepEqual(calls, []);
+  store.selectedController = { X: 'nikki_android' };
+  notify();
+  notify();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(calls, ['get_android_task_tiers']);
+  assert.deepEqual(plain(store.androidTaskTiers), plain(androidTiers));
+  // App.tsx itself no longer loads the Android manifest at startup.
+  const app = readFileSync(resolve(ROOT, 'client/src/App.tsx'), 'utf8');
+  assert.equal(app.includes('loadAndroidTaskTiers('), false);
+});
+
 test('a controller attach_resource_path loads after the resource paths; none adds nothing', () => {
   const paths = load('utils/resourcePath.ts');
   const resource = { name: 'r', path: ['./resource', './resource_extra'] };

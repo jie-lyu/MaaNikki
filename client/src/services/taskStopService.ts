@@ -2,6 +2,7 @@ import { normalizeAgentConfigs } from '@/types/interface';
 import { loggers } from '@/utils/logger';
 import { isTauri } from '@/utils/paths';
 import { useAppStore } from '@/stores/appStore';
+import { getCurrentControllerAndResource } from '@/stores/helpers';
 
 import { maaService } from './maaService';
 
@@ -16,7 +17,8 @@ const stopPromises = new Map<string, Promise<boolean>>();
 /**
  * How many stops were requested per instance. An Android start compares it before submitting and after the backend
  * answered: a Stop pressed while the start was still being prepared then wins over that start (the backend's run
- * slot only exists once the start request arrives). Win32 and native Mac starts do not read it.
+ * slot only exists once the start request arrives). Only instances whose selected controller is Adb read or write
+ * it: Win32 and native Mac starts and stops leave it untouched.
  */
 const stopGenerations = new Map<string, number>();
 
@@ -57,8 +59,17 @@ function cleanupTaskState(instanceId: string) {
   state.clearScheduleExecution(instanceId);
 }
 
+/** The instance's selected controller is Adb (the same choice the start makes from the store). */
+function selectsAdb(instanceId: string): boolean {
+  const state = useAppStore.getState();
+  const { controllerName } = getCurrentControllerAndResource(state, instanceId);
+  return state.projectInterface?.controller.find((c) => c.name === controllerName)?.type === 'Adb';
+}
+
 export async function stopInstanceTasks(instanceId: string): Promise<boolean> {
-  stopGenerations.set(instanceId, stopGeneration(instanceId) + 1);
+  if (selectsAdb(instanceId)) {
+    stopGenerations.set(instanceId, stopGeneration(instanceId) + 1);
+  }
   const existing = stopPromises.get(instanceId);
   if (existing) {
     return existing;

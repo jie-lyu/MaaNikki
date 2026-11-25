@@ -197,7 +197,9 @@
     "RunnerTests.test_the_log_summary_quotes_the_method_lines",
     "RunnerTests.test_the_overlay_masks_are_maatouch_and_raw_with_gzip",
     "RunnerTests.test_the_stop_request_comes_first_and_a_reserved_touch_finishes_before_the_tasker_stops",
-    "RunnerTests.test_a_stale_stop_request_is_removed_before_the_agent_starts"
+    "RunnerTests.test_a_stale_stop_request_is_removed_before_the_agent_starts",
+    "RunnerTests.test_a_touch_still_reserved_at_stop_kills_the_agent_and_never_calls_post_stop",
+    "RunnerTests.test_a_task_that_keeps_running_after_the_agent_is_killed_fails_the_stop_without_post_stop"
    ],
    "known_failures": [],
    "skips": []
@@ -887,7 +889,9 @@
     "macos names the mailbox correctly when the launch task before it was refused",
     "macos registers no names rather than guessing by position without the mapping",
     "windows pairs returned IDs with submitted tasks by position",
-    "every stop request is counted at once, before the stop itself is sent"
+    "every stop request is counted at once, before the stop itself is sent",
+    "Win32 and native Mac stops neither read nor write the Android stop generations",
+    "Win32 and native Mac starts in the toolbar do not read the Android stop generations"
    ],
    "known_failures": [],
    "skips": []
@@ -995,7 +999,10 @@
     "a controller attach_resource_path loads after the resource paths; none adds nothing",
     "native Mac scheduling waits for the Mac tiers alone and never reads the Android tiers",
     "a due Adb instance on macOS waits for the Android tiers, chosen by its selected controller",
-    "the scheduler starts a due native Mac instance at once while an Adb instance waits for the Android tiers"
+    "the scheduler starts a due native Mac instance at once while an Adb instance waits for the Android tiers",
+    "the scheduler runs a due native Mac instance listed after an Adb one even if stopped during the Android wait",
+    "an Adb schedule disabled during the Android tier wait is not started; the store is read again after it",
+    "startup with only native controllers never requests the Android manifest; an Adb selection loads it once"
    ],
    "known_failures": [],
    "skips": []

@@ -222,6 +222,11 @@ class ScheduleService {
       let slotsModified = false;
 
       const { instances } = useAppStore.getState();
+      // Android emulator (macOS only): due Adb instances whose Android task tiers are still loading, decided after
+      // every other instance (below), so they never delay or block a due Win32 or native Mac instance whatever the
+      // instance order. androidTaskTiersPendingFor looks at the controller type first and never reads the Android
+      // tiers for any other instance; off macOS it is always false and this loop is the one from before.
+      const deferred: string[] = [];
 
       for (const inst of instances) {
         const policies = inst.schedulePolicies || [];
@@ -246,14 +251,9 @@ class ScheduleService {
             break;
           }
 
-          // 安卓模拟器（只在 macOS 上）：只有轮到的这个实例选的是 Adb 控制器、安卓任务清单还没读到时才等它；
-          // 其他实例从不看安卓清单。等待之后服务已停止：已记下的时间槽照常保存，这个实例的时间槽不记。
           if (androidTaskTiersPendingFor(freshInst.id)) {
-            await waitForAndroidTaskTiers();
-            if (!this.intervalId || !this.triggerFn) {
-              if (slotsModified) this.setTriggeredSlots(triggeredSlots);
-              return;
-            }
+            deferred.push(inst.id);
+            break;
           }
 
           log.info(
@@ -271,6 +271,38 @@ class ScheduleService {
 
           // 每个实例每个时间槽只执行第一个匹配策略
           break;
+        }
+      }
+
+      // The deferred Adb instances wait for the Android tiers once. Stopped meanwhile: the slots recorded so far
+      // are saved and the deferred ones are not. Otherwise each is decided again from the store as it is now (its
+      // policies, enabled flags and running state may have changed during the wait), without waiting again.
+      if (deferred.length > 0) {
+        await waitForAndroidTaskTiers();
+        if (!this.intervalId || !this.triggerFn) {
+          if (slotsModified) this.setTriggeredSlots(triggeredSlots);
+          return;
+        }
+        for (const id of deferred) {
+          const inst = useAppStore.getState().instances.find((i) => i.id === id);
+          const policy = inst?.schedulePolicies?.find(
+            (p) => p.enabled && p.weekdays.includes(weekday) && p.times?.includes(timeStr),
+          );
+          if (!inst || !policy) continue;
+          const slotKey = buildTriggeredSlotKey(inst.id, slotStr);
+          if (triggeredSlots.has(slotKey)) continue;
+          triggeredSlots.add(slotKey);
+          slotsModified = true;
+          if (inst.isRunning) {
+            log.info(`[调度器] 实例 "${inst.name}" 正在运行，跳过时间槽 ${slotStr} 策略 "${policy.name}"`);
+            continue;
+          }
+          log.info(`[调度器] 准时触发: 时间槽 ${slotStr}, 实例 "${inst.name}", 策略 "${policy.name}"`);
+          try {
+            await this.triggerFn(inst, policy.name, timeStr);
+          } catch (err) {
+            log.error(`[调度器] 触发失败:`, err);
+          }
         }
       }
 

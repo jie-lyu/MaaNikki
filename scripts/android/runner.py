@@ -244,12 +244,12 @@ def run(args) -> int:
         record["nodes"] = [getattr(node, "name", None) for node in (getattr(detail, "nodes", None) or [])][-10:]
     except KeyboardInterrupt:
         record["status"] = "interrupted"
-        record["stop_requested"] = stop_tasker(tasker, data_root, record)
+        record["stop_requested"] = stop_tasker(tasker, data_root, record, child, client)
         raise RunnerError("运行被中断（Ctrl-C）；已请求停止任务。") from None
     except RunnerError as error:
         record["status"] = "error"
         record["error"] = str(error)
-        record["stop_requested"] = stop_tasker(tasker, data_root, record)
+        record["stop_requested"] = stop_tasker(tasker, data_root, record, child, client)
         raise
     finally:
         # Once the agent exists, a Ctrl-C during cleanup is deferred until the child is reaped and the run record is
@@ -446,9 +446,25 @@ def request_stop(data_root: Path, seconds: float | None = None, poll: float | No
     return "clear"
 
 
-def stop_tasker(tasker, data_root: Path | None = None, record: dict | None = None) -> bool:
-    """Ask a running task to stop and wait a bounded time; False when there was nothing to stop or it overran. With
-    a data root, the stop handshake (request_stop) comes first and its result goes to record["touch_at_stop"]."""
+STOP_TASKER_WAIT = 10.0
+STOP_TASKER_POLL = 0.1
+
+
+def stop_tasker(tasker, data_root: Path | None = None, record: dict | None = None, child=None, client=None) -> bool:
+    """Stop a running task without cutting a touch; False when there was nothing to stop or it did not stop in time.
+
+    With a data root, the stop handshake (request_stop) comes first; its result goes to record["touch_at_stop"] and
+    the path taken to record["stop_path"]:
+    - "post_stop": the reserved touch (if any) finished after the request, so the agent sends nothing more and the
+      framework's stop cannot cut a gesture;
+    - "agent terminated": the marker outlived the wait or the request could not be written. post_stop is never called
+      then (MaaFramework's stop sends UP for a contact the in-flight click recorded, and the click then sends its
+      DOWN). The agent child is killed instead: its touches run in this process's controller (context.run_action_direct
+      through the AgentClient), so a click already handed over finishes whole here and no new one can start once the
+      agent is gone; the client's timeout is bounded so the pending custom action returns, and the task, whose entry
+      node has no next node, ends by itself. If it is still running after STOP_TASKER_WAIT, record["stop_path"] says
+      "agent terminated; tasker still running" and False is returned (the run ends with an error, without post_stop).
+    """
     if tasker is None:
         return False
     if data_root is not None:
@@ -456,13 +472,47 @@ def stop_tasker(tasker, data_root: Path | None = None, record: dict | None = Non
         if record is not None:
             record["touch_at_stop"] = touch
         if touch != "clear":
-            print(f"停止时触摸标记的状态：{touch}（可能留下没有确认的触摸；agent 自己的标记处理会继续停止输入）",
-                  file=sys.stderr)
+            return _stop_by_terminating_agent(tasker, touch, record, child, client)
+    if record is not None:
+        record["stop_path"] = "post_stop"
     try:
         within(20, "停止任务", lambda: tasker.post_stop().wait())
         return True
     except (RunnerError, Exception):
         return False
+
+
+def _stop_by_terminating_agent(tasker, touch: str, record: dict | None, child, client) -> bool:
+    print(f"停止时触摸标记的状态：{touch}（可能还有一次触摸在进行）；不调用框架的停止，改为结束 agent 子进程，等任务自己结束",
+          file=sys.stderr)
+    if child is not None:
+        try:
+            child.kill()
+            child.wait(timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if client is not None:
+        try:
+            client.set_timeout(5000)  # a pending custom action call then returns instead of waiting forever
+        except Exception:
+            pass
+    deadline = time.monotonic() + STOP_TASKER_WAIT
+    while _running(tasker) and time.monotonic() < deadline:
+        time.sleep(STOP_TASKER_POLL)
+    stopped = not _running(tasker)
+    if record is not None:
+        record["stop_path"] = "agent terminated" if stopped else "agent terminated; tasker still running"
+    if not stopped:
+        print(f"结束 agent 之后任务 {STOP_TASKER_WAIT:g} 秒内没有自己停下；没有调用框架的停止（它可能切断一次正在进行的点击），"
+              "请检查模拟器上是否留下按住的触点。", file=sys.stderr)
+    return stopped
+
+
+def _running(tasker) -> bool:
+    try:
+        return bool(tasker.running)
+    except Exception:
+        return True
 
 
 def reap(child) -> int | str:

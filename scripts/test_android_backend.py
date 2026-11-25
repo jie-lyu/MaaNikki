@@ -266,7 +266,8 @@ class TargetTests(FreshAndroidState):
                        reading(before=ps.replace("__rc=0", "__rc=1")),  # ps did not finish cleanly
                        reading(before=ps.replace("__rc=0\n", "")),  # no exit status: may be cut short
                        reading(before="".join(ps.splitlines(keepends=True)[:21]) + "__rc=0\n",
-                               after=ps + "".join(f"[proc{n}]\n" for n in range(40))),  # far shorter than the other
+                               after=ps.replace("__rc=0\n", "".join(f"[proc{n}]\n" for n in range(40)) + "__rc=0\n")),
+                       # each listing whole on its own (finished, header, init, 20+ rows), one far shorter than the other
                        reading(after=ps.replace("init second_stage", "zygote")), recovery_reading(None),
                        recovery_reading(f"{boot}\n__input__\n{TOUCH_NONE}{queues}__ps__\n{ps}")):
             self.assertIsNone(broken)

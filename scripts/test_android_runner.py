@@ -269,16 +269,81 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(request.exists())  # left for the agent until the next run starts
             self.assertEqual(list(marker.parent.glob("*.tmp")), [])  # written atomically
 
-            # A marker that outlives the bound: the tasker is still stopped, and the record says so.
-            marker.write_text("{}")
-            stopper = Mock()
-            stopper.post_stop.return_value = Mock(wait=lambda: None)
+            self.assertEqual(record["stop_path"], "post_stop")
+        self.assertFalse(runner.stop_tasker(None, Path("/nonexistent"), {}))  # nothing to stop: no handshake
+
+    class StoppingTasker:
+        """A tasker whose task ends by itself once the agent child is killed (when ``ends`` is True); post_stop is
+        counted, never expected on these paths."""
+
+        def __init__(self, child, ends=True):
+            self.child, self.ends, self.post_stops = child, ends, 0
+
+        @property
+        def running(self):
+            return not (self.ends and self.child.killed)
+
+        def post_stop(self):
+            self.post_stops += 1
+            return Mock(wait=lambda: None)
+
+    class KillableChild:
+        def __init__(self):
+            self.killed = False
+            self.calls = []
+
+        def kill(self):
+            self.killed = True
+            self.calls.append("kill")
+
+        def wait(self, timeout=None):
+            self.calls.append("wait")
+            return -9
+
+    def test_a_touch_still_reserved_at_stop_kills_the_agent_and_never_calls_post_stop(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / "config" / "android-input" / "touch.json"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("{}")  # never released: the touch may still be in flight
+            child, client = self.KillableChild(), Mock()
+            tasker = self.StoppingTasker(child)
             record = {}
             with patch.object(runner, "STOP_TOUCH_WAIT", 0.1), patch("sys.stderr"):
-                self.assertTrue(runner.stop_tasker(stopper, root, record))
-            self.assertEqual(record["touch_at_stop"], "still reserved")
-            stopper.post_stop.assert_called_once()
-        self.assertFalse(runner.stop_tasker(None, Path("/nonexistent"), {}))  # nothing to stop: no handshake
+                self.assertTrue(runner.stop_tasker(tasker, root, record, child, client))
+            self.assertEqual((record["touch_at_stop"], record["stop_path"]), ("still reserved", "agent terminated"))
+            self.assertEqual(tasker.post_stops, 0)
+            self.assertEqual(child.calls, ["kill", "wait"])
+            client.set_timeout.assert_called_once_with(5000)
+            self.assertTrue(marker.exists())  # left to block later touches until the recovery decides
+
+            # The stop request cannot be written (its directory is a file): the same path, no post_stop.
+            blocked = root / "blocked"
+            blocked.write_text("")
+            child = self.KillableChild()
+            tasker = self.StoppingTasker(child)
+            record = {}
+            with patch("sys.stderr"):
+                self.assertTrue(runner.stop_tasker(tasker, blocked, record, child, Mock()))
+            self.assertTrue(record["touch_at_stop"].startswith("request not written"))
+            self.assertEqual((record["stop_path"], tasker.post_stops, child.killed), ("agent terminated", 0, True))
+
+    def test_a_task_that_keeps_running_after_the_agent_is_killed_fails_the_stop_without_post_stop(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / "config" / "android-input" / "touch.json"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("{}")
+            child = self.KillableChild()
+            tasker = self.StoppingTasker(child, ends=False)
+            record = {}
+            with patch.object(runner, "STOP_TOUCH_WAIT", 0.05), patch.object(runner, "STOP_TASKER_WAIT", 0.2), \
+                    patch.object(runner, "STOP_TASKER_POLL", 0.01), patch("sys.stderr"):
+                self.assertFalse(runner.stop_tasker(tasker, root, record, child, Mock()))
+            self.assertEqual(record["stop_path"], "agent terminated; tasker still running")
+            self.assertEqual((tasker.post_stops, child.killed), (0, True))
 
     def test_a_stale_stop_request_is_removed_before_the_agent_starts(self):
         import tempfile

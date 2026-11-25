@@ -43,6 +43,7 @@ pub const NOT_CONNECTED: &str = "安卓模拟器没有连接，请重新连接�
 pub const NO_RESOURCE: &str = "资源还没有加载，请等资源加载完成后再开始。";
 pub const DESKTOP_RUN_ACTIVE: &str = "这个实例还有别的任务在运行，请先停止。";
 pub const DIRECT_CLICK_REFUSED: &str = "安卓模拟器上不提供直接点击：触摸只由 agent 在核对画面并记录之后发送。";
+pub const NOTHING_POSTED: &str = "安卓任务一个也没能提交（模拟器可能已经断开），这一轮已结束；请检查连接后重新开始。";
 
 /// 运行中被拒绝的操作。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +113,8 @@ pub(crate) struct Timing {
     pub child_exit: Duration,
     pub lock_wait: Duration,
     pub poll: Duration,
+    /// How long quitting the client waits for a finishing run to reach the point where no touch can be cut.
+    pub exit_wait: Duration,
 }
 
 impl Default for Timing {
@@ -123,8 +126,49 @@ impl Default for Timing {
             child_exit: Duration::from_secs(5),
             lock_wait: Duration::from_secs(10),
             poll: Duration::from_millis(100),
+            exit_wait: Duration::from_secs(10),
         }
     }
+}
+
+/// What finishing needs of a run's Tasker (a fake in the unit tests).
+pub(crate) trait RunTasker: Send {
+    fn running(&self) -> bool;
+    fn post_stop(&self);
+}
+
+impl RunTasker for Tasker {
+    fn running(&self) -> bool {
+        Tasker::running(self)
+    }
+    fn post_stop(&self) {
+        let _ = Tasker::post_stop(self);
+    }
+}
+
+/// The agent child of a finishing run, shared by its finishing worker and an exit (kill_on_exit) that may have to
+/// kill it first. None once it has been reaped.
+type SharedChild = Arc<Mutex<Option<Child>>>;
+
+fn lock_child(agent: &Mutex<Option<Child>>) -> MutexGuard<'_, Option<Child>> {
+    agent.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Kills the agent child now (if it has not been reaped yet) and reaps it.
+fn kill_agent(agent: &Mutex<Option<Child>>) {
+    if let Some(mut child) = lock_child(agent).take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// A finishing worker's progress, read by an exit during Finishing.
+struct WorkerProgress {
+    token: u64,
+    /// No touch can be cut any more: the run's tasker was not running, or the reserved touch was gone after the stop
+    /// request, or the agent was killed and the tasker then stopped by itself.
+    settled: bool,
+    agent: SharedChild,
 }
 
 /// 这一轮向前端发出的通知（生产环境发给 Tauri 和 WebSocket，测试里记录下来）。
@@ -156,7 +200,7 @@ impl RunEvents for AppEvents {
 
 /// 这一轮自己的句柄。
 pub(crate) struct RunHandles {
-    pub tasker: Option<Tasker>,
+    pub tasker: Option<Box<dyn RunTasker>>,
     pub client: Option<AgentClient>,
     pub child: Option<Child>,
     pub events: Arc<dyn RunEvents>,
@@ -191,6 +235,8 @@ struct SlotInner {
     /// 每个实例正在进行的连接数（connect_controller_impl 的入口登记，返回时注销）。
     connecting: HashMap<String, usize>,
     next_token: u64,
+    /// The finishing worker of the run being finished (None once it is done).
+    worker: Option<WorkerProgress>,
 }
 
 /// 整个进程唯一的安卓运行槽（放在 `MaaState` 里）。
@@ -304,6 +350,9 @@ pub fn stop_if_busy(state: &MaaState, instance_id: &str) -> Option<Result<(), St
             Phase::Running { token, .. } => {
                 let token = *token;
                 info!("[android_run] stop on {}: finishing the run", instance_id);
+                // First, before Stop returns and before any statistics I/O: begin_finishing publishes stop.request,
+                // after which the agent sends no new touch.
+                let job = begin_finishing(slot, &mut inner, token, "task-stopped");
                 match state.instances.lock() {
                     Ok(mut instances) => {
                         if let Some(instance) = instances.get_mut(instance_id) {
@@ -313,7 +362,7 @@ pub fn stop_if_busy(state: &MaaState, instance_id: &str) -> Option<Result<(), St
                     Err(e) => warn!("[android_run] instances lock poisoned while stopping: {}", e),
                 }
                 super::telemetry::on_run_cancelled(instance_id);
-                Some(begin_finishing(slot, &mut inner, token, "task-stopped"))
+                Some(job)
             }
             Phase::Finishing { .. } | Phase::Idle => None,
         }
@@ -555,7 +604,8 @@ async fn start_owned(
     .await
     .map_err(|e| format!("Agent start failed: {}", e))?;
 
-    let handles = RunHandles { tasker: Some(tasker.clone()), client: Some(client), child: Some(child), events };
+    let handles =
+        RunHandles { tasker: Some(Box::new(tasker.clone())), client: Some(client), child: Some(child), events };
     let task_names: Vec<String> =
         tasks.iter().map(|task| task.task_name.clone().unwrap_or_else(|| task.entry.clone())).collect();
     // 遥测：必须在 post_task 之前开始这一轮（与共用流程相同）。
@@ -586,7 +636,6 @@ async fn start_owned(
         job.spawn();
     }
     match &result {
-        Ok(ids) if ids.is_empty() => super::telemetry::on_run_cancelled(&instance_id),
         Ok(_) => super::utils::emit_state_changed(&app, &instance_id, "task-started"),
         Err(_) => super::telemetry::on_run_cancelled(&instance_id),
     }
@@ -739,7 +788,8 @@ impl StartClaim {
                 inner.progress = RunProgress { posted: ids.clone(), ..RunProgress::default() };
                 (Ok(ids), None)
             }
-            Ok(ids) => (Ok(ids), Some(self.finish_with(&mut inner, handles, "tasks-completed"))),
+            // Every post was refused (e.g. the emulator went away): an error, so the start is not reported as a success.
+            Ok(_) => (Err(NOTHING_POSTED.to_string()), Some(self.finish_with(&mut inner, handles, "tasks-completed"))),
             Err(reason) => (Err(reason), Some(self.finish_with(&mut inner, handles, "task-stopped"))),
         }
     }
@@ -750,16 +800,9 @@ impl StartClaim {
             inner.phase =
                 Phase::Finishing { token: self.token, instance_id: self.instance_id.clone(), released: false };
         }
-        FinishJob {
-            slot: Arc::clone(&slot.inner),
-            lock_dir: slot.lock_dir(),
-            timing: slot.timing,
-            token: self.token,
-            instance_id: self.instance_id.clone(),
-            handles,
-            kind,
-            unfinished: Vec::new(),  // nothing was posted
-        }
+        // Nothing was posted, so nothing is unfinished; the worker publishes the stop request itself if the tasker
+        // is running after all.
+        FinishJob::new(slot, inner, self.token, self.instance_id.clone(), handles, kind, Vec::new(), None)
     }
 }
 
@@ -919,7 +962,9 @@ fn fail_unfinished(instance: &mut InstanceRuntime) {
 // 收尾
 // ============================================================================
 
-/// 运行中的这一轮转为收尾，取出它的句柄。调用方持有槽锁，并在锁外启动返回的收尾工作。
+/// Turns the running run into Finishing, takes its handles and publishes stop.request right away: before Stop returns
+/// and before any statistics I/O; from then on the agent starts no new touch. The caller holds the slot lock and spawns
+/// the returned job outside it.
 fn begin_finishing(slot: &AndroidRunSlot, inner: &mut SlotInner, token: u64, kind: &'static str) -> FinishJob {
     let instance_id = inner.phase.instance_id().unwrap_or_default().to_string();
     inner.phase = Phase::Finishing { token, instance_id: instance_id.clone(), released: false };
@@ -929,56 +974,39 @@ fn begin_finishing(slot: &AndroidRunSlot, inner: &mut SlotInner, token: u64, kin
         child: None,
         events: Arc::new(NoEvents),
     });
-    FinishJob {
-        slot: Arc::clone(&slot.inner),
-        lock_dir: slot.lock_dir(),
-        timing: slot.timing,
-        token,
-        instance_id,
-        handles,
-        kind,
-        unfinished: inner.progress.take_unfinished(),
-    }
+    let request = publish_stop_request(&slot.lock_dir());
+    let unfinished = inner.progress.take_unfinished();
+    FinishJob::new(slot, inner, token, instance_id, handles, kind, unfinished, Some(request))
 }
 
-pub const TOUCH_UNCONFIRMED_AT_STOP: &str =
-    "停止时 agent 还有一次触摸没有确认完成（等了 5 秒），这次停止可能留下按住的触点；agent 会保持停止输入，请检查模拟器。";
-
-/// 停止的握手（android_input::write_stop_request）：先写下停止请求，再等已经预留的触摸做完（`touch.json` 消失，
-/// 有期限），然后才 `post_stop`。框架的停止会把一次正在进行的点击切成「先抬起、后按下」，留下按住的触点；
-/// agent 在预留之后看到请求就不再发送，所以握手之后不会再有新的触摸。返回 false：期限到了标记还在（可能没有
-/// 确认），照样停止，由 agent 自己的标记处理保持停止输入。
-fn stop_after_handshake(
-    lock_dir: &Result<PathBuf, String>,
-    timing: Timing,
-    post_stop: impl FnOnce(),
-) -> bool {
-    let clear = match lock_dir {
-        Ok(dir) => match super::android_input::write_stop_request(dir) {
-            Ok(()) => {
-                let deadline = Instant::now() + timing.touch_wait;
-                loop {
-                    if !super::android_input::touch_reserved(dir) {
-                        break true;
-                    }
-                    if Instant::now() >= deadline {
-                        break false;
-                    }
-                    std::thread::sleep(timing.touch_poll);
-                }
-            }
-            Err(e) => {
-                warn!("[android_run] {}", e);
-                false
-            }
-        },
-        Err(e) => {
-            warn!("[android_run] cannot request the agent to stop: {}", e);
-            false
-        }
+fn publish_stop_request(lock_dir: &Result<PathBuf, String>) -> Result<(), String> {
+    let result = match lock_dir {
+        Ok(dir) => super::android_input::write_stop_request(dir),
+        Err(e) => Err(format!("cannot request the agent to stop: {}", e)),
     };
-    post_stop();
-    clear
+    if let Err(e) = &result {
+        warn!("[android_run] {}", e);
+    }
+    result
+}
+
+pub const AGENT_TERMINATED_AT_STOP: &str = "停止时 agent 还有一次触摸没有确认完成（或者停止请求写不进去）：为了不切断正在进行的点击，\
+没有调用框架的停止，改为结束 agent 子进程、等任务自己停下。留下的触摸标记会挡住之后的触摸，请检查模拟器。";
+pub const TASKER_STILL_RUNNING_AT_STOP: &str = "结束 agent 之后任务没有在 10 秒内自己停下：仍然没有调用框架的停止，这一轮停在收尾，\
+任务停下之前不能再开始（一直停不下来就重启 MaaNikki）。请检查模拟器上是否留下按住的触点。";
+
+/// Waits (bounded) for a reserved touch to finish (`touch.json` gone). True when the marker is gone.
+fn wait_for_touch_release(dir: &std::path::Path, timing: Timing) -> bool {
+    let deadline = Instant::now() + timing.touch_wait;
+    loop {
+        if !super::android_input::touch_reserved(dir) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(timing.touch_poll);
+    }
 }
 
 struct NoEvents;
@@ -989,21 +1017,68 @@ impl RunEvents for NoEvents {
     fn retire(&self, _: &str, _: i64, _: bool) {}
 }
 
-/// 一轮的收尾：停下 Tasker（有期限）、断开 agent、等子进程退出（超时强杀）、等 `owner.lock` 能拿到（有期限），
-/// 之后才让槽回到空闲。锁一直拿不到时槽留在收尾（之后的开始继续被拒绝，这是安全的结果）。
+/// Finishing a run: stop the Tasker without cutting a touch, disconnect the agent, wait for its process to exit (killed
+/// after a bound), wait (bounded) until `owner.lock` is free, and only then return the slot to Idle. A lock that stays
+/// held leaves the slot Finishing (later starts keep being refused, the safe outcome).
+///
+/// The two ways the Tasker is stopped (the handshake of android_input::write_stop_request):
+/// - The stop request was written and a reserved touch finished within the bound (`touch.json` gone): the agent sends
+///   nothing once it sees the request after reserving, so `post_stop` cannot cut a touch.
+/// - The marker outlived the bound, or the request was not written: `post_stop` is never called (the framework's stop
+///   sends UP first and the in-flight click then sends its DOWN, leaving a contact held). The agent child is killed
+///   instead: touches run in this process's controller (the agent calls run_action_direct through the AgentClient),
+///   so a click already handed over finishes whole here and none can start once the agent is gone; disconnecting the
+///   client lets the pending custom action return and the task (an entry node without next nodes) ends by itself. If
+///   it is still running after the bound the slot stays Finishing and keeps waiting, still without `post_stop`.
 pub(crate) struct FinishJob {
     slot: Arc<Mutex<SlotInner>>,
     lock_dir: Result<PathBuf, String>,
     timing: Timing,
     token: u64,
     instance_id: String,
-    handles: RunHandles,
+    tasker: Option<Box<dyn RunTasker>>,
+    client: Option<AgentClient>,
+    agent: SharedChild,
+    events: Arc<dyn RunEvents>,
     kind: &'static str,
-    /// 提交了但还没有结束回调的任务（任务 ID，是否开始过），收尾时从任务统计里注销。
+    /// Posted tasks without an end callback yet (task id, whether it started), retired from the task statistics.
     unfinished: Vec<(i64, bool)>,
+    /// Whether stop.request was written (None: not yet; the worker writes it first if the Tasker is running).
+    stop_request: Option<Result<(), String>>,
 }
 
 impl FinishJob {
+    /// The caller holds the slot lock; registers this job's progress in the slot (an exit waits on it).
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        slot: &AndroidRunSlot,
+        inner: &mut SlotInner,
+        token: u64,
+        instance_id: String,
+        handles: RunHandles,
+        kind: &'static str,
+        unfinished: Vec<(i64, bool)>,
+        stop_request: Option<Result<(), String>>,
+    ) -> FinishJob {
+        let RunHandles { tasker, client, child, events } = handles;
+        let agent: SharedChild = Arc::new(Mutex::new(child));
+        inner.worker = Some(WorkerProgress { token, settled: false, agent: Arc::clone(&agent) });
+        FinishJob {
+            slot: Arc::clone(&slot.inner),
+            lock_dir: slot.lock_dir(),
+            timing: slot.timing,
+            token,
+            instance_id,
+            tasker,
+            client,
+            agent,
+            events,
+            kind,
+            unfinished,
+            stop_request,
+        }
+    }
+
     fn spawn(self) {
         let name = format!("android-finish-{}", self.token);
         if let Err(e) = std::thread::Builder::new().name(name).spawn(move || self.run()) {
@@ -1011,37 +1086,92 @@ impl FinishJob {
         }
     }
 
+    fn mark_settled(slot: &Mutex<SlotInner>, token: u64) {
+        if let Some(worker) = lock(slot).worker.as_mut().filter(|w| w.token == token) {
+            worker.settled = true;
+        }
+    }
+
     pub(crate) fn run(self) {
-        let FinishJob { slot, lock_dir, timing, token, instance_id, handles, kind, unfinished } = self;
-        let RunHandles { tasker, client, child, events } = handles;
+        let FinishJob {
+            slot,
+            lock_dir,
+            timing,
+            token,
+            instance_id,
+            tasker,
+            client,
+            agent,
+            events,
+            kind,
+            unfinished,
+            stop_request,
+        } = self;
+        // The stop request goes out before any statistics I/O (begin_finishing has already written it for a run that
+        // was running).
+        let request = match tasker.as_deref() {
+            Some(t) if t.running() => Some(stop_request.unwrap_or_else(|| publish_stop_request(&lock_dir))),
+            _ => None,
+        };
         for (task_id, started) in unfinished {
             events.retire(&instance_id, task_id, started);
         }
-        if let Some(tasker) = &tasker {
-            if tasker.running() {
-                let clear = stop_after_handshake(&lock_dir, timing, || {
-                    let _ = tasker.post_stop();
-                });
-                if !clear {
-                    warn!("[android_run] run {}: a touch was still reserved when the tasker was stopped", token);
-                    events.message(&instance_id, TOUCH_UNCONFIRMED_AT_STOP);
-                }
-                let deadline = Instant::now() + timing.tasker_stop;
-                while tasker.running() && Instant::now() < deadline {
-                    std::thread::sleep(timing.poll);
-                }
-                if tasker.running() {
-                    warn!("[android_run] the tasker of run {} did not stop in time", token);
+        let mut agent_terminated = false;
+        match (tasker.as_deref(), request) {
+            (Some(tasker), Some(request)) => {
+                let released = match (&request, &lock_dir) {
+                    (Ok(()), Ok(dir)) => wait_for_touch_release(dir, timing),
+                    _ => false,
+                };
+                if released {
+                    info!("[android_run] run {}: stop path post_stop (no touch reserved after the stop request)", token);
+                    Self::mark_settled(&slot, token);
+                    tasker.post_stop();
+                    let deadline = Instant::now() + timing.tasker_stop;
+                    while tasker.running() && Instant::now() < deadline {
+                        std::thread::sleep(timing.poll);
+                    }
+                    if tasker.running() {
+                        warn!("[android_run] the tasker of run {} did not stop in time", token);
+                    }
+                } else {
+                    warn!(
+                        "[android_run] run {}: stop path agent-terminated, no post_stop ({})",
+                        token,
+                        if request.is_ok() { "a touch was still reserved" } else { "the stop request was not written" }
+                    );
+                    events.message(&instance_id, AGENT_TERMINATED_AT_STOP);
+                    agent_terminated = true;
+                    kill_agent(&agent);
+                    if let Some(client) = &client {
+                        // Bounds the custom action call the tasker may be waiting in, so the task can end.
+                        super::maa_agent::disconnect_agent(client);
+                    }
+                    let deadline = Instant::now() + timing.tasker_stop;
+                    while tasker.running() && Instant::now() < deadline {
+                        std::thread::sleep(timing.poll);
+                    }
+                    if tasker.running() {
+                        warn!("[android_run] run {}: the tasker is still running after the agent was killed; \
+                               staying in Finishing without post_stop", token);
+                        events.message(&instance_id, TASKER_STILL_RUNNING_AT_STOP);
+                        while tasker.running() {
+                            std::thread::sleep(timing.poll);
+                        }
+                    }
+                    info!("[android_run] run {}: the tasker stopped on its own after the agent was killed", token);
+                    Self::mark_settled(&slot, token);
                 }
             }
+            _ => Self::mark_settled(&slot, token),
         }
         if let Some(client) = client {
-            super::maa_agent::disconnect_agent(&client);
+            if !agent_terminated {
+                super::maa_agent::disconnect_agent(&client);
+            }
             drop(client);
         }
-        if let Some(child) = child {
-            reap_child(child, timing);
-        }
+        reap_child(&agent, timing);
         drop(tasker);
 
         let deadline = Instant::now() + timing.lock_wait;
@@ -1062,6 +1192,9 @@ impl FinishJob {
         };
         {
             let mut inner = lock(&slot);
+            if inner.worker.as_ref().is_some_and(|w| w.token == token) {
+                inner.worker = None;
+            }
             if let Phase::Finishing { token: current, released, .. } = &mut inner.phase {
                 if *current == token {
                     if lock_free {
@@ -1082,38 +1215,68 @@ impl FinishJob {
     }
 }
 
-/// 等子进程自己退出（有期限），超时强杀并回收。
-fn reap_child(mut child: Child, timing: Timing) {
+/// Waits (bounded) for the agent to exit by itself, then kills and reaps it.
+fn reap_child(agent: &Mutex<Option<Child>>, timing: Timing) {
     let deadline = Instant::now() + timing.child_exit;
     loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(timing.poll),
-            Ok(None) => break,
-            Err(e) => {
-                warn!("[android_run] error waiting for the agent: {}", e);
-                break;
+        {
+            let mut guard = lock_child(agent);
+            let Some(child) = guard.as_mut() else { return };
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    *guard = None;
+                    return;
+                }
+                Ok(None) if Instant::now() < deadline => {}
+                Ok(None) => break,
+                Err(e) => {
+                    warn!("[android_run] error waiting for the agent: {}", e);
+                    break;
+                }
             }
         }
+        std::thread::sleep(timing.poll);
     }
     warn!("[android_run] the agent did not exit in time, killing it");
-    let _ = child.kill();
-    let _ = child.wait();
+    kill_agent(agent);
 }
 
-/// 窗口关闭时：结束这一轮的 agent 子进程（共用的 cleanup_all_agent_children 只看实例上的子进程）。
+/// Quitting the client (window destroyed, tray Quit): never exit in the middle of a touch. A running run takes the same
+/// finishing as a Stop (stop request first, then one of the two ways above); until its worker reaches the point where
+/// no touch can be cut (`touch.json` gone after the stop request, or the agent gone and the Tasker stopped), this waits,
+/// bounded by `exit_wait`, then kills the agent child and lets the exit proceed. It never calls `post_stop` and never
+/// drops the Tasker or the AgentClient (the worker owns them). A run still starting is not handled here (risk 24).
 pub fn kill_on_exit(state: &MaaState) {
-    let run = lock(&state.android_run.inner).run.take();
-    if let Some(RunHandles { client, child, tasker, .. }) = run {
-        if let Some(client) = &client {
-            super::maa_agent::disconnect_agent(client);
+    let slot = &state.android_run;
+    let job = {
+        let mut inner = lock(&slot.inner);
+        match inner.phase.clone() {
+            Phase::Running { token, instance_id } => {
+                info!("[android_run] exiting while run {} on {} is running: finishing it first", token, instance_id);
+                Some(begin_finishing(slot, &mut inner, token, "task-stopped"))
+            }
+            _ => None,
         }
-        if let Some(mut child) = child {
-            let _ = child.kill();
-            let _ = child.wait();
+    };
+    if let Some(job) = job {
+        job.spawn();
+    }
+    let deadline = Instant::now() + slot.timing.exit_wait;
+    loop {
+        let (settled, agent) = match lock(&slot.inner).worker.as_ref() {
+            Some(worker) => (worker.settled, Some(Arc::clone(&worker.agent))),
+            None => (true, None),
+        };
+        if settled || Instant::now() >= deadline {
+            if !settled {
+                warn!("[android_run] exiting before the finishing run reached a point where no touch can be cut");
+            }
+            if let Some(agent) = agent {
+                kill_agent(&agent);
+            }
+            return;
         }
-        drop(client);
-        drop(tasker);
+        std::thread::sleep(slot.timing.poll);
     }
 }
 

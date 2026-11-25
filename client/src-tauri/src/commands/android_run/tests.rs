@@ -4,7 +4,7 @@
 
 use super::*;
 use std::os::unix::io::AsRawFd;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const A: &str = "android";
 const B: &str = "other-android";
@@ -19,6 +19,7 @@ fn timing() -> Timing {
         child_exit: Duration::from_millis(1500),
         lock_wait: Duration::from_millis(400),
         poll: Duration::from_millis(10),
+        exit_wait: Duration::from_millis(1500),
     }
 }
 
@@ -63,7 +64,10 @@ fn macos() -> ControllerConfig {
 /// A state whose owner.lock lives in a fresh temporary directory, with an Adb instance A and B, a Win32
 /// instance W and a MacOS instance M (configurations only: no native handles in unit tests).
 fn state() -> (Arc<MaaState>, PathBuf) {
-    let dir = temp_dir();
+    state_in(temp_dir())
+}
+
+fn state_in(dir: PathBuf) -> (Arc<MaaState>, PathBuf) {
     let mut state = MaaState::default();
     state.android_run = AndroidRunSlot::for_tests(dir.clone(), timing(), adb_configured);
     {
@@ -422,7 +426,7 @@ fn a_start_with_nothing_posted_or_a_failed_post_finishes_instead_of_running() {
     let (state, _dir) = state();
     let events = Arc::new(Recorded::default());
     let (result, job) = claim(&state, A).unwrap().commit(handles(None, &events), |_| Ok(vec![]));
-    assert_eq!(result, Ok(vec![]));
+    assert_eq!(result.err().as_deref(), Some(NOTHING_POSTED));  // not reported as a successful start
     job.unwrap().run();
     assert_eq!(state.android_run.phase(), Phase::Idle);
     let (result, job) = claim(&state, A)
@@ -648,13 +652,111 @@ fn every_unfinished_task_is_retired_exactly_once_when_a_run_is_cut_short() {
     assert_eq!(events.kinds(), ["tasks-completed"]);
 }
 
+/// A tasker for the finishing tests: running until post_stop (when `stops_on_post_stop`) or until the test calls
+/// stop(); its running() waits while `gate` is closed, which holds the finishing worker at its first step. post_stop
+/// records whether `watch` (the touch marker) existed at that moment.
+#[derive(Clone)]
+struct FakeTasker {
+    running: Arc<AtomicBool>,
+    post_stops: Arc<Mutex<Vec<bool>>>,
+    stops_on_post_stop: bool,
+    gate: Arc<AtomicBool>,
+    watch: PathBuf,
+}
+
+impl FakeTasker {
+    fn new(stops_on_post_stop: bool, watch: PathBuf) -> Self {
+        FakeTasker {
+            running: Arc::new(AtomicBool::new(true)),
+            post_stops: Arc::default(),
+            stops_on_post_stop,
+            gate: Arc::new(AtomicBool::new(true)),
+            watch,
+        }
+    }
+    fn stop(&self) {
+        self.running.store(false, Ordering::SeqCst);
+    }
+    fn post_stops(&self) -> Vec<bool> {
+        self.post_stops.lock().unwrap().clone()
+    }
+}
+
+impl RunTasker for FakeTasker {
+    fn running(&self) -> bool {
+        while !self.gate.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        self.running.load(Ordering::SeqCst)
+    }
+    fn post_stop(&self) {
+        self.post_stops.lock().unwrap().push(self.watch.exists());
+        if self.stops_on_post_stop {
+            self.stop();
+        }
+    }
+}
+
+fn running_with(state: &Arc<MaaState>, token: u64, child: Option<Child>, events: &Arc<Recorded>, tasker: &FakeTasker) {
+    running(state, token, child, events);
+    lock(&state.android_run.inner).run.as_mut().unwrap().tasker = Some(Box::new(tasker.clone()));
+}
+
+fn alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+fn has_message(events: &Recorded, text: &str) -> bool {
+    events.kinds().iter().any(|kind| kind == &format!("message: {}", text))
+}
+
+fn finishing_job(state: &Arc<MaaState>, token: u64) -> FinishJob {
+    let mut inner = lock(&state.android_run.inner);
+    begin_finishing(&state.android_run, &mut inner, token, "task-stopped")
+}
+
+/// Records, at each statistics retirement, whether stop.request already existed.
+struct RetireSeesRequest {
+    request: PathBuf,
+    seen: Mutex<Vec<bool>>,
+}
+
+impl RunEvents for RetireSeesRequest {
+    fn state_changed(&self, _: &str, _: &str) {}
+    fn message(&self, _: &str, _: &str) {}
+    fn retire(&self, _: &str, _: i64, _: bool) {
+        self.seen.lock().unwrap().push(self.request.exists());
+    }
+}
+
 #[test]
-fn the_tasker_is_stopped_only_after_the_stop_request_and_a_reserved_touch_finishing() {
+fn a_stop_publishes_its_request_before_it_returns_and_before_any_statistics_io() {
     let _serial = serial();
-    let dir = temp_dir();
-    let lock_dir: Result<PathBuf, String> = Ok(dir.clone());
+    let (state, dir) = state();
+    let events = Arc::new(Recorded::default());
+    let tasker = FakeTasker::new(true, dir.join("touch.json"));
+    tasker.gate.store(false, Ordering::SeqCst);  // the worker is held at its first step
+    running_with(&state, 7, None, &events, &tasker);
+    let seen = Arc::new(RetireSeesRequest { request: dir.join("stop.request"), seen: Mutex::default() });
+    lock(&state.android_run.inner).run.as_mut().unwrap().events = Arc::clone(&seen) as Arc<dyn RunEvents>;
+    assert_eq!(stop_if_busy(&state, A), Some(Ok(())));
+    assert!(dir.join("stop.request").exists(), "written by Stop itself, not left to the worker");
+    assert!(seen.seen.lock().unwrap().is_empty(), "no statistics I/O before Stop returned");
+    tasker.gate.store(true, Ordering::SeqCst);
+    wait_for_idle(&state);
+    assert_eq!(*seen.seen.lock().unwrap(), [true, true]);  // both tasks retired, each after the request
+    assert_eq!(tasker.post_stops(), [false]);  // no touch was reserved: the tasker is stopped normally
+}
+
+#[test]
+fn a_touch_released_after_the_stop_request_is_followed_by_post_stop() {
+    let _serial = serial();
+    let (state, dir) = state();
+    let events = Arc::new(Recorded::default());
     let marker = dir.join("touch.json");
     let request = dir.join("stop.request");
+    let tasker = FakeTasker::new(true, marker.clone());
+    running_with(&state, 4, Some(sleeper("0.2")), &events, &tasker);
     std::fs::write(&marker, "{}").unwrap();  // the agent has a touch reserved when the stop comes
     let order = Arc::new(Mutex::new(Vec::<&str>::new()));
     let agent = {
@@ -670,28 +772,160 @@ fn the_tasker_is_stopped_only_after_the_stop_request_and_a_reserved_touch_finish
             std::fs::remove_file(&marker).unwrap();
         })
     };
-    let posted = Arc::clone(&order);
-    assert!(stop_after_handshake(&lock_dir, timing(), move || posted.lock().unwrap().push("post_stop")));
+    finishing_job(&state, 4).run();
     agent.join().unwrap();
-    assert_eq!(order.lock().unwrap().as_slice(), ["request seen", "touch released", "post_stop"]);
+    assert_eq!(order.lock().unwrap().as_slice(), ["request seen", "touch released"]);
+    assert_eq!(tasker.post_stops(), [false], "post_stop once, after the marker was gone");
+    assert!(!has_message(&events, AGENT_TERMINATED_AT_STOP));
+    assert_eq!(state.android_run.phase(), Phase::Idle);
     assert!(request.exists(), "the request stays for the agent until the next start removes it");
     assert_eq!(std::fs::read_dir(&dir).unwrap().filter(|e| {
         e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".tmp")
     }).count(), 0);
+}
 
-    // A reservation that outlives the bound: the tasker is still stopped, and the caller is told.
-    std::fs::write(&marker, "{}").unwrap();
+#[test]
+fn a_touch_still_reserved_kills_the_agent_and_never_calls_post_stop() {
+    let _serial = serial();
+    let (state, dir) = state();
+    let events = Arc::new(Recorded::default());
+    let marker = dir.join("touch.json");
+    let tasker = FakeTasker::new(true, marker.clone());
+    let child = sleeper("30");
+    let pid = child.id();
+    running_with(&state, 4, Some(child), &events, &tasker);
+    std::fs::write(&marker, "{}").unwrap();  // never released
+    let job = finishing_job(&state, 4);
+    let worker = std::thread::spawn(move || job.run());
+    // touch_wait (0.3 s) runs out, the agent is killed, and the tasker keeps running past tasker_stop (0.2 s).
+    std::thread::sleep(Duration::from_millis(900));
+    assert!(!alive(pid), "the agent is killed (and reaped) instead of stopping the tasker");
+    assert_eq!(state.android_run.phase(), Phase::Finishing { token: 4, instance_id: A.into(), released: false });
+    assert_eq!(claim(&state, A).err().as_deref(), Some(STILL_FINISHING));
+    assert!(tasker.post_stops().is_empty());
+    assert!(has_message(&events, AGENT_TERMINATED_AT_STOP));
+    assert!(has_message(&events, TASKER_STILL_RUNNING_AT_STOP));
+    tasker.stop();  // the task ends by itself
+    worker.join().unwrap();
+    assert_eq!(state.android_run.phase(), Phase::Idle);
+    assert!(tasker.post_stops().is_empty());
+    assert!(marker.exists(), "the marker stays and blocks later touches");
+}
+
+#[test]
+fn a_stop_request_that_cannot_be_written_kills_the_agent_and_never_calls_post_stop() {
+    let _serial = serial();
+    let parent = temp_dir();
+    std::fs::write(parent.join("file"), "").unwrap();
+    let (state, _) = state_in(parent.join("file").join("input"));  // not creatable: its parent is a file
+    let events = Arc::new(Recorded::default());
+    let tasker = FakeTasker::new(true, parent.join("touch.json"));
+    let child = sleeper("30");
+    let pid = child.id();
+    running_with(&state, 4, Some(child), &events, &tasker);
+    let job = finishing_job(&state, 4);
+    let stopper = {
+        let tasker = tasker.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            tasker.stop();
+        })
+    };
+    job.run();
+    stopper.join().unwrap();
+    assert!(!alive(pid));
+    assert!(tasker.post_stops().is_empty());
+    assert!(has_message(&events, AGENT_TERMINATED_AT_STOP));
+    // owner.lock cannot be checked there either: the slot stays finishing (safe).
+    assert!(matches!(state.android_run.phase(), Phase::Finishing { token: 4, .. }));
+}
+
+#[test]
+fn quitting_while_running_takes_the_safe_stop_and_waits_until_no_touch_can_be_cut() {
+    let _serial = serial();
+    // A touch stays reserved; the task ends by itself 0.6 s after the agent is gone.
+    let (state, dir) = state();
+    let events = Arc::new(Recorded::default());
+    let tasker = FakeTasker::new(true, dir.join("touch.json"));
+    let child = sleeper("30");
+    let pid = child.id();
+    running_with(&state, 4, Some(child), &events, &tasker);
+    std::fs::write(dir.join("touch.json"), "{}").unwrap();
+    let stopper = {
+        let tasker = tasker.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(600));
+            tasker.stop();
+        })
+    };
     let started = Instant::now();
-    let stopped = Arc::new(Mutex::new(false));
-    let flag = Arc::clone(&stopped);
-    assert!(!stop_after_handshake(&lock_dir, timing(), move || *flag.lock().unwrap() = true));
-    assert!(*stopped.lock().unwrap());
-    assert!(started.elapsed() >= timing().touch_wait);
-    // No data directory: no handshake possible, the tasker is still stopped.
-    let stopped = Arc::new(Mutex::new(false));
-    let flag = Arc::clone(&stopped);
-    assert!(!stop_after_handshake(&Err("no data dir".into()), timing(), move || *flag.lock().unwrap() = true));
-    assert!(*stopped.lock().unwrap());
+    kill_on_exit(&state);
+    let waited = started.elapsed();
+    stopper.join().unwrap();
+    assert!(waited >= Duration::from_millis(550), "returned after {:?}, before the tasker stopped", waited);
+    assert!(waited < timing().exit_wait, "{:?}", waited);
+    assert!(tasker.post_stops().is_empty());
+    assert!(!alive(pid));
+    assert!(dir.join("stop.request").exists());
+    wait_for_idle(&state);
+
+    // No touch reserved: the cooperative stop, and the exit then kills the agent rather than leaving it behind.
+    let (state, dir) = self::state();
+    let tasker = FakeTasker::new(false, dir.join("touch.json"));  // keeps "running" after post_stop
+    let child = sleeper("30");
+    let pid = child.id();
+    running_with(&state, 5, Some(child), &events, &tasker);
+    let started = Instant::now();
+    kill_on_exit(&state);
+    assert!(started.elapsed() < Duration::from_millis(500));
+    assert!(!alive(pid));
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(tasker.post_stops(), [false]);
+    tasker.stop();
+    wait_for_idle(&state);
+
+    // The tasker never stops: the exit proceeds after exit_wait, still without post_stop.
+    let (state, dir) = self::state();
+    let tasker = FakeTasker::new(true, dir.join("touch.json"));
+    running_with(&state, 6, Some(sleeper("30")), &events, &tasker);
+    std::fs::write(dir.join("touch.json"), "{}").unwrap();
+    let started = Instant::now();
+    kill_on_exit(&state);
+    let waited = started.elapsed();
+    assert!(waited >= timing().exit_wait && waited < timing().exit_wait * 2, "{:?}", waited);
+    assert!(tasker.post_stops().is_empty());
+    tasker.stop();
+    wait_for_idle(&state);
+}
+
+#[test]
+fn quitting_while_a_stop_is_finishing_waits_for_the_reserved_touch() {
+    let _serial = serial();
+    let (state, dir) = state();
+    let events = Arc::new(Recorded::default());
+    let marker = dir.join("touch.json");
+    let tasker = FakeTasker::new(true, marker.clone());
+    running_with(&state, 4, Some(sleeper("30")), &events, &tasker);
+    std::fs::write(&marker, "{}").unwrap();
+    assert_eq!(stop_if_busy(&state, A), Some(Ok(())));  // the worker now owns the handles
+    let releaser = {
+        let marker = marker.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            std::fs::remove_file(&marker).unwrap();
+        })
+    };
+    let started = Instant::now();
+    kill_on_exit(&state);
+    releaser.join().unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(180), "{:?}", started.elapsed());
+    wait_for_idle(&state);
+    assert_eq!(tasker.post_stops(), [false]);
+
+    // Nothing running or finishing: the exit does not wait.
+    let started = Instant::now();
+    kill_on_exit(&state);
+    assert!(started.elapsed() < Duration::from_millis(50));
 }
 
 #[test]

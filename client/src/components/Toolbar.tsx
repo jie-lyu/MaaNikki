@@ -1338,7 +1338,8 @@ export function Toolbar({ showAddPanel, onToggleAddPanel, className }: ToolbarPr
         // 让这次开始不再提交（提交前核对）；请求已经发出时，后端返回后再停一次（提交后核对）。
         // The controller this start connects with (the target instance's), as the start gate uses.
         const androidStart = controller?.type === 'Adb';
-        const stopsBeforeStart = stopGeneration(targetId);
+        // Win32 and native Mac starts never read the Android stop bookkeeping.
+        const stopsBeforeStart = androidStart ? stopGeneration(targetId) : 0;
         const stoppedSinceStart = () => androidStart && stopGeneration(targetId) !== stopsBeforeStart;
 
         updateInstance(targetId, { isRunning: true });

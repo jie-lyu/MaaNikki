@@ -410,6 +410,12 @@ pub fn run() {
         .run(|_app_handle, event| {
             // 退出前收尾遥测（结束 Session 与悬挂 Transaction 并 flush）并卸载鼠标守护线程
             if matches!(event, tauri::RunEvent::Exit) {
+                // Android run (macOS only): also on this path (tray Quit), wait until no touch can be cut; returns
+                // at once when the window's destruction already did it or nothing runs.
+                #[cfg(target_os = "macos")]
+                if let Some(state) = _app_handle.try_state::<Arc<MaaState>>() {
+                    commands::android_run::kill_on_exit(&state);
+                }
                 mouse_guard::shutdown_server();
                 commands::telemetry::on_app_exit();
             }
