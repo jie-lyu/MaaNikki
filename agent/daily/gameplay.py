@@ -1266,6 +1266,10 @@ class Gameplay:
         return "failed"
 
     def monthly(self):
+        from host import capabilities, game_backend
+        if capabilities(game_backend()).touch_actions_only:
+            from host.android import monthly  # the phone layout has its own flow and taps (Windows does not ship it)
+            return monthly.run(self.rt) and not self.rt.stopped
         kind, label = "unknown", "奇迹之旅／乐园构想"
         # Availability belongs to this run; a new season can reopen Paradise.
         self.ui.monthly_paradise_unavailable = False

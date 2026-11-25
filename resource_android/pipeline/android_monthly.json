@@ -1,0 +1,58 @@
+{
+  "MaaNikki_Android_MonthlyTreasureTab": {
+    "recognition": "OCR",
+    "roi": [10, 180, 120, 60],
+    "expected": "^旅行秘宝$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_MonthlyTaskTab": {
+    "recognition": "OCR",
+    "roi": [10, 300, 120, 60],
+    "expected": "^旅行任务$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_MonthlyTaskContent": {
+    "recognition": "OCR",
+    "roi": [180, 200, 140, 140],
+    "expected": "^本[周期]任务$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_MonthlyTreasureContent": {
+    "recognition": "OCR",
+    "roi": [160, 290, 130, 50],
+    "expected": "^旅途序曲$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_MonthlyClaimAll": {
+    "recognition": "OCR",
+    "roi": [660, 620, 260, 70],
+    "expected": "^一?键领取$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_RewardLayerTitle": {
+    "recognition": "OCR",
+    "roi": [500, 140, 280, 90],
+    "expected": "^恭喜获得$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_RewardLayerHint": {
+    "recognition": "OCR",
+    "roi": [520, 620, 240, 60],
+    "expected": "^点击空白区域继续$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_RewardLayerOverMonthlyTitle": {
+    "recognition": "TemplateMatch",
+    "template": "android/monthly_layer_title.png",
+    "roi": [0, 0, 240, 90],
+    "threshold": 0.9,
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_RewardLayerOverMonthlyUnlock": {
+    "recognition": "TemplateMatch",
+    "template": "android/monthly_layer_unlock.png",
+    "roi": [930, 600, 350, 120],
+    "threshold": 0.9,
+    "action": "DoNothing"
+  }
+}

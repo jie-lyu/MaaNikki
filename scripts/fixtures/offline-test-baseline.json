@@ -155,6 +155,37 @@
    "known_failures": [],
    "skips": []
   },
+  "test_android_monthly.py": {
+   "tests": [
+    "EntryTests.test_the_shared_task_branches_to_the_android_flow_on_a_touch_target_only",
+    "FlowTests.test_a_button_that_stays_gold_after_the_claim_is_not_success",
+    "FlowTests.test_a_fatal_device_error_sends_nothing_more",
+    "FlowTests.test_a_gold_claim_on_the_task_tab_is_claimed_and_checked_on_settled_frames",
+    "FlowTests.test_a_guard_refusal_ends_all_input",
+    "FlowTests.test_a_layer_gone_before_the_tap_needs_a_recognised_return_to_the_tab",
+    "FlowTests.test_a_layer_not_over_this_page_is_not_tapped",
+    "FlowTests.test_a_layer_still_there_after_one_tap_stops",
+    "FlowTests.test_a_modal_at_the_start_sends_nothing",
+    "FlowTests.test_a_tab_that_does_not_settle_stops",
+    "FlowTests.test_an_unclear_button_stops_before_any_claim",
+    "FlowTests.test_no_tab_is_tapped_without_a_recognised_view_of_the_page",
+    "FlowTests.test_nothing_to_claim_taps_only_the_tabs_and_the_way_back",
+    "FlowTests.test_the_claim_needs_the_whole_view_on_both_tap_frames",
+    "FlowTests.test_the_first_unexpected_frame_after_a_claim_stops_with_nothing_more_sent",
+    "FlowTests.test_the_reward_layer_gets_one_tap_on_blank_space_then_the_page_is_checked",
+    "FlowTests.test_the_way_back_leaves_only_the_monthly_page",
+    "FrameworkTests.test_the_monthly_page_targets_states_and_guard",
+    "LayerTapTests.test_a_layer_gone_on_the_confirming_frame_is_decided_again",
+    "LayerTapTests.test_nothing_is_tapped_off_the_layer_or_next_to_a_forbidden_word",
+    "LayerTapTests.test_the_point_is_tapped_on_the_confirming_frame",
+    "LayerTests.test_the_layer_is_recognised_only_positively",
+    "ResourceTests.test_nodes_tier_and_forbidden_words",
+    "ViewTests.test_an_unsettled_page_has_no_view",
+    "ViewTests.test_tabs_and_button_states"
+   ],
+   "known_failures": [],
+   "skips": []
+  },
   "test_android_overlay.py": {
    "tests": [
     "CheckTaskTests.test_a_focus_loss_while_deciding_is_never_reported",

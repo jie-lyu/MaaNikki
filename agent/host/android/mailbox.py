@@ -34,34 +34,13 @@ def button_state(frame) -> tuple[str, float, float]:
     return "unknown", gold, gray
 
 
-def to_hud(rt, attempts: int = 4) -> bool:
-    """Back to the open-world HUD before the task: the back arrow, tapped through tap_on_page on the page that is
-    showing (both tap frames, with the forbidden-label check); a modal, the quit dialog or an unrecognised screen
-    stops the task without a tap."""
-    for _ in range(attempts):
-        screen, frame, _ = pages.screen_now(rt)
-        if frame is None or not rt._frame_still_valid(frame):
-            return False
-        if screen.kind == "hud":
-            return True
-        if screen.kind != "page" or not pages.tap_on_page(rt, screen.title, actions.BACK_ARROW):
-            return False
-    return False
+# The way to the HUD before the task and back after it are shared with the other Android tasks (pages.py).
+to_hud = pages.to_hud
 
 
 def back_from_mail(rt, attempts: int = 3) -> bool:
-    """The way back after the task: the back arrow, tapped only on the 邮件 and 美鸭梨 pages (both tap frames,
-    with the forbidden-label check); any other screen stops input."""
-    for _ in range(attempts):
-        screen, frame, _ = pages.screen_now(rt)
-        if frame is None or not rt._frame_still_valid(frame):
-            return False
-        if screen.kind == "hud":
-            return True
-        title = MAIL if pages.is_page(screen, MAIL) else MENU if pages.is_page(screen, MENU) else None
-        if title is None or not pages.tap_on_page(rt, title, actions.BACK_ARROW):
-            return False
-    return False
+    """The way back after the task: the back arrow, tapped only on the 邮件 and 美鸭梨 pages."""
+    return pages.back_through(rt, (MAIL, MENU), attempts)
 
 
 class Stop(Exception):

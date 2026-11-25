@@ -78,11 +78,11 @@ def _forbidden_near(recognize, box) -> str | None:
     return None
 
 
-def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, verify=None) -> bool:
-    """Tap ``node`` on the page titled ``title`` (decided and confirmed on fresh frames). ``verify(frame)``, when
-    given, must hold on both of them too (e.g. a button that is enabled). False when the run stopped; PageMismatch
-    (nothing sent) when the page, its target or ``verify`` fails; GuardRefusal when the point is next to a
-    forbidden word."""
+def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, verify=None, accept=None) -> bool:
+    """Tap ``node`` on the page titled ``title`` (decided and confirmed on fresh frames). ``verify(frame)`` and
+    ``accept(frame, recognize)``, when given, must hold on both of them too (e.g. a button that is enabled, the whole
+    expected state of the page). False when the run stopped; PageMismatch (nothing sent) when the page, its target,
+    ``verify`` or ``accept`` fails on the deciding frame; GuardRefusal when the point is next to a forbidden word."""
     from task_control import ForegroundChanged
     for _attempt in range(rt.TOUCH_KEY_ATTEMPTS):
         screen, decided, recognize = screen_now(rt)
@@ -92,7 +92,7 @@ def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, 
         word = _forbidden_near(recognize, target)
         if word:
             raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止")
-        if verify is not None and not verify(decided):
+        if (verify is not None and not verify(decided)) or (accept is not None and not accept(decided, recognize)):
             raise PageMismatch(f"「{title}」页面上要点的东西状态不对")
         if not rt._frame_still_valid(decided):
             continue
@@ -110,6 +110,8 @@ def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, 
             raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止")
         if verify is not None and not verify(confirming):
             continue
+        if accept is not None and not accept(confirming, recognize_b):
+            continue
         if not (rt._frame_still_valid(decided) and rt._frame_still_valid(confirming)):
             continue
         try:
@@ -119,3 +121,71 @@ def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, 
             continue
         return rt.pause(delay)
     raise PageMismatch(f"在「{title}」页面上连续 {rt.TOUCH_KEY_ATTEMPTS} 次没能在稳定的画面上确认要点的位置")
+
+
+def to_hud(rt, attempts: int = 4) -> bool:
+    """Back to the open-world HUD before a task: the back arrow, tapped through tap_on_page on the page that is
+    showing (both tap frames, with the forbidden-label check); a modal, the quit dialog or an unrecognised screen
+    stops the task without a tap."""
+    for _ in range(attempts):
+        screen, frame, _ = screen_now(rt)
+        if frame is None or not rt._frame_still_valid(frame):
+            return False
+        if screen.kind == "hud":
+            return True
+        if screen.kind != "page" or not tap_on_page(rt, screen.title, actions.BACK_ARROW):
+            return False
+    return False
+
+
+def back_through(rt, titles, attempts: int = 3) -> bool:
+    """The way back after a task: the back arrow, tapped only on pages whose title starts with one of ``titles``
+    (both tap frames, with the forbidden-label check); any other screen stops input."""
+    for _ in range(attempts):
+        screen, frame, _ = screen_now(rt)
+        if frame is None or not rt._frame_still_valid(frame):
+            return False
+        if screen.kind == "hud":
+            return True
+        title = next((title for title in titles if is_page(screen, title)), None)
+        if title is None or not tap_on_page(rt, title, actions.BACK_ARROW):
+            return False
+    return False
+
+
+def tap_on_layer(rt, what: str, accept, point, *, delay: float = .5) -> bool:
+    """Tap the fixed ``point`` on a screen that is not a page (e.g. a reward layer that closes on a tap on blank
+    space), with the rules of tap_on_page: ``accept(screen, recognize)`` must recognise the layer on the deciding
+    frame and again on a fresh confirming frame, no forbidden label may come within FORBIDDEN_MARGIN of the point on
+    either, both frames must still be valid, and the tap carries the confirming frame. False when the run stopped;
+    PageMismatch (nothing sent) when the deciding frame is not the layer; GuardRefusal next to a forbidden word."""
+    from task_control import ForegroundChanged
+    box = [int(point[0]), int(point[1]), 1, 1]
+    for _attempt in range(rt.TOUCH_KEY_ATTEMPTS):
+        screen, decided, recognize = screen_now(rt)
+        if decided is None:
+            return False
+        if not accept(screen, recognize):
+            raise PageMismatch(f"当前画面不是{what}")
+        word = _forbidden_near(recognize, box)
+        if word:
+            raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止")
+        if not rt._frame_still_valid(decided):
+            continue
+        fresh, confirming, recognize_b = screen_now(rt)
+        if confirming is None:
+            return False
+        if not accept(fresh, recognize_b):
+            continue
+        word = _forbidden_near(recognize_b, box)
+        if word:
+            raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止")
+        if not (rt._frame_still_valid(decided) and rt._frame_still_valid(confirming)):
+            continue
+        try:
+            if not rt.action("Click", target=box[:2], source_frame=confirming):
+                return False
+        except ForegroundChanged:
+            continue
+        return rt.pause(delay)
+    raise PageMismatch(f"连续 {rt.TOUCH_KEY_ATTEMPTS} 次没能在稳定的画面上确认{what}")
