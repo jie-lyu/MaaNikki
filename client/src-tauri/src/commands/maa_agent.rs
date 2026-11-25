@@ -637,9 +637,14 @@ pub async fn start_tasks_impl(
     // 在重新连接或启动 agent 之前按当前系统筛掉不能运行的任务：全部被拒绝时直接返回原因；
     // 部分被拒绝时，交给 agent 的运行计划只列出会执行的任务，避免被跳过的任务影响其余任务的行为。
     // Windows 上没有任务被拒绝，不做任何改动。
+    // 按本次提交的控制器决定游戏目标（与 agent 的 host.game_backend 相同）；没有控制器信息时按当前系统。
+    let target = super::utils::submitted_game_target(
+        pi_envs.as_ref(),
+        controller_info.as_ref().and_then(|info| info.type_name.as_deref()),
+    );
     let refusals: Vec<Option<String>> = tasks
         .iter()
-        .map(|task| super::utils::platform_refuses_task(&task.entry))
+        .map(|task| super::utils::target_refuses_task(target, &task.entry))
         .collect();
     if refusals.iter().any(Option::is_some) {
         if refusals.iter().all(Option::is_some) {

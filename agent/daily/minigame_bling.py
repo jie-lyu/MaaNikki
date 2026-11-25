@@ -1688,8 +1688,8 @@ class MinigameBlingRun(Runtime):
         route_name = str(settings.get("route") or DEFAULT_ROUTE).strip()
         global_background = self.background_mode()
         allow_background = bool(settings.get("background", True)) or global_background
-        from host import capabilities, platform_backend
-        if allow_background and not capabilities(platform_backend()).background_input:
+        from host import capabilities, game_backend
+        if allow_background and not capabilities(game_backend()).background_input:
             # No window-targeted input on this desktop (macOS): play in the foreground instead.
             allow_background = False
 

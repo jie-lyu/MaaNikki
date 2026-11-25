@@ -574,6 +574,89 @@ pub fn platform_refuses_task(entry: &str) -> Option<String> {
     }
 }
 
+/// 本次运行的游戏目标：由所选控制器的类型（interface 中 controller.type）决定，与 agent 的
+/// host.game_backend 规则相同。Windows 上只会出现 Win32 控制器，macOS 上只会出现 MacOS 控制器，
+/// 这两种情况下与按当前系统判断的结果完全相同。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GameTarget {
+    Win32,
+    MacOS,
+    Adb,
+    /// 无法识别的类型或无效的控制器定义。
+    Other,
+}
+
+impl GameTarget {
+    fn from_type(kind: &str) -> GameTarget {
+        match kind {
+            "Win32" => GameTarget::Win32,
+            "MacOS" => GameTarget::MacOS,
+            "Adb" => GameTarget::Adb,
+            _ => GameTarget::Other,
+        }
+    }
+
+    /// 已连接的控制器对应的目标（在运行中追加任务时用）。
+    pub fn of_connection(config: &super::types::ControllerConfig) -> GameTarget {
+        use super::types::ControllerConfig;
+        match config {
+            ControllerConfig::Win32 { .. } => GameTarget::Win32,
+            ControllerConfig::MacOS { .. } => GameTarget::MacOS,
+            ControllerConfig::Adb { .. } => GameTarget::Adb,
+            _ => GameTarget::Other,
+        }
+    }
+
+    /// 当前系统自己的桌面目标。
+    fn host() -> GameTarget {
+        if cfg!(target_os = "windows") {
+            GameTarget::Win32
+        } else if cfg!(target_os = "macos") {
+            GameTarget::MacOS
+        } else {
+            GameTarget::Other
+        }
+    }
+}
+
+/// 提交的控制器决定的游戏目标：优先用传给 agent 的 PI_CONTROLLER（agent 按它判断），
+/// 其次用前端传来的控制器信息；两者都没有时返回 None，按当前系统的原规则处理。
+/// PI_CONTROLLER 存在但不是有效的控制器定义时返回 Other（拒绝运行，与 agent 相同）。
+pub fn submitted_game_target(
+    pi_envs: Option<&std::collections::HashMap<String, String>>,
+    controller_type: Option<&str>,
+) -> Option<GameTarget> {
+    if let Some(raw) = pi_envs.and_then(|envs| envs.get("PI_CONTROLLER")) {
+        let kind = serde_json::from_str::<serde_json::Value>(raw)
+            .ok()
+            .and_then(|value| value.get("type").and_then(|t| t.as_str()).map(str::to_owned));
+        return Some(kind.map_or(GameTarget::Other, |k| GameTarget::from_type(&k)));
+    }
+    controller_type.map(GameTarget::from_type)
+}
+
+/// 本次运行不能执行该任务入口时返回原因（直接显示给用户）；能运行时返回 None。
+///
+/// 目标是当前系统自己的桌面（Windows 上的 Win32、macOS 上的 MacOS）或未知时，与
+/// platform_refuses_task 完全相同；Adb 控制器在安卓支持完成之前一律拒绝；其他目标拒绝。
+pub fn target_refuses_task(target: Option<GameTarget>, entry: &str) -> Option<String> {
+    target_refuses_task_on(GameTarget::host(), target, entry, platform_refuses_task)
+}
+
+fn target_refuses_task_on(
+    host: GameTarget,
+    target: Option<GameTarget>,
+    entry: &str,
+    host_rules: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    match target {
+        None => host_rules(entry),
+        Some(t) if t == host && matches!(t, GameTarget::Win32 | GameTarget::MacOS) => host_rules(entry),
+        Some(GameTarget::Adb) => Some(format!("安卓模拟器支持还在开发中，暂不运行任务，已跳过 {}。", entry)),
+        Some(t) => Some(format!("所选的控制器（{:?}）不能在当前系统上运行任务，已跳过 {}。", t, entry)),
+    }
+}
+
 /// 获取应用数据目录
 /// - macOS: ~/Library/Application Support/MaaNikki/
 /// - Windows/Linux: exe 所在目录（保持便携式部署）
@@ -888,6 +971,60 @@ mod preview_task_tests {
         }
         let manifest = include_str!("../../../../agent/host/macos/preview_tasks.json");
         assert_eq!(super::macos_task_tiers(), super::task_tiers_view(manifest));
+    }
+
+    use super::{submitted_game_target, target_refuses_task_on, GameTarget};
+
+    fn envs(controller: &str) -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::from([("PI_CONTROLLER".to_string(), controller.to_string())])
+    }
+
+    /// Windows with its own controller, and the scheduled path through start_tasks (PI_CONTROLLER), behave
+    /// exactly as before: the host rules decide, and on Windows they admit every entry.
+    #[test]
+    fn a_win32_target_on_windows_keeps_the_host_rules() {
+        let windows_rules = |_: &str| None;
+        let windows = r#"{"name":"nikki_windows","type":"Win32","win32":{"class_regex":"^UnrealWindow$"}}"#;
+        for target in [None, submitted_game_target(Some(&envs(windows)), None),
+                       submitted_game_target(None, Some("Win32"))] {
+            for entry in ["MaaNikki_Fishing", "MaaNikki_StartGame", "MXU_LAUNCH", "MaaNikki_Mailbox"] {
+                assert_eq!(target_refuses_task_on(GameTarget::Win32, target, entry, windows_rules), None,
+                           "{:?} {}", target, entry);
+            }
+        }
+        // The host rules are consulted, not bypassed: a refusal from them still applies.
+        let refusing = |e: &str| Some(format!("no {}", e));
+        assert_eq!(target_refuses_task_on(GameTarget::Win32, Some(GameTarget::Win32), "X", refusing),
+                   Some("no X".to_string()));
+    }
+
+    #[test]
+    fn a_macos_target_on_macos_keeps_the_mac_list() {
+        let mac_rules = |e: &str| if e == "MaaNikki_Mailbox" { None } else { Some(format!("mac refuses {}", e)) };
+        let macos = r#"{"name":"nikki_macos","type":"MacOS"}"#;
+        let target = submitted_game_target(Some(&envs(macos)), Some("Win32")); // PI_CONTROLLER wins
+        assert_eq!(target, Some(GameTarget::MacOS));
+        assert_eq!(target_refuses_task_on(GameTarget::MacOS, target, "MaaNikki_Mailbox", mac_rules), None);
+        assert_eq!(target_refuses_task_on(GameTarget::MacOS, target, "MaaNikki_Fishing", mac_rules),
+                   Some("mac refuses MaaNikki_Fishing".to_string()));
+    }
+
+    #[test]
+    fn adb_mismatched_and_malformed_targets_are_refused() {
+        let admit_all = |_: &str| None;
+        let adb = submitted_game_target(Some(&envs(r#"{"name":"nikki_android","type":"Adb"}"#)), None);
+        assert_eq!(adb, Some(GameTarget::Adb));
+        for host in [GameTarget::Win32, GameTarget::MacOS] {
+            let reason = target_refuses_task_on(host, adb, "MaaNikki_Mailbox", admit_all).unwrap();
+            assert!(reason.contains("安卓"), "{}", reason);
+        }
+        assert!(target_refuses_task_on(GameTarget::MacOS, Some(GameTarget::Win32), "X", admit_all).is_some());
+        assert!(target_refuses_task_on(GameTarget::Win32, Some(GameTarget::MacOS), "X", admit_all).is_some());
+        for bad in ["{", "[]", r#"{"type":3}"#, r#"{"name":"x"}"#] {
+            assert_eq!(submitted_game_target(Some(&envs(bad)), Some("Win32")), Some(GameTarget::Other), "{}", bad);
+            assert!(target_refuses_task_on(GameTarget::Win32, Some(GameTarget::Other), "X", admit_all).is_some());
+        }
+        assert_eq!(submitted_game_target(None, None), None);
     }
 
     #[test]

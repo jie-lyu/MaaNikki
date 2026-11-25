@@ -378,8 +378,8 @@ class RedeemCodes:
                 return False
             pasted = not self.rt.hit("MaaNikki_Redeem_ModalPlaceholder")
         if not pasted:
-            from host import capabilities, platform_backend
-            if not capabilities(platform_backend()).text_input:
+            from host import capabilities, game_backend
+            if not capabilities(game_backend()).text_input:
                 # Stop this code before focusing the box or pressing 兑换: no typing fallback on macOS yet.
                 self.rt.log("兑换码未能通过剪贴板粘贴；Mac 版尚未验证文字输入，不改用手动输入。")
                 return False
@@ -396,8 +396,8 @@ class RedeemCodes:
         """macOS: positive evidence before 兑换 (the paste button is unverified there): the modal is still open and
         the field reads exactly this code. A missed placeholder alone must not authorise the click. Win32: as
         before (the placeholder check)."""
-        from host import capabilities, platform_backend
-        if capabilities(platform_backend()).text_input:
+        from host import capabilities, game_backend
+        if capabilities(game_backend()).text_input:
             return True
         read = re.sub(r"\s+", "", self.rt.text(CODE_FIELD_ROI) or "")
         if self._modal_ready() and read == re.sub(r"\s+", "", code):
@@ -407,8 +407,8 @@ class RedeemCodes:
 
     @staticmethod
     def _typing_supported() -> bool:
-        from host import capabilities, platform_backend
-        return capabilities(platform_backend()).text_input
+        from host import capabilities, game_backend
+        return capabilities(game_backend()).text_input
 
     def _click_use_verified(self, code: str):
         """macOS: click 兑换 only at a button verified on a frame taken in the current focus generation. A focus

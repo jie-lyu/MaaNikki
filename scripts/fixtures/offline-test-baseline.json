@@ -700,6 +700,26 @@
    ],
    "skips": []
   },
+  "test_target_backend.py": {
+   "tests": [
+    "AdbRefusedTests.test_no_task_runs_and_the_reason_says_why",
+    "AdbRefusedTests.test_no_window_services_for_a_controller_without_a_window",
+    "CallSiteGuardTests.test_host_uses_the_desktop_backend_only_for_desktop_services",
+    "CallSiteGuardTests.test_only_desktop_modules_ask_for_the_desktop_backend",
+    "GameBackendSelectionTests.test_a_desktop_controller_selects_its_backend_only_on_its_own_desktop",
+    "GameBackendSelectionTests.test_adb_and_malformed_controllers_select_no_backend_yet",
+    "GameBackendSelectionTests.test_without_a_submitted_controller_it_is_the_desktop_backend",
+    "MacOSUnchangedTests.test_tiers_notices_and_keys_match_the_unsubmitted_case",
+    "Win32UnchangedTests.test_assets_resolve_in_the_main_resource_only",
+    "Win32UnchangedTests.test_capabilities_and_window_services_are_the_win32_ones",
+    "Win32UnchangedTests.test_connect_target_accepts_the_win32_window",
+    "Win32UnchangedTests.test_every_task_is_admitted",
+    "Win32UnchangedTests.test_integer_keys_reach_the_controller_unchanged",
+    "Win32UnchangedTests.test_the_admission_guard_runs_task_code"
+   ],
+   "known_failures": [],
+   "skips": []
+  },
   "test_task_restart.cjs": {
    "tests": [
     "backend startup failure releases lock for retry",

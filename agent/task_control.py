@@ -29,8 +29,8 @@ def focus_lost_mode(mode) -> str:
     if mode not in {"pause", "return", "background"}:
         return "pause"
     if mode == "background":
-        from host import capabilities, platform_backend
-        if not capabilities(platform_backend()).background_input:
+        from host import capabilities, game_backend
+        if not capabilities(game_backend()).background_input:
             return "pause"
     return mode
 

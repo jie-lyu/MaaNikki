@@ -19,7 +19,7 @@ from game_keys import GameKeys
 from performance import count, measure
 from message_log import write_message
 from game_view import ALLOWED_FRAME_SIZES, is_clipped_game_frame, require_game_frame
-from host import capabilities, native_key, platform_backend
+from host import capabilities, native_key, game_backend
 
 
 RESOURCE = RESOURCE_ROOT / "resource"
@@ -298,7 +298,7 @@ class Runtime:
         return hwnd, cap_size
 
     def _validate_pointer_targets(self, action, fields, inputs=None, *, require_work_area=None):
-        from host import capabilities, platform_backend
+        from host import capabilities, game_backend
         from tall_window import (
             BASE_CAPTURE_HEIGHT,
             BASE_CAPTURE_WIDTH,
@@ -326,7 +326,7 @@ class Runtime:
                 not safe
                 and not tried_adjust
                 and cap_size == (BASE_CAPTURE_WIDTH, BASE_CAPTURE_HEIGHT)
-                and capabilities(platform_backend()).tall_window
+                and capabilities(game_backend()).tall_window
                 and is_auto_adjust_resolution_enabled(self.context)
             ):
                 tried_adjust = True
@@ -422,7 +422,7 @@ class Runtime:
                 inputs, action, fields, cap_size=cap_size, window_cursor_pos=window_cursor_pos)
             if dispatched is not None:
                 return dispatched
-        hover = capabilities(platform_backend()).pointer_hover
+        hover = capabilities(game_backend()).pointer_hover
         if action == "Click" and ui_click and hover:
             point = self._target_point(fields.get("target"), "界面点击目标")
             # Maa's rectangular Click target is random inside the box. UI
@@ -444,7 +444,7 @@ class Runtime:
         inputs = self._active_inputs()
         if inputs is not None:
             inputs.check()
-            if focus_generation is not None and platform_backend() == "macos":
+            if focus_generation is not None and game_backend() == "macos":
                 # inputs.check() may have waited for the game to come back: a click checked on an older frame is
                 # cancelled here, right before dispatch. Win32 keeps its existing order.
                 self.check_focus()
@@ -659,7 +659,7 @@ class Runtime:
                 count("capture.failed")
                 return None
             if ((image.shape[1], image.shape[0]) not in ALLOWED_FRAME_SIZES or is_clipped_game_frame(image)) \
-                    and capabilities(platform_backend()).tall_window:
+                    and capabilities(game_backend()).tall_window:
                 from tall_window import ensure_16_9_window
                 adjusted = ensure_16_9_window(
                     self.controller, context=self.context, notify=self.log, write_log=False
@@ -723,7 +723,7 @@ class Runtime:
         if self._use_window_input(inputs):
             with measure("input.text"):
                 return bool(inputs.input_window_text(content))
-        if platform_backend() == "macos":
+        if game_backend() == "macos":
             return self._input_text_by_character(content, start)
         with measure("input.text"):
             return self.controller.post_input_text(content).wait().succeeded
@@ -1387,7 +1387,7 @@ class Executors(Runtime):
             return options.get("allow_energy", True)
         if rule.key == "chat" and not options.get("allow_chat", False):
             return False
-        if rule.key == "chat" and not capabilities(platform_backend()).text_input:
+        if rule.key == "chat" and not capabilities(game_backend()).text_input:
             return False  # macOS: public chat needs text input, not yet verified there
         if rule.key == "bubble" and not options.get("bubble_equipped", False):
             return False
@@ -1576,7 +1576,7 @@ class Executors(Runtime):
         return True
 
     def chat(self, mode):
-        if not capabilities(platform_backend()).text_input:
+        if not capabilities(game_backend()).text_input:
             # Before sitting down or opening the channel: nothing is committed.
             self.log("聚会聊天需要文字输入，Mac 版尚未验证，已跳过。")
             return False
@@ -2199,7 +2199,7 @@ class Executors(Runtime):
             if abs(desired - current) <= (45 if is_kg_unit else 8):
                 adjusted = step_adjust(current, desired)
             else:
-                if not capabilities(platform_backend()).text_input:
+                if not capabilities(game_backend()).text_input:
                     from host import UnsupportedInput
                     # Before clicking the field or Ctrl+A: a plain failure here would let the realm queue spend the
                     # remaining energy on the default realm.

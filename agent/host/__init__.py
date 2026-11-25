@@ -25,6 +25,14 @@ accessors only where a capability says they exist.
 Backends live in subpackages (``host.win32``, ``host.macos``) and are imported
 lazily, so importing task code never loads another platform's backend.
 
+Which backend: the game target and the desktop are separate questions. ``game_backend()`` answers
+for the game (input, focus, geometry, capabilities, task tiers, overlays and window handling that
+follow the game window) from the controller the client submitted for this run (``PI_CONTROLLER``);
+``platform_backend()`` answers for the desktop this process runs on (worker threads, clipboard,
+credential store). On Windows a submitted controller is always Win32 and on macOS always MacOS, so
+the two agree there; they differ only for a controller that does not drive this desktop (an
+Android emulator over ADB).
+
 Keys: Win32 virtual-key integers are the key id everywhere. ``native_key()`` is
 the one place that turns one into what the connected controller expects
 (unchanged on Win32, host/macos/keys.py on macOS); call it exactly where a key
@@ -33,6 +41,8 @@ is handed to the controller or to a pipeline action.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+import json
 import os
 import sys
 from typing import Protocol
@@ -141,6 +151,48 @@ def platform_backend() -> str | None:
     return None
 
 
+# interface.json controller types and the backend that drives each. Adb (Android emulators) has no backend yet.
+TARGET_TYPES = {"Win32": "win32", "MacOS": "macos", "Adb": "adb"}
+NO_SUBMITTED_CONTROLLER = object()
+
+
+@lru_cache(maxsize=8)
+def _controller_type(raw: str):
+    """The "type" of a PI_CONTROLLER value, or None when it is not a controller definition."""
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    kind = value.get("type") if isinstance(value, dict) else None
+    return kind if isinstance(kind, str) and kind else None
+
+
+def submitted_controller_type():
+    """The type of the controller the client submitted for this run (PI_CONTROLLER), None when that value is
+    malformed, or NO_SUBMITTED_CONTROLLER when there is none (agent startup checks, scripts, offline tests)."""
+    raw = os.environ.get("PI_CONTROLLER")
+    if raw is None:
+        return NO_SUBMITTED_CONTROLLER
+    return _controller_type(raw)
+
+
+def game_backend() -> str | None:
+    """Backend for the game target of this run, or None when nothing on this desktop can drive it.
+
+    Follows the submitted controller: Win32 and MacOS controllers select their backend only on their own
+    desktop; an Adb controller has no backend yet; a malformed value selects none, so target-dependent work
+    is refused rather than run with the desktop's rules. Without a submitted controller it is the desktop's
+    backend, as before.
+    """
+    kind = submitted_controller_type()
+    if kind is NO_SUBMITTED_CONTROLLER:
+        return platform_backend()
+    target = TARGET_TYPES.get(kind)
+    if target in ("win32", "macos"):
+        return target if target == platform_backend() else None
+    return None
+
+
 def controller_backend(info) -> str | None:
     """Backend that can drive a controller described by Controller.info, or None."""
     backend = platform_backend()
@@ -156,7 +208,7 @@ def native_key(key: int) -> int:
     Unchanged on Win32. On macOS the single table in host/macos/keys.py; a key without a macOS
     counterpart raises NavigationError instead of becoming 0 (which is the A key there).
     """
-    if platform_backend() != "macos":
+    if game_backend() != "macos":
         return key
     from host.macos.keys import UnmappedKey, translate
     try:
@@ -173,7 +225,7 @@ def connect_target(controller) -> Target:
     Raises NavigationError when this host cannot drive that controller.
     """
     from navigation.models import NavigationError
-    backend = platform_backend()
+    backend = game_backend()
     if backend not in ("win32", "macos"):
         raise NavigationError("前台导航仅支持 Windows 游戏窗口。")
     try:
@@ -190,9 +242,9 @@ def connect_target(controller) -> Target:
 def controller_supports_foreground_input(controller) -> bool:
     """Whether the interface.json controller definition lets the agent send foreground input itself.
 
-    The rule belongs to the backend for this desktop; without one, never.
+    The rule belongs to the backend for the game target; without one, never.
     """
-    backend = platform_backend()
+    backend = game_backend()
     if backend == "win32":
         from host.win32 import supports_foreground_inputs
         return supports_foreground_inputs(controller)
@@ -211,7 +263,7 @@ def connection_geometry_problem(get_controller) -> str | None:
     Always None on Win32, where the controller is not even looked up (``get_controller`` is called
     only on macOS).
     """
-    if platform_backend() != "macos":
+    if game_backend() != "macos":
         return None
     try:
         info = get_controller().info
@@ -228,9 +280,11 @@ def connection_geometry_problem(get_controller) -> str | None:
 def task_entry_supported(entry) -> bool:
     """Whether this desktop's backend may run the task whose pipeline entry is ``entry``.
 
-    Win32 runs every task, as before. macOS runs the preview's verified and experimental entries.
+    Win32 runs every task, as before. macOS runs the preview's verified and experimental entries. A submitted
+    controller that nothing on this desktop can drive (an Adb controller, a malformed value) runs none.
     """
-    if platform_backend() == "macos":
+    backend = game_backend()
+    if backend == "macos":
         from host.macos import dev_extra_task_entries, task_tier
         if entry in dev_extra_task_entries():
             return True  # development switch for supervised device tests; never set by a release client
@@ -238,28 +292,36 @@ def task_entry_supported(entry) -> bool:
             return task_tier(entry) is not None
         except (OSError, ValueError, KeyError, TypeError):
             return False  # no readable list: refuse, like the client
+    if backend is None and submitted_controller_type() is not NO_SUBMITTED_CONTROLLER:
+        return False
     return True
 
 
 def task_refusal_reason(entry) -> str:
     """The user-facing reason this desktop refuses ``entry`` (macOS: the list's excluded reason when there is one)."""
-    if platform_backend() == "macos":
+    backend = game_backend()
+    if backend == "macos":
         from host.macos import refusal_reason
         return refusal_reason(entry)
+    kind = submitted_controller_type()
+    if backend is None and kind == "Adb":
+        return "安卓模拟器支持还在开发中，暂不运行任务，已跳过。"
+    if backend is None and kind is not NO_SUBMITTED_CONTROLLER:
+        return f"所选的控制器（{kind or '无效'}）不能在当前系统上运行任务，已跳过。"
     return "当前系统不支持这个任务，已跳过。"
 
 
 def task_start_notice(entry) -> str | None:
     """A warning for the task's own log when ``entry`` starts: macOS experimental tasks only, None elsewhere."""
-    if platform_backend() == "macos":
+    if game_backend() == "macos":
         from host.macos import start_notice
         return start_notice(entry)
     return None
 
 
 def background_input_class():
-    """Window-targeted input class for this desktop; raises NavigationError where there is none."""
-    if platform_backend() != "win32":
+    """Window-targeted input class for the game target; raises NavigationError where there is none."""
+    if game_backend() != "win32":
         from navigation.models import NavigationError
         raise NavigationError("前台导航仅支持 Windows 游戏窗口。")
     from host.win32.background_input import BackgroundInput
@@ -269,7 +331,7 @@ def background_input_class():
 def launch_window_probes():
     """Window liveness and responsiveness probes for the start-game pretask, or None where this
     desktop cannot launch the game."""
-    if not capabilities(platform_backend()).launch_game:
+    if not capabilities(game_backend()).launch_game:
         return None
     from host.win32 import launch
     return launch
@@ -277,7 +339,7 @@ def launch_window_probes():
 
 def game_close_api():
     """Binding that closes the game and launcher windows/processes on this desktop."""
-    if not capabilities(platform_backend()).close_game:
+    if not capabilities(game_backend()).close_game:
         raise RuntimeError("当前系统不支持关闭游戏。")
     from host.win32.close import Win32Api
     return Win32Api()
@@ -314,12 +376,12 @@ def capabilities(backend: str | None) -> Capabilities:
 
 
 def overlay_backend():
-    """Module providing the overlay windows on this desktop, or None when overlays are unavailable.
+    """Module providing the overlay windows over the game window, or None when overlays are unavailable.
 
-    Chosen by the process's desktop, not the controller: overlays are desktop
-    windows, and the only overlay backend is Win32.
+    Overlays are desktop windows that follow the game window, so they need a game target with a window on
+    this desktop; the only overlay backend is Win32.
     """
-    if capabilities(platform_backend()).overlay:
+    if capabilities(game_backend()).overlay:
         from host.win32 import overlays
         return overlays
     return None
