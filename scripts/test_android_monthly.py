@@ -86,11 +86,13 @@ class Game:
     ``buttons``: the 一键领取 state per tab. ``after_claim``: per tab, the frames shown (one per capture) after a
     claim tap before the page shows again; "layer" there means the reward layer stays until a tap on blank space.
     ``tabs_switch``: whether a tab tap changes the tab. ``dismiss_closes``: whether that blank tap closes the layer.
-    ``script``: frames shown before the state, one per capture (e.g. a page still settling)."""
+    ``script``: frames shown before the state, one per capture (e.g. a page still settling); ``after_entry`` and
+    ``after_tab``: frames shown after the 奇迹之旅 shortcut or a tab tap."""
 
     def __init__(self, tab=monthly.TREASURE, buttons=None, after_claim=None, *, tabs_switch=True,
-                 dismiss_closes=True, start="hud", extra=None, script=()):
+                 dismiss_closes=True, start="hud", extra=None, script=(), after_entry=(), after_tab=()):
         self.tab, self.where = tab, start
+        self.after_entry, self.after_tab = list(after_entry), list(after_tab)
         self.buttons = {monthly.TASK: "none", monthly.TREASURE: "none", **(buttons or {})}
         self.after_claim, self.tabs_switch, self.dismiss_closes = after_claim or {}, tabs_switch, dismiss_closes
         self.extra, self.queue, self.taps = extra or {}, list(script), []
@@ -114,6 +116,7 @@ class Game:
     def key(self, name):
         assert name == "monthly" and self.where == "hud"
         self.where = "page"
+        self.queue = list(self.after_entry) + self.queue
         return True
 
     def click(self, name, target, source_frame):
@@ -137,6 +140,7 @@ class Game:
                 self.taps.append(tab)
                 if self.tabs_switch:
                     self.tab = tab
+                self.queue = list(self.after_tab) + self.queue
                 return True
         raise AssertionError(f"unexpected tap {target}")
 
@@ -153,8 +157,9 @@ class ViewTests(unittest.TestCase):
         self.assertEqual(self.read(monthly.TASK, "grey").button, "none")  # greyed counts as nothing to claim
         self.assertEqual(self.read(monthly.TASK, "odd").button, "unknown")
         self.assertEqual(self.read(monthly.TASK, "unlabelled").button, "unknown")  # gold without its label
-        # Recorded (plan risk 35): an unseen non-gold face, e.g. blue, reads as no button.
-        self.assertEqual(self.read(monthly.TASK, "blue").button, "none")
+        # Review round 2: off is positively a low-saturation face; any other colour (e.g. blue) is unknown.
+        self.assertEqual(self.read(monthly.TASK, "blue").button, "unknown")
+        self.assertEqual(self.read(monthly.TASK, "blue", label=False).button, "unknown")
 
     def test_an_unsettled_page_has_no_view(self):
         # Both tabs gold (a switch in progress), or the selected tab without its own content (a layer over it).
@@ -239,11 +244,59 @@ class FlowTests(unittest.TestCase):
         result, rt = self.run_game(game)
         self.assertTrue(result)
         self.assertEqual(game.taps, [monthly.TASK, "claim", monthly.TREASURE, "back"])
-        # The layer gives way to another screen before the tap: stop, no tap.
-        game = Game(buttons={monthly.TASK: "enabled"}, after_claim={monthly.TASK: [REWARD_LAYER, SHOP, SHOP]})
+
+    def test_a_wrong_frame_on_either_dismissal_frame_is_saved_and_stops(self):
+        # Review round 2: 商城 on the dismissal's deciding frame (then the tab), or on its confirming frame (then the
+        # layer again): no dismissal, no tab switch, the 商城 frame itself is saved.
+        for frames in ([REWARD_LAYER, SHOP], [REWARD_LAYER, REWARD_LAYER, SHOP, "layer"]):
+            with self.subTest(frames=len(frames)):
+                game = Game(buttons={monthly.TASK: "enabled"}, after_claim={monthly.TASK: frames})
+                result, rt = self.run_game(game)
+                self.assertFalse(result)
+                self.assertEqual(game.taps, [monthly.TASK, "claim"])
+                saved = [call.kwargs["image"] for call in rt.diagnostic.call_args_list]
+                self.assertEqual(len(saved), 1)
+                self.assertIs(saved[0], SHOP[1])
+
+    def test_an_unknown_button_after_the_claim_stops(self):
+        # Review round 2: claim -> quarter-gold (or gold without its label) -> reward layer: stop at the first.
+        for state in ("odd", "unlabelled", "blue"):
+            with self.subTest(state=state):
+                odd = view(monthly.TASK, state)
+                game = Game(buttons={monthly.TASK: "enabled"}, after_claim={monthly.TASK: [odd, "layer"]})
+                result, rt = self.run_game(game)
+                self.assertFalse(result)
+                self.assertEqual(game.taps, [monthly.TASK, "claim"])
+                self.assertIs(rt.diagnostic.call_args.kwargs["image"], odd[1])
+
+    def test_a_blue_button_before_the_claim_stops(self):
+        # Review round 2 (risk 35): an unseen non-gold face is not "nothing to claim"; 旅行秘宝 is never claimed.
+        game = Game(buttons={monthly.TASK: "blue", monthly.TREASURE: "enabled"})
         result, rt = self.run_game(game)
         self.assertFalse(result)
-        self.assertEqual(game.taps, [monthly.TASK, "claim"])
+        self.assertEqual(game.taps, [monthly.TASK])
+
+    def test_an_unexpected_screen_while_opening_the_page_or_a_tab_stops(self):
+        # Review round 2: one 商城 frame right after the shortcut, or while the tab settles.
+        for game, taps in ((Game(buttons={monthly.TASK: "enabled"}, after_entry=[SHOP]), []),
+                           (Game(buttons={monthly.TASK: "enabled"}, after_tab=[SHOP]), [monthly.TASK])):
+            with self.subTest(taps=taps):
+                result, rt = self.run_game(game)
+                self.assertFalse(result)
+                self.assertEqual(game.taps, taps)
+                self.assertIs(rt.diagnostic.call_args.kwargs["image"], SHOP[1])
+
+    def test_brief_transition_frames_are_waited_through_but_not_for_long(self):
+        unsettled = view(monthly.TREASURE, "none", content=False)
+        game = Game(after_entry=[UNKNOWN, unsettled], after_tab=[unsettled])
+        result, rt = self.run_game(game)
+        self.assertTrue(result)
+        self.assertEqual(game.taps, [monthly.TASK, monthly.TREASURE, "back"])
+        game = Game(after_entry=[UNKNOWN] * 10)
+        result, rt = self.run_game(game)
+        self.assertFalse(result)
+        self.assertEqual(game.taps, [])
+        rt.diagnostic.assert_called()
 
     def test_a_button_that_stays_gold_after_the_claim_is_not_success(self):
         game = Game(buttons={monthly.TASK: "enabled"},
@@ -364,11 +417,14 @@ class LayerTapTests(unittest.TestCase):
             pages.tap_on_layer(rt, "奖励层", monthly.is_reward_layer, monthly.DISMISS_POINT)
         self.assertEqual(rt.clicks, [])
 
-    def test_a_layer_gone_on_the_confirming_frame_is_decided_again(self):
-        rt, source = self.rt([REWARD_LAYER, view(monthly.TREASURE, "none"), view(monthly.TREASURE, "none")])
-        with patch.object(pages, "screen_now", side_effect=source), self.assertRaises(pages.PageMismatch):
+    def test_a_tap_frame_that_is_not_the_layer_goes_back_to_the_caller_without_a_second_attempt(self):
+        # Review round 2: 商城 on the confirming frame, then the layer again: no retry, the 商城 frame is handed back.
+        rt, source = self.rt([REWARD_LAYER, SHOP, REWARD_LAYER, REWARD_LAYER])
+        with patch.object(pages, "screen_now", side_effect=source), self.assertRaises(pages.LayerMismatch) as caught:
             pages.tap_on_layer(rt, "奖励层", monthly.is_reward_layer, monthly.DISMISS_POINT)
         self.assertEqual(rt.clicks, [])
+        self.assertIs(caught.exception.frame, SHOP[1])
+        self.assertEqual(caught.exception.screen.title, "商城")
 
 
 class EntryTests(unittest.TestCase):
@@ -440,6 +496,8 @@ templates = repo / "resource_android/image/android"
 under_title = cv2.imread(str(templates / "monthly_layer_title.png"))    # the page blurred under the layer, run 1
 under_unlock = cv2.imread(str(templates / "monthly_layer_unlock.png"))
 settings = crop("page_title.png")                                       # back arrow and 设置 title
+duck, row = cv2.imread(str(templates / "menu_duck.png")), crop("hud_label_row.png")  # the HUD, from device frames
+paid = bottom["gold"][17:59, 338:540]                                    # 「解锁悠远颂歌」 off the 奇迹之旅 page
 frames = {}
 for name, tab, button in (("task claimable", "task", "gold"), ("treasure nothing", "treasure", "none"),
                           ("task button gone", "task", "none"), ("treasure with gold", "treasure", "gold"),
@@ -464,6 +522,13 @@ for name, unlock in (("layer over settings", False), ("layer over settings with 
     if unlock:
         frame[620:705, 950:1260] = under_unlock
     frames[name] = frame
+# Review round 2: the HUD, and the HUD with the paid-pass label over the 奇迹之旅 shortcut icon (its label visible).
+for name, over in (("hud", False), ("hud with paid label over the shortcut", True)):
+    frame = np.full((720, 1280, 3), 90, np.uint8)
+    frame[18:72, 30:84], frame[50:100, 600:1280] = duck, row
+    if over:
+        frame[10:52, 707:909] = paid
+    frames[name] = frame
 current, results = {}, {}
 
 class Frame(CustomController):
@@ -480,6 +545,11 @@ class Judge(CustomAction):
         def recognize(node, override=None):
             return context.run_recognition(node, image, {node: override} if override else None)
         screen = actions.read_screen(recognize)
+        if screen.kind == "hud":
+            plans = {name: actions.plan_tap(name, screen, recognize).target for name in ("menu", "monthly", "shop")}
+            results[current["name"]] = {"kind": "hud", "plans": plans, "refused": {
+                name: pages.forbidden_word_near(recognize, target) for name, target in plans.items()}}
+            return CustomAction.RunResult(success=True)
         out = {"kind": screen.kind, "title": screen.title, "layer": monthly.is_reward_layer(screen, recognize),
                "dismiss_refused": pages._forbidden_near(recognize, [*monthly.DISMISS_POINT, 1, 1])}
         hint = recognize(monthly.LAYER_HINT)
@@ -531,6 +601,10 @@ class FrameworkTests(unittest.TestCase):
                                 text=True, timeout=300, env=env, cwd=tempfile.gettempdir())
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
         outcome = json.loads(result.stdout.strip().splitlines()[-1])
+        hud, covered = outcome.pop("hud"), outcome.pop("hud with paid label over the shortcut")
+        self.assertEqual(hud["refused"], {"menu": None, "monthly": None, "shop": None})  # 共鸣 is not in the way
+        self.assertEqual(covered["refused"]["monthly"], "解锁悠远颂歌")
+        self.assertIsNone(covered["refused"]["menu"])
         self.assertEqual({name: value.get("view") for name, value in outcome.items()},
                          {"task claimable": ["task", "enabled"], "treasure nothing": ["treasure", "none"],
                           "task button gone": ["task", "none"], "treasure with gold": ["treasure", "enabled"],

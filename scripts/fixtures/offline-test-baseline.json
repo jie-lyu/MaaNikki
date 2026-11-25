@@ -10,6 +10,8 @@
   },
   "test_android_actions.py": {
    "tests": [
+    "ForbiddenWordTests.test_the_word_list_is_the_nodes",
+    "ForbiddenWordTests.test_words_are_located_on_their_own_only_in_rows_of_hud_labels",
     "FrameworkTests.test_the_nodes_load_run_and_tell_the_hud_from_a_page",
     "PlanTests.test_a_shortcut_that_cannot_be_placed_is_refused",
     "PlanTests.test_an_unchanged_strip_confirms_even_when_ocr_reads_by_window_position",
@@ -33,6 +35,7 @@
     "RuntimeKeyTests.test_focus_lost_at_dispatch_is_decided_again_within_the_limit",
     "RuntimeKeyTests.test_leave_page",
     "RuntimeKeyTests.test_menu_on_the_hud_taps_the_duck_confirmed_on_a_fresh_frame",
+    "RuntimeKeyTests.test_no_named_tap_next_to_a_forbidden_word_on_either_frame",
     "RuntimeKeyTests.test_other_named_actions_and_holds_are_refused",
     "RuntimeKeyTests.test_the_quit_guard_cancels_then_decides_again",
     "RuntimeKeyTests.test_the_tap_carries_the_confirming_frame",
@@ -158,6 +161,7 @@
   "test_android_monthly.py": {
    "tests": [
     "EntryTests.test_the_shared_task_branches_to_the_android_flow_on_a_touch_target_only",
+    "FlowTests.test_a_blue_button_before_the_claim_stops",
     "FlowTests.test_a_button_that_stays_gold_after_the_claim_is_not_success",
     "FlowTests.test_a_fatal_device_error_sends_nothing_more",
     "FlowTests.test_a_gold_claim_on_the_task_tab_is_claimed_and_checked_on_settled_frames",
@@ -167,7 +171,11 @@
     "FlowTests.test_a_layer_still_there_after_one_tap_stops",
     "FlowTests.test_a_modal_at_the_start_sends_nothing",
     "FlowTests.test_a_tab_that_does_not_settle_stops",
+    "FlowTests.test_a_wrong_frame_on_either_dismissal_frame_is_saved_and_stops",
     "FlowTests.test_an_unclear_button_stops_before_any_claim",
+    "FlowTests.test_an_unexpected_screen_while_opening_the_page_or_a_tab_stops",
+    "FlowTests.test_an_unknown_button_after_the_claim_stops",
+    "FlowTests.test_brief_transition_frames_are_waited_through_but_not_for_long",
     "FlowTests.test_no_tab_is_tapped_without_a_recognised_view_of_the_page",
     "FlowTests.test_nothing_to_claim_taps_only_the_tabs_and_the_way_back",
     "FlowTests.test_the_claim_needs_the_whole_view_on_both_tap_frames",
@@ -175,7 +183,7 @@
     "FlowTests.test_the_reward_layer_gets_one_tap_on_blank_space_then_the_page_is_checked",
     "FlowTests.test_the_way_back_leaves_only_the_monthly_page",
     "FrameworkTests.test_the_monthly_page_targets_states_and_guard",
-    "LayerTapTests.test_a_layer_gone_on_the_confirming_frame_is_decided_again",
+    "LayerTapTests.test_a_tap_frame_that_is_not_the_layer_goes_back_to_the_caller_without_a_second_attempt",
     "LayerTapTests.test_nothing_is_tapped_off_the_layer_or_next_to_a_forbidden_word",
     "LayerTapTests.test_the_point_is_tapped_on_the_confirming_frame",
     "LayerTests.test_the_layer_is_recognised_only_positively",

@@ -31,6 +31,7 @@ def hit(box, text=""):
 
 
 MISS = SimpleNamespace(hit=False, box=None, best_result=None)
+FORBIDDEN = "MaaNikki_Android_Forbidden"
 
 # The label row of the observed HUD: label -> (centre x, width), text top at y=64.
 LABELS = {"商城": (657, 36), "共鸣": (727, 36), "奇迹之旅": (798, 70), "活动大厅": (868, 70), "奇想日历": (939, 70),
@@ -42,10 +43,11 @@ class Scripted:
     wholly inside its region (as one merged box, like the real OCR). ``ocr=False`` models an OCR engine that cannot
     run: every OCR node reports an ordinary miss (what MaaFramework 5.16.1 does without its model)."""
 
-    OCR_NODES = {actions.QUIT_TITLE, actions.QUIT_CANCEL, actions.REDEEM_TITLE, actions.HUD_LABEL, actions.PAGE_TITLE}
+    OCR_NODES = {actions.QUIT_TITLE, actions.QUIT_CANCEL, actions.REDEEM_TITLE, actions.HUD_LABEL, actions.PAGE_TITLE,
+                 FORBIDDEN}
 
     def __init__(self, *, quit=False, cancel=False, modal=False, redeem=True, duck=False, arrow=False, lit=None,
-                 title="设置", labels=LABELS, ocr=True, errors=()):
+                 title="设置", labels=LABELS, ocr=True, errors=(), forbidden=None):
         # A dialog dims what is behind it; without one the HUD and page icons are at full brightness.
         lit = not (quit or modal) if lit is None else lit
         self.fixed = {actions.QUIT_TITLE: quit and hit([560, 180, 160, 40], "退出游戏"),
@@ -57,6 +59,12 @@ class Scripted:
                       actions.BACK_ARROW: arrow and hit([37, 22, 40, 40]),
                       actions.BACK_ARROW_LIT: arrow and lit and hit([37, 22, 40, 40]),
                       actions.PAGE_TITLE: arrow and title and hit([96, 26, 30 * len(title), 30], title)}
+        # The forbidden words read on the full frame: by default the HUD's own 共鸣 label, as on the device.
+        if forbidden is None:
+            forbidden = [("共鸣", [709, 64, 36, 22])] if duck and "共鸣" in labels else []
+        rows = [SimpleNamespace(text=text, box=box) for text, box in forbidden]
+        self.fixed[FORBIDDEN] = rows and SimpleNamespace(hit=True, box=rows[0].box, best_result=rows[0],
+                                                         filtered_results=rows)
         self.labels, self.ocr, self.errors, self.calls = labels, ocr, set(errors), []
 
     def __call__(self, node, override=None):
@@ -332,6 +340,28 @@ class RuntimeKeyTests(FreshAndroidState):
         rt.context.run_action_direct.assert_not_called()
         dispatch.assert_not_called()
 
+    def test_no_named_tap_next_to_a_forbidden_word_on_either_frame(self):
+        # Review round 2 (monthly): 「解锁悠远颂歌」 over the 奇迹之旅 shortcut, on the deciding or only on the confirming
+        # frame: refused, nothing sent. The HUD's own 共鸣 (on its own or merged into the label row) is not refused.
+        from navigation.models import NavigationError
+        paid = [("共鸣", [709, 64, 36, 22]), ("解锁悠远颂歌", [710, 14, 187, 37])]
+        for screens in ([Scripted(duck=True, forbidden=paid)],
+                        [Scripted(duck=True), Scripted(duck=True, forbidden=paid)]):
+            with self.subTest(frames=len(screens)):
+                rt = self.runtime(screens)
+                with android_run(), patch("daily.runtime.active_session", return_value=None):
+                    with self.assertRaises(NavigationError) as caught:
+                        rt.key("monthly")
+                self.assertIn("解锁悠远颂歌", str(caught.exception))
+                rt.context.run_action_direct.assert_not_called()
+        merged = [("共鸣 奇迹之旅活动大厅奇想日历无限之心", [705, 64, 340, 19])]
+        for forbidden in (None, merged, [("共鸣", [706, 64, 60, 19])]):  # the default is a lone 共鸣
+            with self.subTest(forbidden=forbidden):
+                rt = self.runtime([Scripted(duck=True, forbidden=forbidden)] * 2)
+                with android_run(), patch("daily.runtime.active_session", return_value=None):
+                    self.assertTrue(rt.key("monthly"))
+                self.assertEqual(len(self.sent(rt)), 1)
+
     def test_the_tap_carries_the_confirming_frame(self):
         rt = self.runtime([Scripted(duck=True), Scripted(duck=True)])
         sources = []
@@ -469,6 +499,27 @@ class RuntimeKeyTests(FreshAndroidState):
                     self.assertTrue(rt.key("menu"))
                 rt._touch_key.assert_not_called()
                 rt.action.assert_called_once_with("ClickKey", key=27)
+
+
+class ForbiddenWordTests(unittest.TestCase):
+    def test_words_are_located_on_their_own_only_in_rows_of_hud_labels(self):
+        from host.android import pages
+        # A lone 共鸣 padded into its neighbour: about two glyphs wide, not the padded 60 px.
+        self.assertEqual(pages.word_boxes("共鸣", [706, 64, 60, 19]), [[706, 64, 38, 19]])
+        # The merged label row: 共鸣 alone, ending far left of 奇迹之旅's centre (797).
+        [box] = pages.word_boxes("共鸣 奇迹之旅活动大厅奇想日历无限之心", [705, 64, 340, 19])
+        self.assertLessEqual(box[0] + box[2], 750)
+        # A word inside an unknown label or button: the whole row (its extent is unknown).
+        self.assertEqual(pages.word_boxes("购买等级", [1056, 112, 105, 28]), [[1056, 112, 105, 28]])
+        self.assertEqual(pages.word_boxes("¥6", [336, 334, 87, 24]), [[336, 334, 87, 24]])
+        self.assertEqual(pages.word_boxes("解锁悠远颂歌", [710, 14, 187, 37]), [[710, 14, 187, 37]])
+
+    def test_the_word_list_is_the_nodes(self):
+        from host.android import pages
+        if not android_layer_present(self):
+            return
+        nodes = json.loads((ROOT / "resource_android/pipeline/android_mailbox.json").read_text(encoding="utf-8"))
+        self.assertEqual(nodes[pages.FORBIDDEN]["expected"], pages.FORBIDDEN_WORDS)
 
 
 def android_layer_present(test) -> bool:

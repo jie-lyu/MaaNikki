@@ -636,9 +636,10 @@ class Runtime:
     def _touch_key(self, name, delay):
         """Android: a named game action as at most one tap, decided on one recognised, focus-confirmed frame and
         confirmed on a fresh one, which the tap carries as its source (host.android.actions). The quit
-        confirmation is cancelled first if it is showing."""
+        confirmation is cancelled first if it is showing. No tap within 40 px of a forbidden word (each word located
+        on its own, host.android.pages.forbidden_word_near) on either frame."""
         from host import UnsupportedInput
-        from host.android import actions
+        from host.android import actions, pages
         from navigation.models import NavigationError
         from task_control import ForegroundChanged
         if name not in actions.ACTIONS:
@@ -648,6 +649,12 @@ class Runtime:
 
         def sent_so_far():
             return f"已点过 {guard_taps} 次退出确认框的「取消」" if guard_taps else "没有发送任何输入"
+
+        def refuse_near_forbidden(recognize, target):
+            word = pages.forbidden_word_near(recognize, target)
+            if word:
+                raise NavigationError(f"「{actions.ACTION_NAMES[name]}」要点的地方旁边有「{word}」，没有点，"
+                                      f"{sent_so_far()}，任务停止。")
         for _attempt in range(self.TOUCH_KEY_ATTEMPTS):
             if self.stopped:
                 return False
@@ -666,16 +673,19 @@ class Runtime:
                 continue  # a focus loss was observed while deciding: nothing decided on this frame counts
             if plan.target is None:
                 return True  # nothing to do (e.g. leaving while already in the open world)
+            refuse_near_forbidden(recognize, plan.target)
             # Right before sending: the same screen with the same thing in the same place on a fresh frame, which
             # the tap then carries, so a page that changed during the (long) search is not tapped.
             confirming = self._fresh_device_frame()
             if confirming is None:
                 return False
-            target = actions.confirm_tap(plan, screen, self._recognizer_on(confirming))
+            recognize_confirming = self._recognizer_on(confirming)
+            target = actions.confirm_tap(plan, screen, recognize_confirming)
             # Both frames must still carry the current focus generation and epoch: a loss observed at any point
             # since the decision began voids it (the dispatch then rechecks the confirming frame under its lock).
             if target is None or not (self._frame_still_valid(decided) and self._frame_still_valid(confirming)):
                 continue
+            refuse_near_forbidden(recognize_confirming, target)
             try:
                 if not self.action("Click", target=target, source_frame=confirming):
                     return False

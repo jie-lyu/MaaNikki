@@ -18,8 +18,10 @@ on blank space did. So a claim is a success only when fresh frames, a second apa
 button no longer gold. On the way there, the reward layer, recognised positively and over the 奇迹之旅 page, gets at
 most one tap, at DISMISS_POINT (blank on the layer and on every saved 奇迹之旅 page), through pages.tap_on_layer. The
 first other frame after a claim (another screen, a layer that is not over this page, a layer still there after that
-one tap) stops the task, sends nothing more and saves the frame. Tab and claim taps are decided and confirmed only on
-frames that show the whole expected state of the page (read_view).
+one tap, a button face that is neither gold nor off) stops the task, sends nothing more and saves the frame. Tab and
+claim taps are decided and confirmed only on frames that show the whole expected state of the page (read_view).
+Opening the page or a tab waits through frames of the state being left, through an unrecognised frame or the page
+between tabs only briefly, and stops on anything else (e.g. 商城) with that frame saved.
 """
 from __future__ import annotations
 
@@ -48,12 +50,18 @@ LAYER_OVER_MONTHLY = ("MaaNikki_Android_RewardLayerOverMonthlyTitle", "MaaNikki_
 # label box in range when selected, 0.000 when not; same HSV bounds and threshold as the PC monthly_tab_selected).
 TAB_LABELS = {TREASURE: (25, 200, 88, 24), TASK: (25, 317, 86, 27)}
 TAB_SELECTED = .45
-# The 一键领取 button face. Gold (claimable, seen): 0.822. No button (旅行秘宝, nothing to claim, seen): 0.000.
+# The 一键领取 button face. Gold (claimable, seen): gold 0.822. Off: no gold and a low-saturation face, as where there
+# is no button (旅行秘宝 before and after its claim, seen: gold 0.000, grey 0.973) or a greyed button (not seen; the
+# mail task's disabled bounds). Any other face (part gold, gold without its label, another colour) is unknown.
 BUTTON_FACE = (670, 640, 210, 40)
-ENABLED_GOLD, NONE_GOLD = .4, .05
+ENABLED_GOLD, NONE_GOLD, NONE_GREY = .4, .05, .8
 # After a claim: the settled state must hold this long, on at least two fresh frames, before it counts.
 SETTLE_SECONDS = 1.0
 CLAIM_WAIT = 10
+# Opening the page or a tab: frames of the state being left are waited through (up to OPEN_WAIT); an unrecognised
+# frame or the page between tabs only within TRANSITION_ALLOWANCE of the tap; anything else stops at once.
+OPEN_WAIT = 5
+TRANSITION_ALLOWANCE = 1.5
 # The reward layer's dismissal tap. Run 1 closed it with a tap at (640,700), but on the 旅行任务 tab that point lies
 # ~17 px left of and ~18 px below the 一键领取 graphic (~[657,630,235,52]). This point is in the same blank band of the
 # layer and, on every saved 奇迹之旅 frame (both tabs, button lit or not) and layer frame, at least 40 px from every
@@ -76,10 +84,15 @@ def button_gold(frame) -> float:
     return _fraction(frame, BUTTON_FACE, (10, 85, 130), (35, 255, 255))
 
 
+def button_grey(frame) -> float:
+    return _fraction(frame, BUTTON_FACE, (0, 0, 85), (180, 65, 235))
+
+
 @dataclass(frozen=True)
 class View:
     """One fresh frame of the 奇迹之旅 page: which tab is selected and what the 一键领取 button shows ("enabled": the
-    label and a gold face; "none": no gold face, the button gone or greyed; "unknown": anything in between)."""
+    label and a gold face; "none": no gold and a low-saturation face, the button gone or greyed; "unknown": any other
+    face)."""
     tab: str
     button: str
     gold: float
@@ -93,7 +106,12 @@ def read_view(frame, recognize) -> View | None:
     if len(selected) != 1 or not actions._hit(recognize(CONTENT_NODES[selected[0]])):
         return None
     gold, label = button_gold(frame), actions._hit(recognize(CLAIM_ALL))
-    button = "enabled" if label and gold >= ENABLED_GOLD else "none" if gold <= NONE_GOLD else "unknown"
+    if label and gold >= ENABLED_GOLD:
+        button = "enabled"
+    elif gold <= NONE_GOLD and button_grey(frame) >= NONE_GREY:
+        button = "none"
+    else:
+        button = "unknown"
     return View(selected[0], button, round(gold, 3))
 
 
@@ -110,25 +128,25 @@ def is_reward_layer(screen, recognize) -> bool:
     return all(actions._hit(recognize(node)) for node in (LAYER_TITLE, LAYER_HINT, *LAYER_OVER_MONTHLY))
 
 
-def look(rt):
-    """``(kind, view, frame)`` from one fresh frame. kind: "view" (the settled 奇迹之旅 page, ``view`` set), "layer"
-    (the reward layer over that page), "invalid" (the frame was voided by a focus change: it shows nothing), "other"
-    (anything else) or None (the run stopped; frame None)."""
-    screen, frame, recognize = pages.screen_now(rt)
-    if frame is None:
-        return None, None, None
+def classify(rt, screen, frame, recognize):
+    """``(kind, view)`` for one frame: "view" (the settled 奇迹之旅 page, ``view`` set), "unsettled" (the 奇迹之旅 page
+    not settled on one tab with its content), "layer" (the reward layer over that page), "invalid" (voided by a focus
+    change: it shows nothing) or "other" (anything else)."""
     if not rt._frame_still_valid(frame):
-        return "invalid", None, frame
+        return "invalid", None
     if pages.is_page(screen, TITLE):
         view = read_view(frame, recognize)
-        return ("view" if view is not None else "other"), view, frame
-    return ("layer" if is_reward_layer(screen, recognize) else "other"), None, frame
+        return ("view", view) if view is not None else ("unsettled", None)
+    return ("layer" if is_reward_layer(screen, recognize) else "other"), None
 
 
-def view_now(rt):
-    """``(view, frame)`` from one fresh valid frame: view is None when the frame is not the settled 奇迹之旅 page."""
-    _kind, view, frame = look(rt)
-    return view, frame
+def look(rt):
+    """``(kind, view, frame, screen)`` from one fresh frame (classify); kind None when the run stopped."""
+    screen, frame, recognize = pages.screen_now(rt)
+    if frame is None:
+        return None, None, None, None
+    kind, view = classify(rt, screen, frame, recognize)
+    return kind, view, frame, screen
 
 
 def expected(tab, button=None):
@@ -148,69 +166,71 @@ class Stop(Exception):
         self.frames = [frame for frame in frames if frame is not None]
 
 
-def wait_view(rt, accept, seconds: float):
-    """The first fresh view within ``seconds`` that ``accept(view)`` takes, else ``(None, last frame)``."""
-    deadline, frame = time.monotonic() + seconds, None
+def wait_state(rt, what, done, source):
+    """Poll fresh frames until ``done(kind, view)`` holds and return that view. Frames for which ``source(screen,
+    kind, view)`` holds (the state being left) are waited through up to OPEN_WAIT; an unrecognised screen or the
+    奇迹之旅 page between tabs only within TRANSITION_ALLOWANCE; any other frame, or the time running out, saves that
+    frame and stops. None when the run stopped."""
+    start = time.monotonic()
     while not rt.stopped:
-        view, latest = view_now(rt)
-        if latest is None:
-            return None, None
-        frame = latest
-        if view is not None and accept(view):
-            return view, frame
-        if time.monotonic() >= deadline:
-            break
+        kind, view, frame, screen = look(rt)
+        if kind is None:
+            return None
+        if kind != "invalid":
+            if done(kind, view):
+                return view
+            elapsed = time.monotonic() - start
+            transition = kind == "unsettled" or (kind == "other" and screen.kind == "unknown")
+            if not (source(screen, kind, view) or (transition and elapsed <= TRANSITION_ALLOWANCE)):
+                raise Stop(f"{what}时出现了不该出现的画面", [frame])
+            if elapsed >= OPEN_WAIT:
+                raise Stop(f"{what}超时", [frame])
         rt.pause(.4)
-    return None, frame
+    return None
 
 
 def open_tab(rt, tab) -> bool:
     """Select ``tab``: only from a recognised view of the page; a guarded tap on its label (both tap frames must be
     the settled page on the other tab) unless it is already selected, then wait for it to settle."""
-    view, frame = wait_view(rt, lambda v: True, 5)
-    if frame is None or rt.stopped:
+    view = wait_state(rt, f"切换到「{TAB_NAMES[tab]}」之前确认页面", lambda kind, v: kind == "view",
+                      lambda screen, kind, v: False)
+    if view is None or rt.stopped:
         return False
-    if view is None:
-        raise Stop(f"切换到「{TAB_NAMES[tab]}」之前没有认出奇迹之旅页面停在哪个页签", [frame])
     if view.tab == tab:
         return True
-    if not pages.tap_on_page(rt, TITLE, TAB_NODES[tab], accept=expected(view.tab)):
+    source = view.tab
+    if not pages.tap_on_page(rt, TITLE, TAB_NODES[tab], accept=expected(source)):
         return False
-    view, frame = wait_view(rt, lambda v: v.tab == tab, 5)
-    if frame is None or rt.stopped:
-        return False
-    if view is None:
-        raise Stop(f"点了「{TAB_NAMES[tab]}」之后没有认出这个页签", [frame])
-    return True
+    view = wait_state(rt, f"切换到「{TAB_NAMES[tab]}」", lambda kind, v: kind == "view" and v.tab == tab,
+                      lambda screen, kind, v: kind == "view" and v.tab == source)
+    return view is not None and not rt.stopped
 
 
 def dismiss_layer(rt, tab) -> bool:
     """One guarded tap on blank space of the reward layer (pages.tap_on_layer: the layer over the 奇迹之旅 page on
-    both tap frames). When the layer is no longer there to decide on, only a positively recognised return to the
-    expected tab is accepted (nothing was sent); anything else stops."""
+    both tap frames). When a tap frame is not that layer, that frame decides: a positively recognised return to the
+    expected tab continues (nothing was sent); anything else saves it and stops. No second attempt."""
     try:
         return pages.tap_on_layer(rt, "奇迹之旅页面上的「恭喜获得」奖励层", is_reward_layer, DISMISS_POINT)
     except pages.GuardRefusal:
         raise
-    except pages.PageMismatch:
+    except pages.LayerMismatch as mismatch:
         if rt.stopped:
             return False
-    kind, view, frame = look(rt)
-    if kind is None:
-        return False
-    if kind == "view" and view.tab == tab:
-        return True
-    raise Stop(f"「恭喜获得」奖励层在点之前变了，但画面没有回到「{TAB_NAMES[tab]}」页签", [frame])
+        kind, view = classify(rt, mismatch.screen, mismatch.frame, mismatch.recognize)
+        if kind == "view" and view.tab == tab and view.button != "unknown":
+            return True
+        raise Stop(f"「恭喜获得」奖励层在点之前变了，但画面没有回到「{TAB_NAMES[tab]}」页签", [mismatch.frame])
 
 
 def claim(rt, tab) -> bool:
     """Claim on the selected ``tab`` when 一键领取 is gold. True when there was nothing to claim or the claim was seen
-    to land (the same tab, settled, button no longer gold)."""
+    to land (the same tab, settled, button off)."""
     name = TAB_NAMES[tab]
-    view, frame = view_now(rt)
-    if frame is None:
+    kind, view, frame, _screen = look(rt)
+    if kind is None:
         return False
-    if view is None or view.tab != tab:
+    if kind != "view" or view.tab != tab:
         raise Stop(f"「{name}」页签没有停稳，认不出页面", [frame])
     if view.button == "none":
         rt.log(f"{name}没有可领取的奖励。")
@@ -220,23 +240,23 @@ def claim(rt, tab) -> bool:
     # Both tap frames must show the whole expected state: this tab, settled, the button labelled and gold.
     if not pages.tap_on_page(rt, TITLE, CLAIM_ALL, accept=expected(tab, "enabled")):
         return False
-    # Every frame after the tap must be this tab's view (success once the button is off on fresh frames at least
-    # SETTLE_SECONDS apart with nothing else between) or the reward layer over the page (one dismissal tap, no
-    # more). The first frame that is neither stops the task there, with nothing more sent.
+    # Every frame after the tap must be this tab's view with the button still gold (the claim has not shown yet) or
+    # off (success once that holds on fresh frames at least SETTLE_SECONDS apart with nothing else between), or the
+    # reward layer over the page (one dismissal tap, no more). The first frame that is none of these stops the task
+    # there, with nothing more sent.
     deadline, settled_at, settled_frames, dismissed, kind = time.monotonic() + CLAIM_WAIT, None, 0, False, None
     while not rt.stopped and time.monotonic() < deadline:
-        kind, view, frame = look(rt)
+        kind, view, frame, _screen = look(rt)
         if kind is None:
             return False
-        if kind == "view" and view.tab == tab:
-            if view.button == "none":
-                settled_at = time.monotonic() if settled_at is None else settled_at
-                settled_frames += 1
-                if settled_frames >= 2 and time.monotonic() - settled_at >= SETTLE_SECONDS:
-                    rt.log(f"{name}奖励已领取。")
-                    return True
-            else:
-                settled_at, settled_frames = None, 0  # the claim has not shown yet
+        if kind == "view" and view.tab == tab and view.button == "none":
+            settled_at = time.monotonic() if settled_at is None else settled_at
+            settled_frames += 1
+            if settled_frames >= 2 and time.monotonic() - settled_at >= SETTLE_SECONDS:
+                rt.log(f"{name}奖励已领取。")
+                return True
+        elif kind == "view" and view.tab == tab and view.button == "enabled":
+            settled_at, settled_frames = None, 0
         elif kind == "layer":
             settled_at, settled_frames = None, 0
             if not dismissed:
@@ -246,7 +266,9 @@ def claim(rt, tab) -> bool:
                 deadline = max(deadline, time.monotonic() + AFTER_DISMISS_WAIT)
                 continue
         elif kind != "invalid":  # a frame voided by a focus change shows nothing either way
-            raise Stop(f"领取「{name}」之后出现了认不出的画面（不是这个页签，也不是奇迹之旅上的奖励层）", [frame])
+            what = (f"按钮状态认不出（金色占比 {view.gold}）" if kind == "view" and view.tab == tab
+                    else "认不出的画面（不是这个页签，也不是奇迹之旅上的奖励层）")
+            raise Stop(f"领取「{name}」之后出现了{what}", [frame])
         rt.pause(.4)
     if rt.stopped:
         return False
@@ -263,8 +285,10 @@ def run(rt) -> bool:
             return fail(rt, "没能回到大世界")
         if not rt.key("monthly"):
             return False
-        if pages.wait_for(rt, lambda screen: pages.is_page(screen, TITLE), 5) is None:
-            return fail(rt, "没能打开奇迹之旅页面")
+        # From the HUD to the settled page: HUD frames are waited through, anything else stops.
+        if wait_state(rt, "打开奇迹之旅页面", lambda kind, v: kind == "view",
+                      lambda screen, kind, v: screen.kind == "hud") is None:
+            return False
         claimed = (open_tab(rt, TASK) and claim(rt, TASK)
                    and open_tab(rt, TREASURE) and claim(rt, TREASURE))
     except Stop as error:
