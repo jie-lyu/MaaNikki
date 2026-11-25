@@ -3,16 +3,27 @@
 There is no desktop window. "Exists" means the game's process runs on the device, "foreground" that its window has
 input focus there (mCurrentFocus; mFocusedApp still names the game behind a system dialog or the launcher, so it
 does not count). Both are read through the controller's own ADB shell, so they describe the device the controller
-is connected to. Input arrives in a later step.
+is connected to.
+
+Desktop windows on top of the emulator do not matter for capture (2026-11-25 survey), but which Android app is in
+front does: with the launcher or another app in front, the frame is not the game. So a frame counts only while the
+game has focus (capture_requires_foreground).
+
+Input arrives in a later step. Until then input() gives primitives that send nothing, so the session and
+navigation code can hold a target, wait for focus and release (nothing) without any key reaching the device.
 """
 from __future__ import annotations
 
 import re
+import threading
 
 from navigation.models import NavigationError
 
 GAME_PACKAGE = "com.papegames.infinitynikki"
 _FOCUS = re.compile(r"\su\d+\s+([\w.]+)/")
+# The controller keeps one shell output: a second request before the first result is read would replace it.
+# Every shell request of this process holds this lock from posting through reading the result.
+_SHELL_LOCK = threading.Lock()
 
 
 def focused_package(output: str | None) -> str | None:
@@ -25,6 +36,21 @@ def focused_package(output: str | None) -> str | None:
     return packages.pop() if len(packages) == 1 else None
 
 
+def process_state(output: str | None) -> bool | None:
+    """From `pidof <package>; echo __exit=$?`: True when a numeric pid is reported, False when pidof confirmed
+    there is none, None when the result cannot be read (it then says nothing about the game)."""
+    if output is None:
+        return None
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    status = next((line for line in lines if line.startswith("__exit=")), None)
+    pids = [line for line in lines if not line.startswith("__exit=")]
+    if status == "__exit=0" and pids and all(part.isdigit() for line in pids for part in line.split()):
+        return True
+    if status == "__exit=1" and not pids:
+        return False
+    return None
+
+
 def check_controller_info(info) -> str:
     """The ADB serial of a connection the Android backend can drive; raises NavigationError otherwise."""
     serial = info.get("adb_serial") if isinstance(info, dict) else None
@@ -33,13 +59,36 @@ def check_controller_info(info) -> str:
     return serial
 
 
+class NoInput:
+    """Input primitives for a target whose input mapping does not exist yet: they send nothing."""
+
+    def force_key_up(self, key: int) -> None:
+        return None
+
+    def force_mouse_up(self, button: int) -> None:
+        return None
+
+    def press_mouse(self, button: int) -> bool:
+        return False
+
+    def post_window_key(self, key: int, *, down: bool) -> bool:
+        return False
+
+    def relative_move(self, dx: int, dy: int) -> bool:
+        return False
+
+    def last_error(self) -> int:
+        return 0
+
+    def physical_keys(self):
+        raise NavigationError("安卓模拟器没有电脑键盘输入。")
+
+
 class AndroidTarget:
     """The game on the emulator the controller is connected to."""
 
-    # ADB capture reads the emulator's display; desktop windows on top of the emulator do not matter
-    # (2026-11-25: frames stayed fresh with BlueStacks fully covered by other windows).
-    capture_requires_foreground = False
-    # Releases go through the controller's input tool, which needs no focus.
+    capture_requires_foreground = True
+    # Nothing is pressed yet; releases never wait for focus.
     release_ignores_focus = True
     handle = 0
 
@@ -48,21 +97,23 @@ class AndroidTarget:
         self.controller = controller
 
     def _shell(self, command: str) -> str | None:
-        try:
-            job = self.controller.post_shell(command, 5000).wait()
-        except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
-            return None
-        return job.get() if getattr(job, "succeeded", False) else None
+        with _SHELL_LOCK:
+            try:
+                job = self.controller.post_shell(command, 5000).wait()
+                return job.get() if getattr(job, "succeeded", False) else None
+            except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
+                return None
 
     def focus_package(self) -> str | None:
         return focused_package(self._shell("dumpsys window | grep mCurrentFocus"))
 
     def exists(self) -> bool:
-        output = self._shell(f"pidof {GAME_PACKAGE}")
-        return bool(output and output.strip())
+        # Only a confirmed absence ends the task as "game closed"; an unreadable answer is not one (focus checks
+        # then keep the task paused instead).
+        return process_state(self._shell(f"pidof {GAME_PACKAGE}; echo __exit=$?")) is not False
 
     def minimized(self) -> bool:
-        return False  # the emulator's own window state does not stop capture or input over ADB (risk 1: minimised unverified)
+        return False  # the emulator window's own state does not stop ADB capture or input (minimised: unverified)
 
     def foreground(self) -> bool:
         return self.focus_package() == GAME_PACKAGE
@@ -76,8 +127,8 @@ class AndroidTarget:
     def focus_details(self) -> dict:
         return {"backend": "android", "serial": self.serial, "focused_package": self.focus_package()}
 
-    def input(self):
-        raise NavigationError("安卓模拟器的游戏操作还在开发中，暂不发送输入。")
+    def input(self) -> NoInput:
+        return NoInput()
 
     def geometry(self):
         raise NavigationError("安卓模拟器没有电脑上的游戏窗口。")

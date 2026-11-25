@@ -17,6 +17,7 @@ CAPABILITIES = Capabilities(
     clipboard=True,
     credential_store=True,
     text_input=True,
+    startup_focus_key=True,
 )
 
 

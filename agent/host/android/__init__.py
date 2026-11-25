@@ -6,8 +6,9 @@ See docs/android-support-plan.md.
 
 There is no game window on this desktop: no overlays, window resizing, launching or closing the game, and no
 desktop focus or cursor to manage. Whether the game can take input is a question for the device (host/android/
-target.py). Input mapping (touch for named game actions) arrives in a later step; until then no task that sends
-input is on the task list.
+target.py). Input mapping (touch for named game actions) arrives in a later step; until then the target's input
+primitives send nothing and no task that sends input is on the task list. The list parser comes from host.macos,
+which the Windows package does not ship either; phase F moves it to a shared module.
 """
 from __future__ import annotations
 
@@ -37,7 +38,7 @@ def task_allowed(entry) -> bool:
     """Whether the Android list lets ``entry`` run (verified or experimental); an unreadable list allows nothing."""
     try:
         verified, experimental, _excluded = task_tiers()
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ImportError, ValueError, KeyError, TypeError):
         return False
     return entry in verified or entry in experimental
 
@@ -45,7 +46,7 @@ def task_allowed(entry) -> bool:
 def refusal_reason(entry) -> str:
     try:
         reason = task_tiers()[2].get(entry)
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ImportError, ValueError, KeyError, TypeError):
         return "无法读取安卓任务清单，已跳过。"
     return reason or "安卓模拟器暂不开放这个任务，已跳过。"
 
@@ -56,7 +57,7 @@ def start_notice(entry) -> str | None:
         data = _task_list()
         from host.macos import parse_task_tiers
         experimental = parse_task_tiers(data)[1]
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ImportError, ValueError, KeyError, TypeError):
         return None
     if entry not in experimental:
         return None

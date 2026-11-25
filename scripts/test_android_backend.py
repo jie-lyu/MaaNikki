@@ -20,7 +20,7 @@ os.environ.setdefault("MAAFW_BINARY_PATH", str(ROOT / "maafw"))
 
 import host  # noqa: E402
 from host import android  # noqa: E402
-from host.android.target import AndroidTarget, check_controller_info, focused_package  # noqa: E402
+from host.android.target import AndroidTarget, NoInput, check_controller_info, focused_package, process_state  # noqa: E402
 from navigation.models import NavigationError  # noqa: E402
 
 ADB_CONTROLLER = {"name": "nikki_android", "type": "Adb", "display_short_side": 720}
@@ -131,8 +131,15 @@ class TargetTests(unittest.TestCase):
             with self.subTest(info=info), self.assertRaises(NavigationError):
                 check_controller_info(info)
 
+    def test_process_state_needs_a_confirmed_answer(self):
+        self.assertTrue(process_state("4242\n__exit=0\n"))
+        self.assertTrue(process_state("4242 4243\n__exit=0\n"))
+        self.assertFalse(process_state("__exit=1\n"))
+        for output in (None, "", "__exit=0\n", "mCurrentFocus=x\n__exit=0\n", "4242\n", "4242\n__exit=1\n"):
+            self.assertIsNone(process_state(output), output)
+
     def test_connect_target_reads_the_device(self):
-        controller = FakeShellController({"mCurrentFocus": FOCUS_GAME, "pidof": "4242\n"})
+        controller = FakeShellController({"mCurrentFocus": FOCUS_GAME, "pidof": "4242\n__exit=0\n"})
         controller.info = INFO
         with android_run():
             target = host.connect_target(controller)
@@ -143,23 +150,104 @@ class TargetTests(unittest.TestCase):
         self.assertFalse(target.hung())
         self.assertFalse(target.bring_to_foreground(controller))
         self.assertEqual(target.focus_details()["focused_package"], "com.papegames.infinitynikki")
-        self.assertFalse(target.capture_requires_foreground)
+        self.assertTrue(target.capture_requires_foreground)  # another Android app in front is not the game
         self.assertTrue(target.release_ignores_focus)
 
     def test_a_dialog_or_launcher_in_front_is_not_the_game(self):
-        for outputs in ({"mCurrentFocus": FOCUS_LAUNCHER, "pidof": "4242\n"},
-                        {"mCurrentFocus": "  mCurrentFocus=null\n", "pidof": "4242\n"},
+        for outputs in ({"mCurrentFocus": FOCUS_LAUNCHER, "pidof": "4242\n__exit=0\n"},
+                        {"mCurrentFocus": "  mCurrentFocus=null\n", "pidof": "4242\n__exit=0\n"},
                         {}):  # shell failed
             target = AndroidTarget(INFO, FakeShellController(outputs))
             self.assertFalse(target.foreground(), outputs)
-        self.assertFalse(AndroidTarget(INFO, FakeShellController({"pidof": ""})).exists())
+        self.assertFalse(AndroidTarget(INFO, FakeShellController({"pidof": "__exit=1\n"})).exists())
+        self.assertTrue(AndroidTarget(INFO, FakeShellController({})).exists())  # unreadable is not "closed"
 
-    def test_no_input_or_window_geometry_yet(self):
+    def test_shell_requests_are_serialised_through_reading_the_result(self):
+        import threading
+        order, gate = [], threading.Event()
+
+        class SharedOutputController:
+            """Like MaaFramework: one shell output per controller, replaced by every request."""
+            output = None
+
+            def post_shell(self, command, timeout):
+                order.append(("post", command))
+                SharedOutputController.output = command
+
+                def wait():
+                    gate.wait(1)
+                    return SimpleNamespace(succeeded=True, get=lambda: SharedOutputController.output)
+                return SimpleNamespace(wait=wait)
+        target = AndroidTarget(INFO, SharedOutputController())
+        results = {}
+        threads = [threading.Thread(target=lambda c=c: results.setdefault(c, target._shell(c))) for c in ("a", "b")]
+        for thread in threads:
+            thread.start()
+        gate.set()
+        for thread in threads:
+            thread.join(2)
+        self.assertEqual(results, {"a": "a", "b": "b"})
+
+    def test_a_shell_result_that_raises_is_unreadable(self):
+        class Raising:
+            def post_shell(self, command, timeout):
+                return SimpleNamespace(wait=lambda: SimpleNamespace(succeeded=True, get=Mock(side_effect=RuntimeError)))
+        self.assertIsNone(AndroidTarget(INFO, Raising())._shell("x"))
+
+    def test_input_primitives_send_nothing_and_there_is_no_window_geometry(self):
         target = AndroidTarget(INFO, FakeShellController({}))
-        with self.assertRaises(NavigationError):
-            target.input()
+        native = target.input()
+        self.assertIsInstance(native, NoInput)
+        self.assertIsNone(native.force_key_up(87))
+        self.assertIsNone(native.force_mouse_up(1))
+        self.assertFalse(native.press_mouse(1))
+        self.assertFalse(native.post_window_key(87, down=True))
+        self.assertFalse(native.relative_move(5, 5))
         with self.assertRaises(NavigationError):
             target.geometry()
+
+
+class SessionTests(unittest.TestCase):
+    """The real task session with an Android target: waits for device focus and sends no key on its own."""
+
+    def test_first_wait_with_the_launcher_in_front_sends_nothing_and_pauses_until_the_game_has_focus(self):
+        from navigation.controller import ForegroundInput
+        from task_control import task_session, _SESSIONS
+        state = SimpleNamespace(now=0.0, focus=FOCUS_LAUNCHER)
+
+        class Device(FakeShellController):
+            def post_shell(self, command, timeout):
+                self.outputs["mCurrentFocus"] = state.focus
+                return super().post_shell(command, timeout)
+        controller = Device({"pidof": "4242\n__exit=0\n"})
+        controller.info = INFO
+        controller.post_key_up = Mock()
+        controller.post_key_down = Mock()
+        controller.post_touch_up = Mock()
+        controller.post_click_key = Mock()
+        context = SimpleNamespace(tasker=SimpleNamespace(controller=controller, stopping=False), run_task=Mock(),
+                                  run_recognition=Mock(), get_node_data=Mock(return_value={}))
+
+        def sleep(seconds):
+            state.now += max(seconds, 1e-9)
+            if state.now >= 1:
+                state.focus = FOCUS_GAME  # the player switches back to the game on the device
+        _SESSIONS.clear()
+        try:
+            with android_run(), task_session(context, 31) as session, \
+                    patch("task_control.wall_time.monotonic", side_effect=lambda: state.now), \
+                    patch("task_control.wall_time.sleep", side_effect=sleep):
+                inputs = ForegroundInput(controller, lambda: context.tasker.stopping)
+                session.adapter = inputs
+                inputs.check()  # first wait: requires the game in front
+                self.assertGreaterEqual(state.now, 1)
+                self.assertTrue(inputs.capturable())
+        finally:
+            _SESSIONS.clear()
+        for method in (controller.post_key_up, controller.post_key_down, controller.post_touch_up,
+                       controller.post_click_key):
+            method.assert_not_called()
+        self.assertTrue(all(c.startswith(("dumpsys window", "pidof")) for c in controller.commands))
 
 
 if __name__ == "__main__":

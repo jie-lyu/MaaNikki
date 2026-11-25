@@ -507,8 +507,11 @@ class ForegroundSession:
             if self.stopped():
                 raise TaskStopped("任务已停止。")
             self.started = True
-            # Keep automatic startup focus only for foreground runs.
-            if not bg_active and not adapter.foreground():
+            # Keep automatic startup focus only for foreground runs, and only where the backend nudges
+            # focus with a key (not on a device target).
+            from host import capabilities, game_backend
+            if (not bg_active and capabilities(game_backend()).startup_focus_key
+                    and not adapter.foreground()):
                 if not adapter.controller.post_key_up(native_key(18)).wait().succeeded:
                     raise NavigationError("未能自动聚焦游戏，请检查窗口连接。")
         if not self._background_observation and adapter.hung():

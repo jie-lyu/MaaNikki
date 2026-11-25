@@ -68,6 +68,10 @@ class Capabilities:
     # yet device-verified there, so text-dependent sub-options refuse before any committing input.
     text_input: bool = False
     credential_store: bool = False
+    # The session's first wait sends an Alt key-up when the game window is not in front (Windows, and the
+    # Option key on macOS), the existing way of nudging focus back to the game. Never on a device target,
+    # where the key would go to whatever app has focus there.
+    startup_focus_key: bool = False
 
 
 UNSUPPORTED = Capabilities("unsupported")

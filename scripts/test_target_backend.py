@@ -193,6 +193,52 @@ class Win32UnchangedTests(unittest.TestCase):
             host.connect_target(SimpleNamespace(info={"type": "adb", "adb_serial": "127.0.0.1:5555"}))
 
 
+class Win32SessionStartupTests(unittest.TestCase):
+    def test_the_first_foreground_wait_still_nudges_focus_with_alt_up(self):
+        from navigation.controller import ForegroundInput
+        from host.win32.target import Win32Target
+        from task_control import task_session, _SESSIONS
+        for controller_def in (None, WINDOWS_CONTROLLER):
+            state = SimpleNamespace(focused=False, now=0.0)
+            controller = Mock()
+
+            def key_up(key):
+                state.focused = True  # Seize's Alt key-up activates the game
+                return SimpleNamespace(wait=lambda: SimpleNamespace(succeeded=True))
+            controller.post_key_up.side_effect = key_up
+            context = SimpleNamespace(tasker=SimpleNamespace(controller=controller, stopping=False), run_task=Mock(),
+                                      run_recognition=Mock(), get_node_data=Mock(return_value={}))
+            inputs = ForegroundInput.__new__(ForegroundInput)
+            inputs.controller, inputs.hwnd = controller, 1
+            inputs.target = Win32Target.__new__(Win32Target)
+            inputs.target.handle = inputs.target.hwnd = 1
+            inputs.target.user32 = Mock()
+            inputs.target.user32.IsWindow.return_value = True
+            inputs.target.user32.IsIconic.return_value = False
+            inputs.target.user32.IsHungAppWindow.return_value = False
+            inputs.target.capture_requires_foreground = False
+            inputs.native = inputs.target.input()
+            inputs.stopped = lambda: False
+            inputs.foreground = lambda: state.focused
+            inputs.held, inputs.buttons = set(), set()
+
+            def sleep(seconds):
+                state.now += max(seconds, 1e-9)
+            _SESSIONS.clear()
+            try:
+                with self.subTest(submitted=bool(controller_def)), desktop("win32", controller_def), \
+                        task_session(context, 41) as session, \
+                        patch("task_control.wall_time.monotonic", side_effect=lambda: state.now), \
+                        patch("task_control.wall_time.sleep", side_effect=sleep):
+                    session.adapter = inputs
+                    session.register(inputs)
+                    session.ensure_hud = Mock(return_value=None)  # the Win32 HUD overlay needs real Windows
+                    inputs.check()
+            finally:
+                _SESSIONS.clear()
+            controller.post_key_up.assert_called_once_with(18)
+
+
 class MacOSUnchangedTests(unittest.TestCase):
     def test_tiers_notices_and_keys_match_the_unsubmitted_case(self):
         entries = task_entries()
