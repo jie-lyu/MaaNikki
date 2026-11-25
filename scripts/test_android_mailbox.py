@@ -19,7 +19,7 @@ from host.android.actions import Screen  # noqa: E402
 
 
 def hit(box, text=""):
-    return SimpleNamespace(hit=True, box=box, best_result=SimpleNamespace(text=text))
+    return SimpleNamespace(hit=True, box=box, best_result=SimpleNamespace(text=text, box=box))
 
 
 MISS = SimpleNamespace(hit=False, box=None, best_result=None)
@@ -83,11 +83,24 @@ class PageTapTests(unittest.TestCase):
                 self.assertEqual(self.rt.clicks, [])
 
     def test_a_point_next_to_a_forbidden_word_is_not_tapped(self):
-        nodes = {"Target": hit([300, 652, 120, 30]), pages.FORBIDDEN: hit([60, 652, 120, 30], "删除已读")}
-        self.rt = Rt([(page("邮件"), nodes)])
-        with self.assertRaises(pages.PageMismatch) as caught:
-            pages.tap_on_page(self.rt, "邮件", "Target")
+        # The whole label is read on the full frame: 删除已读 ending 25 px left of the envelope still vetoes it.
+        delete = hit([380, 655, 125, 30], "删除已读")
+        nodes = {"Target": hit([530, 645, 55, 50]), pages.FORBIDDEN: delete}
+        self.rt = Rt([(page("美鸭梨"), nodes)])
+        with self.assertRaises(pages.GuardRefusal) as caught:
+            pages.tap_on_page(self.rt, "美鸭梨", "Target")
         self.assertIn("删除", str(caught.exception))
+        self.assertEqual(self.rt.clicks, [])
+        far = {"Target": hit([311, 650, 132, 41]), pages.FORBIDDEN: hit([60, 652, 170, 30], "删除已读")}
+        self.rt = Rt([(page("邮件"), far), (page("邮件"), far)])
+        self.assertTrue(pages.tap_on_page(self.rt, "邮件", "Target"))  # 81 px away: allowed
+
+    def test_verify_must_hold_on_both_frames(self):
+        nodes = {"Target": hit([311, 650, 132, 41])}
+        self.rt = Rt([(page("邮件"), nodes)] * 8)
+        states = iter([True, False, True, False, True, False])
+        with self.assertRaises(pages.PageMismatch):
+            pages.tap_on_page(self.rt, "邮件", "Target", verify=lambda frame: next(states))
         self.assertEqual(self.rt.clicks, [])
 
     def test_a_target_that_moved_or_a_page_that_changed_is_decided_again(self):
@@ -112,52 +125,76 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(mailbox.button_state(self.frame_with_button("enabled"))[0], "enabled")
         self.assertEqual(mailbox.button_state(self.frame_with_button("odd"))[0], "unknown")
 
-    def run_flow(self, button, screens_after_claim=("邮件",)):
+    def run_flow(self, button, after=("disabled",), guard=False):
         rt = SimpleNamespace(stopped=False, logs=[], key=Mock(return_value=True), leave_page=Mock(return_value=True),
-                             _frame_still_valid=Mock(return_value=True))
+                             _frame_still_valid=Mock(return_value=True), pause=Mock(return_value=True))
         rt.log = rt.logs.append
-        frame = self.frame_with_button(button)
-        claim_node = {mailbox.CLAIM_ALL: hit([318, 657, 124, 30], "领取全部")}
-        mail = (page("邮件"), frame, lambda node, override=None: claim_node.get(node, MISS))
-        hud = (Screen("hud", {"duck": [30, 18, 54, 54]}), frame, lambda *a: MISS)
-        disabled = (page("邮件"), self.frame_with_button("disabled"), mail[2])
-        sequence = iter([hud, mail, disabled, hud])
+        claim_node = {mailbox.CLAIM_ALL: hit([311, 650, 132, 41], "领取全部")}
+        recognize = lambda node, override=None: claim_node.get(node, MISS)  # noqa: E731
+        hud = (Screen("hud", {"duck": [30, 18, 54, 54]}), self.frame_with_button("disabled"), lambda *a: MISS)
+        mail = lambda state: (page("邮件8/300"), self.frame_with_button(state), recognize)  # noqa: E731
+        settings = (page("设置"), self.frame_with_button("disabled"), lambda *a: MISS)
+        afterwards = [{"disabled": mail("disabled"), "settings": settings}[name] for name in after]
+        sequence = iter([hud, mail(button)] + afterwards + [mail("disabled"), hud, hud])
         taps = []
+
+        def tap(rt_, title, node, **kwargs):
+            if guard and node == mailbox.MENU_MAIL:
+                raise pages.GuardRefusal("要点的地方旁边有「删除」，没有点，任务停止")
+            taps.append(node)
+            return True
         with patch.object(pages, "screen_now", side_effect=lambda rt_: next(sequence)), \
                 patch.object(pages, "wait_for", side_effect=lambda rt_, accept, seconds, step=.4: page("x")), \
-                patch.object(pages, "tap_on_page", side_effect=lambda rt_, title, node, **k: taps.append(node) or True):
+                patch.object(pages, "tap_on_page", side_effect=tap), \
+                patch("time.monotonic", side_effect=iter(range(0, 100, 3)).__next__):
             result = mailbox.run(rt)
         return result, rt, taps
 
     def test_a_disabled_button_means_nothing_to_claim(self):
-        result, rt, taps = self.run_flow("disabled")
+        result, rt, taps = self.run_flow("disabled", after=())
         self.assertTrue(result)
         self.assertEqual(taps, [mailbox.MENU_MAIL])  # the envelope only; never the claim or delete buttons
         rt.key.assert_called_once_with("menu")
         self.assertIn("邮箱没有可领取的附件。", rt.logs)
 
-    def test_an_enabled_button_is_claimed_and_checked_afterwards(self):
+    def test_an_enabled_button_is_claimed_and_checked_on_one_mail_frame(self):
         result, rt, taps = self.run_flow("enabled")
         self.assertTrue(result)
         self.assertEqual(taps, [mailbox.MENU_MAIL, mailbox.CLAIM_ALL])
         self.assertIn("邮箱附件已全部领取。", rt.logs)
 
-    def test_an_unclear_button_stops_without_a_claim(self):
-        result, rt, taps = self.run_flow("odd")
+    def test_another_page_after_claiming_is_not_success_and_sends_nothing_more(self):
+        result, rt, taps = self.run_flow("enabled", after=("settings", "settings", "settings", "settings"))
+        self.assertFalse(result)
+        self.assertNotIn("邮箱附件已全部领取。", rt.logs)
+        rt.leave_page.assert_not_called()  # no way back from an unexpected screen
+
+    def test_an_unclear_button_stops_without_a_claim_or_navigation(self):
+        result, rt, taps = self.run_flow("odd", after=())
         self.assertFalse(result)
         self.assertEqual(taps, [mailbox.MENU_MAIL])
-        self.assertTrue(any("状态认不出" in text for text in rt.logs))
+        rt.leave_page.assert_not_called()
+
+    def test_a_guard_refusal_ends_all_input(self):
+        result, rt, taps = self.run_flow("disabled", after=(), guard=True)
+        self.assertFalse(result)
+        self.assertEqual(taps, [])
+        rt.leave_page.assert_not_called()
+        self.assertTrue(any("删除" in text for text in rt.logs))
 
 
 class ResourceTests(unittest.TestCase):
     def test_nodes_and_tier(self):
+        tiers = json.loads((ROOT / "agent/host/android/tasks.json").read_text(encoding="utf-8"))
+        self.assertIn("MaaNikki_Mailbox", tiers["experimental"])
+        self.assertEqual(tiers["entries"], [])  # verified only after device runs
+        if not (ROOT / "resource_android").is_dir():  # the release source archive does not list it (plan risk 13)
+            self.assertFalse((ROOT / ".git").exists(), "resource_android/ is missing from the checkout")
+            return
         nodes = json.loads((ROOT / "resource_android/pipeline/android_mailbox.json").read_text(encoding="utf-8"))
         self.assertEqual(set(nodes), {mailbox.MENU_MAIL, mailbox.CLAIM_ALL, pages.FORBIDDEN})
         self.assertTrue(nodes[mailbox.MENU_MAIL]["green_mask"])
         self.assertIn("删除", nodes[pages.FORBIDDEN]["expected"])
-        tiers = json.loads((ROOT / "agent/host/android/tasks.json").read_text(encoding="utf-8"))
-        self.assertIn("MaaNikki_Mailbox", tiers["experimental"])
-        self.assertEqual(tiers["entries"], [])  # verified only after device runs
 
 
 if __name__ == "__main__":

@@ -265,6 +265,36 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(children[0].calls, ["wait", "terminate", "wait", "kill", "wait"])
         self.assertEqual((records[0]["status"], records[0]["agent_exit"]), ("error", "unreaped"))
 
+    def test_a_left_unconfirmed_touch_blocks_the_runner_until_cleared(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner.check_unconfirmed(root, False)  # nothing left: fine
+            marker = root / "config" / "android-input" / "touch.json"
+            marker.parent.mkdir(parents=True)
+            marker.write_text(json.dumps({"pid": 1, "since": "2026-11-25T23:00:00+09:00"}))
+            with self.assertRaises(runner.RunnerError) as caught:
+                runner.check_unconfirmed(root, False)
+            self.assertIn("--clear-unconfirmed", str(caught.exception))
+            self.assertTrue(marker.exists())
+            if runner.os.name != "nt":
+                with patch("sys.stderr"):
+                    runner.check_unconfirmed(root, True)
+                self.assertFalse(marker.exists())
+                self.assertTrue((marker.parent / "owner.lock").exists())  # the lock file is kept
+
+    def test_a_malformed_touch_line_is_flagged_not_hiding_later_rows(self):
+        import datetime as dt
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "logs" / "android-input.jsonl"
+            log.parent.mkdir()
+            log.write_text("not json\n" + json.dumps({"time": "2026-11-25T23:31:34+09:00", "action": "Click",
+                                                       "outcome": "confirmed"}) + "\n")
+            found = runner.touches(Path(tmp), dt.datetime.fromisoformat("2026-11-25T23:00:00+09:00"))
+        self.assertEqual(found[0], {"audit": "incomplete: a malformed line was skipped"})
+        self.assertEqual(found[1]["outcome"], "confirmed")
+
     def test_the_command_line(self):
         args = runner.build_parser().parse_args(["run", "MaaNikki_AndroidCheck", "--purpose", "t", "--option", "A=B"])
         self.assertEqual((args.entry, args.option, args.func), ("MaaNikki_AndroidCheck", ["A=B"], runner.run))

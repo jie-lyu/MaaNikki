@@ -17,6 +17,10 @@ class PageMismatch(actions.ScreenUnrecognised):
     """The frame is not the page the step expects (or its target is not on it)."""
 
 
+class GuardRefusal(PageMismatch):
+    """A forbidden word lies next to the point: the task stops all input (no navigation afterwards either)."""
+
+
 def screen_now(rt):
     """``(screen, frame, recognize)`` on a fresh focus-confirmed frame; frame is None when the run stopped."""
     frame = rt._fresh_device_frame()
@@ -56,19 +60,29 @@ def _target(screen, recognize, title, node, override):
 
 
 def _forbidden_near(recognize, box) -> str | None:
-    x, y, w, h = box
-    roi = [max(0, x - FORBIDDEN_MARGIN), max(0, y - FORBIDDEN_MARGIN), w + 2 * FORBIDDEN_MARGIN, h + 2 * FORBIDDEN_MARGIN]
-    roi[2] = min(roi[2], 1280 - roi[0])
-    roi[3] = min(roi[3], 720 - roi[1])
-    result = recognize(FORBIDDEN, {"roi": roi})
+    """A forbidden label whose box comes within FORBIDDEN_MARGIN of ``box``, read whole on the full frame (a region
+    cropped around the point could cut 删除 off a label that ends just inside the margin)."""
+    result = recognize(FORBIDDEN)
     if result is None:
         return "检查不了要点的地方附近有没有危险按钮"
-    return actions._text(result) if actions._hit(result) else None
+    if not getattr(result, "hit", False):
+        return None
+    rows = list(getattr(result, "filtered_results", None) or []) or [getattr(result, "best_result", None)]
+    x, y, w, h = box
+    left, top, right, bottom = x - FORBIDDEN_MARGIN, y - FORBIDDEN_MARGIN, x + w + FORBIDDEN_MARGIN, y + h + FORBIDDEN_MARGIN
+    for row in rows:
+        found = [int(v) for v in getattr(row, "box", None) or []]
+        if len(found) == 4 and found[0] < right and left < found[0] + found[2] and found[1] < bottom \
+                and top < found[1] + found[3]:
+            return str(getattr(row, "text", "") or "危险按钮")
+    return None
 
 
-def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5) -> bool:
-    """Tap ``node`` on the page titled ``title`` (decided and confirmed on fresh frames). False when the run stopped;
-    PageMismatch (nothing sent) when the page or its target is not there or the point is next to a forbidden word."""
+def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5, verify=None) -> bool:
+    """Tap ``node`` on the page titled ``title`` (decided and confirmed on fresh frames). ``verify(frame)``, when
+    given, must hold on both of them too (e.g. a button that is enabled). False when the run stopped; PageMismatch
+    (nothing sent) when the page, its target or ``verify`` fails; GuardRefusal when the point is next to a
+    forbidden word."""
     from task_control import ForegroundChanged
     for _attempt in range(rt.TOUCH_KEY_ATTEMPTS):
         screen, decided, recognize = screen_now(rt)
@@ -77,7 +91,9 @@ def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5) 
         target = _target(screen, recognize, title, node, override)
         word = _forbidden_near(recognize, target)
         if word:
-            raise PageMismatch(f"要点的地方旁边有「{word}」，没有点")
+            raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止")
+        if verify is not None and not verify(decided):
+            raise PageMismatch(f"「{title}」页面上要点的东西状态不对")
         if not rt._frame_still_valid(decided):
             continue
         fresh, confirming, recognize_b = screen_now(rt)
@@ -89,7 +105,10 @@ def tap_on_page(rt, title: str, node: str, *, override=None, delay: float = .5) 
             continue
         if fresh.title != screen.title or not actions._near(confirmed, target):
             continue
-        if _forbidden_near(recognize_b, confirmed):
+        word = _forbidden_near(recognize_b, confirmed)
+        if word:
+            raise GuardRefusal(f"要点的地方旁边有「{word}」，没有点，任务停止")
+        if verify is not None and not verify(confirming):
             continue
         if not (rt._frame_still_valid(decided) and rt._frame_still_valid(confirming)):
             continue

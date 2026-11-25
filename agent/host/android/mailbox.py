@@ -47,8 +47,37 @@ def to_hud(rt, attempts: int = 4) -> bool:
     return pages.wait_for(rt, lambda screen: screen.kind == "hud", 3) is not None
 
 
+def back_from_mail(rt, attempts: int = 3) -> bool:
+    """The way back after the task: leave only from the 邮件 and 美鸭梨 pages; any other screen stops input."""
+    for _ in range(attempts):
+        screen, frame, _ = pages.screen_now(rt)
+        if frame is None or not rt._frame_still_valid(frame):
+            return False
+        if screen.kind == "hud":
+            return True
+        if not (pages.is_page(screen, MAIL) or pages.is_page(screen, MENU)) or not rt.leave_page():
+            return False
+    return False
+
+
+class Stop(Exception):
+    """Something unexpected: report it and send nothing more (not even the way back)."""
+
+
+def mail_state(rt):
+    """``(state, frame)`` from one fresh frame that is the mail page with the claim-all label on it, else
+    ``(None, frame)``: title, label and colour always come from the same frame."""
+    screen, frame, recognize = pages.screen_now(rt)
+    if frame is None:
+        return None, None
+    if not pages.is_page(screen, MAIL) or not actions._hit(recognize(CLAIM_ALL)) or not rt._frame_still_valid(frame):
+        return None, frame
+    return button_state(frame)[0], frame
+
+
 def run(rt) -> bool:
     from navigation.models import NavigationError
+    claimed, returnable = None, True
     try:
         if not to_hud(rt):
             return fail(rt, "没能回到大世界")
@@ -61,41 +90,47 @@ def run(rt) -> bool:
         if pages.wait_for(rt, lambda screen: pages.is_page(screen, MAIL), 5) is None:
             return fail(rt, "没能打开邮件页面")
         claimed = claim(rt)
+    except (pages.GuardRefusal, Stop) as error:
+        returnable = False
+        fail(rt, str(error))
     except (actions.ScreenUnrecognised, NavigationError) as error:
         fail(rt, str(error))
-        claimed = None
     finally:
-        returned = not rt.stopped and to_hud(rt)
-    if claimed is None:
+        returned = returnable and not rt.stopped and back_from_mail(rt)
+    if not claimed:
         return False
     if not returned:
         return fail(rt, "没能回到大世界")
-    return claimed
+    return True
 
 
 def claim(rt) -> bool:
-    screen, frame, recognize = pages.screen_now(rt)
+    state, frame = mail_state(rt)
     if frame is None:
         return False
-    if not pages.is_page(screen, MAIL) or not actions._hit(recognize(CLAIM_ALL)):
+    if state is None:
         return fail(rt, "邮件页面上找不到「领取全部」")
-    state, gold, gray = button_state(frame)
     if state == "disabled":
         rt.log("邮箱没有可领取的附件。")
         return True
     if state != "enabled":
-        return fail(rt, f"「领取全部」按钮的状态认不出（金色 {gold:.2f}，灰色 {gray:.2f}）")
-    if not pages.tap_on_page(rt, MAIL, CLAIM_ALL):
+        raise Stop("「领取全部」按钮的状态认不出")
+    # Both tap frames must be the mail page with the label and an enabled button.
+    if not pages.tap_on_page(rt, MAIL, CLAIM_ALL, verify=lambda frame: button_state(frame)[0] == "enabled"):
         return False
-    # After claiming, the game shows a reward layer; it is not yet seen on the device. Wait for the mail page with a
-    # disabled button; anything else stops the task (nothing more is tapped here).
-    if pages.wait_for(rt, lambda screen: pages.is_page(screen, MAIL), 8) is None:
-        return fail(rt, "领取后没有回到邮件页面（奖励层还没有在设备上见过，没有处理）")
-    screen, frame, _ = pages.screen_now(rt)
-    if frame is None or button_state(frame)[0] != "disabled":
-        return fail(rt, "领取后没能确认附件已全部领取")
-    rt.log("邮箱附件已全部领取。")
-    return True
+    # The reward layer that follows has not been seen on the device. Success only on one valid frame that is the mail
+    # page with the label and a disabled button; anything else stops without another tap.
+    import time
+    deadline = time.monotonic() + 8
+    while not rt.stopped and time.monotonic() < deadline:
+        state, frame = mail_state(rt)
+        if frame is None:
+            return False
+        if state == "disabled":
+            rt.log("邮箱附件已全部领取。")
+            return True
+        rt.pause(.5)
+    raise Stop("领取后没有回到「领取全部」已变灰的邮件页面（奖励层还没有在设备上见过，没有处理）")
 
 
 def fail(rt, reason) -> bool:

@@ -539,6 +539,9 @@ class Runtime:
                     raise ForegroundChanged("依据的截图已经过时（之后焦点变过），已取消本次输入，等待重新核对")
                 if self._stopped_now():  # Stop may have been pressed during the focus query
                     return False
+                if not state.record_touch(action, fields, "sending"):
+                    from host import UnsupportedInput
+                    raise UnsupportedInput("无法写入安卓模拟器的输入记录，这一步暂不发送。")
                 sent = True
                 try:
                     with measure("input.action"):

@@ -201,6 +201,7 @@ def run(args) -> int:
     record = {"time": started.isoformat(timespec="seconds"), "entry": args.entry, "options": chosen,
               "purpose": args.purpose, "serial": args.serial, "log_dir": str(log_dir)}
 
+    check_unconfirmed(data_root, args.clear_unconfirmed)
     adb_alive(args.adb, args.serial)
     Tasker.set_log_dir(str(log_dir))
     agent_binary = ROOT / ".venv" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / \
@@ -284,6 +285,33 @@ def run(args) -> int:
     return 0 if record.get("status") == "succeeded" else 1
 
 
+def check_unconfirmed(data_root: Path, clear: bool) -> None:
+    """The runner is the recovery boundary for its own data root, as MaaNikki's start is for the client's: a touch
+    marker left by an earlier run (a touch that was never confirmed released) refuses the run until the operator has
+    checked the device and passes --clear-unconfirmed; clearing takes the agent's owner lock first."""
+    marker = data_root / "config" / "android-input" / "touch.json"
+    if not marker.exists():
+        return
+    try:
+        since = json.loads(marker.read_text(encoding="utf-8")).get("since")
+    except (OSError, ValueError):
+        since = None
+    if not clear:
+        raise RunnerError(f"上一次运行留下了没有确认抬起的触摸（{since or '时间不明'}，{marker}）：先看模拟器上没有按住的触点、"
+                          "游戏状态正常，再加 --clear-unconfirmed 重跑。")
+    sys.path.insert(0, str(ROOT / "agent"))
+    from host import UnsupportedInput, take_owner_lock
+    try:
+        handle = take_owner_lock(marker.parent / "owner.lock")
+    except UnsupportedInput as error:
+        raise RunnerError(f"清除触摸标记之前没能拿到 owner.lock：{error}") from None
+    try:
+        marker.unlink()
+    finally:
+        handle.close()
+    print(f"已清除上一次没有确认的触摸标记（{since or '时间不明'}）", file=sys.stderr)
+
+
 def stop_tasker(tasker) -> bool:
     """Ask a running task to stop and wait a bounded time; False when there was nothing to stop or it overran."""
     if tasker is None:
@@ -312,12 +340,16 @@ def touches(data_root: Path, since: dt.datetime) -> list[dict]:
     path = data_root / "logs" / "android-input.jsonl"
     found = []
     try:
-        for line in path.read_text(encoding="utf-8").splitlines() if path.exists() else []:
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    except OSError:
+        return [{"audit": "unreadable"}]
+    for line in lines:
+        try:
             entry = json.loads(line)
             if dt.datetime.fromisoformat(entry["time"]) >= since:
                 found.append(entry)
-    except (OSError, ValueError, KeyError):
-        pass
+        except (ValueError, KeyError, TypeError):
+            found.append({"audit": "incomplete: a malformed line was skipped"})
     return found
 
 
@@ -357,6 +389,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--purpose", required=True, help="why this run; recorded with it")
     p.add_argument("--data-root", default=str(DEFAULT_DATA), help="the agent's data root (not the client's)")
     p.add_argument("--timeout", type=float, default=600, help="seconds the task may run")
+    p.add_argument("--clear-unconfirmed", action="store_true",
+                   help="after checking the device, clear a touch marker an earlier run left unconfirmed")
     p.set_defaults(func=run)
     sub.add_parser("tasks", help="entries the Android interface offers").set_defaults(func=list_tasks)
     return parser

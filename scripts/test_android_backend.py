@@ -449,14 +449,25 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
                                       source_frame=self.frame))
         log = self.data_root / "logs" / "android-input.jsonl"
         entries = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-        self.assertEqual([(e["action"], e["outcome"]) for e in entries], [("Click", "confirmed"), ("Swipe", "confirmed")])
-        self.assertEqual(entries[0]["target"], [119, 209])  # the pixel actually tapped
-        self.assertEqual((entries[1]["begin"], entries[1]["end"], entries[1]["duration"]), ([100, 100], [300, 100], 300))
+        self.assertEqual([(e["action"], e["outcome"]) for e in entries],
+                         [("Click", "sending"), ("Click", "confirmed"), ("Swipe", "sending"), ("Swipe", "confirmed")])
+        self.assertEqual(entries[0]["target"], [119, 209])  # the pixel actually tapped, logged before it was sent
+        self.assertEqual((entries[3]["begin"], entries[3]["end"], entries[3]["duration"]), ([100, 100], [300, 100], 300))
         rt.context.run_action_direct.return_value = SimpleNamespace(success=False)
         with android_run(), patch("daily.runtime.active_session", return_value=None), \
                 self.assertRaises(host.InputUnconfirmed):
             rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
         self.assertEqual(json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["outcome"], "unconfirmed")
+
+    def test_a_touch_whose_intent_cannot_be_logged_is_not_sent(self):
+        (self.data_root / "logs").write_text("")  # a file where the log directory goes
+        rt = self.tap_runtime()
+        with android_run(), patch("daily.runtime.active_session", return_value=None), \
+                self.assertRaises(host.UnsupportedInput):
+            rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)
+        rt.context.run_action_direct.assert_not_called()
+        self.assertFalse(self.state.halted)
+        self.assertFalse(self.state.marker().exists())  # the reservation was released: nothing was sent
 
     def test_an_unconfirmed_touch_halts_the_next_agent_process_under_any_serial(self):
         rt = self.tap_runtime(success=False)
