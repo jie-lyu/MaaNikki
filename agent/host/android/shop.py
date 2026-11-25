@@ -602,15 +602,17 @@ def run(rt) -> bool:
         # The refusing frame when the refusal carries it, else a fresh one (saved here, not left to the generic
         # failure capture).
         frame = getattr(error, "frame", None)
-        return stopped(rt, str(error), [frame] if frame is not None else [frame_now(rt)] if not rt.stopped else [])
+        return stopped(rt, str(error), [frame] if frame is not None else [frame_now(rt)] if not rt.stopped else [],
+                       detail=pages.diagnostic_reason(error))
     if claimable:
         return fail(rt, f"「{'」「'.join(claimable)}」没有领取")
     return True
 
 
-def stopped(rt, reason, frames) -> bool:
+def stopped(rt, reason, frames, detail=None) -> bool:
+    """``reason`` for the user; ``detail`` (e.g. a guard refusal's OCR'd row) only in the saved failure scene."""
     for index, frame in enumerate(frame for frame in frames if frame is not None):
-        rt.diagnostic(f"android_weekly_stop_{index}", reason, image=frame)
+        rt.diagnostic(f"android_weekly_stop_{index}", detail or reason, image=frame)
     return fail(rt, reason)
 
 

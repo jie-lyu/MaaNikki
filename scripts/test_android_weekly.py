@@ -520,14 +520,15 @@ class EntryRecoveryTests(unittest.TestCase):
         self.assertIs(saved.kwargs["image"], modal[1])
 
     def test_without_single_to_hud_keeps_its_old_behaviour(self):
-        # The default (the mailbox) is unchanged: back arrows with the retrying tap, no wait for the page to go.
+        # The default (the mailbox): back arrows with the retrying tap, no wait for the page to go; the page is left
+        # by its whole observed title (exact, whitespace aside) and named without it in messages.
         rt = SimpleNamespace(stopped=False, _frame_still_valid=Mock(return_value=True))
         frames = iter([(SHOP, "a", None), (HUD, "b", None)])
         with patch.object(pages, "screen_now", side_effect=lambda rt: next(frames)), \
                 patch.object(pages, "tap_on_page", return_value=True) as tap, \
                 patch.object(pages, "left_page") as left:
             self.assertTrue(pages.to_hud(rt))
-        tap.assert_called_once_with(rt, "商城", actions.BACK_ARROW)
+        tap.assert_called_once_with(rt, "商城", actions.BACK_ARROW, retry=True, exact=True, place=pages.LEAVING)
         left.assert_not_called()
 
 

@@ -44,7 +44,11 @@ def back_from_mail(rt, attempts: int = 3) -> bool:
 
 
 class Stop(Exception):
-    """Something unexpected: report it and send nothing more (not even the way back)."""
+    """Something unexpected: report it and send nothing more (not even the way back). ``frames`` are saved."""
+
+    def __init__(self, reason, frames=()):
+        super().__init__(reason)
+        self.frames = [frame for frame in frames if frame is not None]
 
 
 def mail_state(rt):
@@ -58,6 +62,14 @@ def mail_state(rt):
     return button_state(frame)[0], frame
 
 
+def _menu(screen, _frame=None, _recognize=None) -> bool:
+    return pages.is_exactly(screen, MENU)  # not 美鸭梨挖掘
+
+
+def _mail(screen, _frame=None, _recognize=None) -> bool:
+    return pages.is_page(screen, MAIL)  # 「邮件 7/300 i」
+
+
 def run(rt) -> bool:
     from navigation.models import NavigationError
     claimed = None
@@ -69,24 +81,36 @@ def run(rt) -> bool:
             return fail(rt, "没能回到大世界")
         if not rt.key("menu"):
             return False
-        if pages.wait_for(rt, lambda screen: pages.is_page(screen, MENU), 5) is None:
-            return fail(rt, "没能打开美鸭梨菜单")
-        if not pages.tap_on_page(rt, MENU, MENU_MAIL):
+        # Each wait stops at once on a recognised screen that is neither the one being left nor the one expected.
+        if pages.wait_screen(rt, "打开美鸭梨菜单", _menu, lambda s, f, r: s.kind == "hud", 5) is None:
             return False
-        if pages.wait_for(rt, lambda screen: pages.is_page(screen, MAIL), 5) is None:
-            return fail(rt, "没能打开邮件页面")
+        if not pages.tap_on_page(rt, MENU, MENU_MAIL, exact=True):
+            return False
+        if pages.wait_screen(rt, "打开邮件页面", _mail, _menu, 5) is None:
+            return False
         claimed = claim(rt)
-    except (pages.GuardRefusal, Stop, actions.ScreenUnrecognised, NavigationError) as error:
-        if getattr(error, "frame", None) is not None:  # the frame a guard refusal was read on
-            rt.diagnostic("android_mailbox_stop", str(error), image=error.frame)
-        fail(rt, str(error))
+    except (Stop, actions.ScreenUnrecognised, NavigationError) as error:  # PageMismatch, FrameMismatch, guard too
+        stopped(rt, error)
     # The way back only after a successful result: after a stop, a guard refusal or a fatal error (raised past this
     # point, e.g. the device stopped answering) nothing more is sent.
     if not claimed:
         return False
-    if rt.stopped or not back_from_mail(rt):
-        return fail(rt, "没能回到大世界")
+    try:
+        if rt.stopped or not back_from_mail(rt):
+            return fail(rt, "没能回到大世界")
+    except (actions.ScreenUnrecognised, NavigationError) as error:
+        return stopped(rt, error, None if isinstance(error, pages.GuardRefusal) else "没能回到大世界")
     return True
+
+
+def stopped(rt, error, reason=None) -> bool:
+    """Report one of this task's stops with its frames saved (a Stop's frames, else the refusing frame an error
+    carries). The user message is ``reason`` or the error's own fixed text; a guard refusal's OCR'd row goes to the
+    diagnostic only."""
+    frames = error.frames if isinstance(error, Stop) else [getattr(error, "frame", None)]
+    for index, frame in enumerate(frame for frame in frames if frame is not None):
+        rt.diagnostic(f"android_mailbox_stop_{index}", pages.diagnostic_reason(error), image=frame)
+    return fail(rt, reason or str(error))
 
 
 def claim(rt) -> bool:
@@ -94,28 +118,29 @@ def claim(rt) -> bool:
     if frame is None:
         return False
     if state is None:
-        return fail(rt, "邮件页面上找不到「领取全部」")
+        raise Stop("邮件页面上找不到「领取全部」", [frame])
     if state == "disabled":
         rt.log("邮箱没有可领取的附件。")
         return True
     if state != "enabled":
-        raise Stop("「领取全部」按钮的状态认不出")
+        raise Stop("「领取全部」按钮的状态认不出", [frame])
     # Both tap frames must be the mail page with the label and an enabled button.
     if not pages.tap_on_page(rt, MAIL, CLAIM_ALL, verify=lambda frame: button_state(frame)[0] == "enabled"):
         return False
+
     # The reward layer that follows has not been seen on the device. Success only on one valid frame that is the mail
-    # page with the label and a disabled button; anything else stops without another tap.
-    import time
-    deadline = time.monotonic() + 8
-    while not rt.stopped and time.monotonic() < deadline:
-        state, frame = mail_state(rt)
-        if frame is None:
+    # page with the label and a disabled button; mail frames are waited through, anything else recognised stops at
+    # once with its frame, without another tap.
+    def done(screen, frame, recognize):
+        return _mail(screen) and actions._hit(recognize(CLAIM_ALL)) and button_state(frame)[0] == "disabled"
+    try:
+        if pages.wait_screen(rt, "领取邮件附件", done, _mail, 8) is None:
             return False
-        if state == "disabled":
-            rt.log("邮箱附件已全部领取。")
-            return True
-        rt.pause(.5)
-    raise Stop("领取后没有回到「领取全部」已变灰的邮件页面（奖励层还没有在设备上见过，没有处理）")
+    except pages.FrameMismatch as error:
+        raise Stop("领取后没有回到「领取全部」已变灰的邮件页面（奖励层还没有在设备上见过，没有处理）",
+                   [error.frame]) from None
+    rt.log("邮箱附件已全部领取。")
+    return True
 
 
 def fail(rt, reason) -> bool:

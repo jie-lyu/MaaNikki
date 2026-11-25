@@ -25,6 +25,7 @@ whole settings page, and every screen it would close here has a tappable close o
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 QUIT_TITLE = "MaaNikki_Android_QuitDialog"
@@ -221,11 +222,17 @@ def plan_tap(action: str, screen: Screen, recognize) -> Plan:
     return Plan(target, "label", True, label, window_x)
 
 
+def same_title(first: str, second: str) -> bool:
+    """Two OCR'd page titles of the same page: equal but for whitespace (one live mail page read 「邮件 7/300 i」,
+    「邮件7/300 i」 and 「邮件7/300i」 on consecutive frames)."""
+    return re.sub(r"\s", "", first or "") == re.sub(r"\s", "", second or "")
+
+
 def confirm_tap(plan: Plan, screen: Screen, recognize):
     """The target of ``plan`` (decided on ``screen``) as seen again on a fresh frame, or None when that frame does
     not show the same screen with the same thing in the same place. ``recognize`` runs on the fresh frame."""
     fresh = read_screen(recognize)
-    if fresh.kind != screen.kind or fresh.title != screen.title:  # e.g. 设置 and 地图 have the arrow in one place
+    if fresh.kind != screen.kind or not same_title(fresh.title, screen.title):  # e.g. 设置 and 地图: one arrow place
         return None
     if plan.key == "minimap":
         return plan.target

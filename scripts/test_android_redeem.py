@@ -367,11 +367,13 @@ class FlowTests(unittest.TestCase):
                 self.assertNotIn("use", game.touches)
                 self.assertEqual(game.touches[-1], "field")  # nothing after the input, not even the way back
                 self.assertEqual(len(stops(rt)), 1)
-                self.assertIn(f"输入框读回「{typed}」，不是兑换码「ABC123」，没有提交", stops(rt)[0].args[1])
+                # What the field read is in the saved scene only, never in the user message.
+                self.assertIn(f"输入框读回的不是兑换码「ABC123」，没有提交（读到「{typed}」）", stops(rt)[0].args[1])
+                self.assertFalse(any(typed in line for line in rt.logs), rt.logs)
                 self.assertEqual(rt.record, {})
 
     def test_an_unknown_result_or_a_reward_layer_stops_with_that_frame_and_records_nothing(self):
-        for results, words in ((["nothing"], "没有看到认得的提示条"), (["other"], "提示条认不出：「请输入兑换码」"),
+        for results, words in ((["nothing"], "没有看到认得的提示条"), (["other"], "提示条认不出（读到「请输入兑换码」）"),
                                (["popup"], "认不出的画面")):
             with self.subTest(results=results):
                 game = Game(results)
@@ -397,8 +399,10 @@ class FlowTests(unittest.TestCase):
         self.assertFalse(outcome)
         self.assertNotIn("row", game.touches)
         self.assertEqual(game.touches[-1], ("swipe", (700, 520), (700, 300)))
-        self.assertTrue(any("退出登录" in line for line in rt.logs), rt.logs)
-        self.assertEqual(len(stops(rt)), 1)  # the refusing frame is saved
+        self.assertFalse(any("退出登录" in line for line in rt.logs), rt.logs)  # a fixed refusal for the user
+        self.assertTrue(any("危险按钮" in line for line in rt.logs), rt.logs)
+        self.assertEqual(len(stops(rt)), 1)  # the refusing frame is saved, with the row that refused
+        self.assertIn("退出登录", stops(rt)[0].args[1])
         self.assertIsNotNone(stops(rt)[0].kwargs["image"])
 
     def test_a_row_that_settles_before_the_swipe_is_tapped_without_a_swipe(self):

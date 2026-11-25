@@ -303,13 +303,20 @@ def run(rt) -> bool:
         rt.diagnostic("android_monthly_stop_0", str(error), image=error.frame)
         fail(rt, str(error))
     except (pages.GuardRefusal, actions.ScreenUnrecognised, NavigationError) as error:
+        if getattr(error, "frame", None) is not None:  # the refusing frame (a guard refusal's row only saved here)
+            rt.diagnostic("android_monthly_stop_0", pages.diagnostic_reason(error), image=error.frame)
         fail(rt, str(error))
     # The way back only after a successful result: after a stop, a guard refusal or a fatal error (raised past this
     # point, e.g. the device stopped answering) nothing more is sent.
     if not claimed:
         return False
-    if rt.stopped or not pages.back_through(rt, (TITLE,)):
-        return fail(rt, "没能回到大世界")
+    try:
+        if rt.stopped or not pages.back_through(rt, (TITLE,)):
+            return fail(rt, "没能回到大世界")
+    except (actions.ScreenUnrecognised, NavigationError) as error:  # a back-arrow frame that refused, or a guard
+        if getattr(error, "frame", None) is not None:
+            rt.diagnostic("android_monthly_stop_0", pages.diagnostic_reason(error), image=error.frame)
+        return fail(rt, str(error) if isinstance(error, pages.GuardRefusal) else "没能回到大世界")
     return True
 
 

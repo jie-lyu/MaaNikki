@@ -277,18 +277,18 @@ def banner_fading(screen, frame, recognize) -> bool:
 
 
 def foreign(screen, recognize):
-    """What else a result frame shows that is not the 兑换奖励 modal under its banner, or None: a close mark away from
-    the modal's ✕ (another popup), or prices (a paid popup)."""
+    """What else a result frame shows that is not the 兑换奖励 modal under its banner, as ``(what, text read or
+    None)``, or None: a close mark away from the modal's ✕ (another popup), or prices (a paid popup)."""
     close = recognize(actions.MODAL_CLOSE)
     if close is None:
-        return "弹窗的检查没能完成"
+        return "弹窗的检查没能完成", None
     if actions._hit(close) and not actions._near(actions._box(close), list(MODAL_CLOSE_BOX)):
-        return "画面上还有别的弹窗的关闭标记"
+        return "画面上还有别的弹窗的关闭标记", None
     prices = recognize(pages.FORBIDDEN, {"expected": PRICES})
     if prices is None:
-        return "价格的检查没能完成"
+        return "价格的检查没能完成", None
     if actions._hit(prices):
-        return f"画面上有价格或购买的字样（{_rows(prices)[0][0]}）"
+        return "画面上有价格或购买的字样", _rows(prices)[0][0]
     return None
 
 
@@ -316,11 +316,13 @@ def is_reward_layer(screen, recognize) -> bool:
 # ---- waiting and stopping ----
 
 class Stop(Exception):
-    """Something unexpected: report it and send nothing more (not even the way back). ``frames`` are saved."""
+    """Something unexpected: report it and send nothing more (not even the way back). ``frames`` are saved. The
+    message reaches the user and never quotes OCR'd text; ``detail`` (what was read) goes to the saved scene only."""
 
-    def __init__(self, reason, frames=()):
+    def __init__(self, reason, frames=(), detail=None):
         super().__init__(reason)
         self.frames = [frame for frame in frames if frame is not None]
+        self.detail = f"{reason}（读到「{detail}」）" if detail is not None else reason
 
 
 def wait_until(rt, what, done, source=lambda screen, frame, recognize: False, seconds=OPEN_WAIT):
@@ -387,8 +389,9 @@ def tap_duck(rt) -> bool:
 
 
 def _left(title):
-    """``done`` after a back-arrow tap on the page titled exactly ``title``: the HUD or a page with another title."""
-    return lambda s, f, r: s.kind == "hud" or (s.kind == "page" and s.title != title)
+    """``done`` after a back-arrow tap on the page titled exactly ``title``: the HUD or a page with another title
+    (whitespace aside: OCR spacing alone is the same page)."""
+    return lambda s, f, r: s.kind == "hud" or (s.kind == "page" and not pages.same_title(s.title, title))
 
 
 def to_hud(rt, what, *, any_page=False, attempts=6) -> bool:
@@ -422,19 +425,19 @@ def to_hud(rt, what, *, any_page=False, attempts=6) -> bool:
             found = wait_until(rt, f"{what}：关闭兑换奖励弹窗", _other, lambda s, f, r: is_modal(s))
         elif pages.is_page(screen, SETTINGS):
             if screen.title != SETTINGS:  # e.g. 「设置 控制」: which tab this is cannot be told from the title
-                raise Stop(f"{what}时设置页面的标题读成了「{screen.title}」，认不准是哪个页签", [frame])
+                raise Stop(f"{what}时设置页面的标题认不准是哪个页签", [frame], screen.title)
             if not other_view(screen, recognize):
                 raise Stop(f"{what}时设置页面不在「其他」页签", [frame])
             if not pages.tap_on_page(rt, SETTINGS, actions.BACK_ARROW, retry=False, exact=True,
                                      accept=lambda f, r: actions._hit(r(ROW_LABEL))):
                 return False
             found = wait_until(rt, f"{what}：离开设置", _left(SETTINGS), _other)
-        elif screen.kind == "page" and (screen.title == MENU or any_page):
+        elif screen.kind == "page" and (pages.is_exactly(screen, MENU) or any_page):
+            # Left by its whole observed title (whitespace aside), named in messages without it.
             title = screen.title
-            if not pages.tap_on_page(rt, title, actions.BACK_ARROW, retry=False, exact=True):
+            if not pages.tap_on_page(rt, title, actions.BACK_ARROW, retry=False, exact=True, place=pages.LEAVING):
                 return False
-            found = wait_until(rt, f"{what}：离开「{title}」", _left(title),
-                               lambda s, f, r: s.kind == "page" and s.title == title)
+            found = wait_until(rt, f"{what}：离开当前页面", _left(title), lambda s, f, r: pages.is_exactly(s, title))
         else:
             raise Stop(f"{what}时画面不是能安全退回的页面（{screen.reason or screen.kind}）", [frame])
         if found is None:
@@ -445,13 +448,13 @@ def to_hud(rt, what, *, any_page=False, attempts=6) -> bool:
 def open_settings(rt) -> bool:
     if not tap_duck(rt):
         return False
-    if wait_until(rt, "打开美鸭梨菜单", lambda s, f, r: s.kind == "page" and s.title == MENU,
+    if wait_until(rt, "打开美鸭梨菜单", lambda s, f, r: pages.is_exactly(s, MENU),
                   lambda s, f, r: s.kind == "hud") is None:
         return False
     if not pages.tap_on_page(rt, MENU, MENU_SETTINGS, retry=False, exact=True):
         return False
     found = wait_until(rt, "打开设置", lambda s, f, r: pages.is_page(s, SETTINGS),
-                      lambda s, f, r: s.kind == "page" and s.title == MENU)
+                      lambda s, f, r: pages.is_exactly(s, MENU))
     return found is not None and open_other(rt, found)
 
 
@@ -461,7 +464,7 @@ def open_other(rt, found) -> bool:
     that is not exactly 「设置」, stops on its first frame."""
     _value, screen, frame, recognize = found
     if not settings_page(screen):
-        raise Stop(f"设置页面的标题读成了「{screen.title}」，认不准是哪个页签", [frame])
+        raise Stop("设置页面的标题认不准是哪个页签", [frame], screen.title)
     if other_view(screen, recognize):
         return True
     if not image_view(screen, recognize):
@@ -543,7 +546,7 @@ def fill(rt, code) -> bool:
         field = _modal_field()(screen, frame, recognize)
         if field is not None and field[0] == "filled":
             if field[1] != code:
-                raise Stop(f"输入框读回「{field[1]}」，不是兑换码「{code}」，没有提交", [frame])
+                raise Stop(f"输入框读回的不是兑换码「{code}」，没有提交", [frame], field[1])
             return True
         return None
     if wait_until(rt, "输入兑换码", typed, _modal_field("empty"), seconds=FIELD_WAIT) is None:
@@ -575,13 +578,13 @@ def submit(rt, code):
             if text is not None:
                 other = foreign(screen, recognize)
                 if other is not None:
-                    raise Stop(f"提交兑换码「{code}」之后的提示条旁边{other}，没有记录", [frame])
+                    raise Stop(f"提交兑换码「{code}」之后的提示条旁边{other[0]}，没有记录", [frame], other[1])
                 field = read_field(frame, recognize)
                 if field != ("filled", code):
-                    raise Stop(f"提示条出现时输入框读到的是「{field[1]}」，不是刚提交的「{code}」，没有记录", [frame])
+                    raise Stop(f"提示条出现时输入框里不是刚提交的「{code}」，没有记录", [frame], field[1])
                 kind = classify(text)
                 if kind is None:
-                    raise Stop(f"提交兑换码「{code}」之后的提示条认不出：「{text}」", [frame])
+                    raise Stop(f"提交兑换码「{code}」之后的提示条认不出", [frame], text)
                 return kind, text, frame
             if not (is_modal(screen) or banner_fading(screen, frame, recognize)
                     or pages.nothing_recognised(screen, recognize)):
@@ -629,7 +632,7 @@ def confirm_success(rt, code) -> bool:
     if found is None:
         return False
     if found[0] != ("filled", code):
-        raise Stop(f"关掉奖励层后输入框读到的是「{found[0][1]}」，不是刚提交的「{code}」，没有记录", [found[2]])
+        raise Stop(f"关掉奖励层后输入框里不是刚提交的「{code}」，没有记录", [found[2]], found[0][1])
     return True
 
 
@@ -677,7 +680,7 @@ def guarded(rt, step) -> bool:
         return bool(step())
     except Stop as error:
         for index, frame in enumerate(error.frames):
-            rt.diagnostic(f"android_redeem_stop_{index}", str(error), image=frame)
+            rt.diagnostic(f"android_redeem_stop_{index}", error.detail, image=frame)
         fail(rt, str(error))
     except pages.FrameMismatch as error:  # a tap, swipe or text frame that was not the expected state: no retry
         rt.diagnostic("android_redeem_stop_0", str(error), image=error.frame)
@@ -685,7 +688,7 @@ def guarded(rt, step) -> bool:
     except (pages.GuardRefusal, actions.ScreenUnrecognised, NavigationError) as error:
         frame = getattr(error, "frame", None)  # the refusing frame, when the refusal carries it
         if frame is not None:
-            rt.diagnostic("android_redeem_stop_0", str(error), image=frame)
+            rt.diagnostic("android_redeem_stop_0", pages.diagnostic_reason(error), image=frame)
         fail(rt, str(error))
     except (OSError, ValueError) as error:  # the record could not be written
         fail(rt, f"写不了安卓兑换码记录（{error}）")

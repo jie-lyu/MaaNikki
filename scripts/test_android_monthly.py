@@ -382,7 +382,10 @@ class FlowTests(unittest.TestCase):
         result, rt = self.run_game(game)
         self.assertFalse(result)
         self.assertEqual(game.taps, [monthly.TASK])
-        self.assertTrue(any("购买" in text for text in rt.logs))
+        # The user reads a fixed refusal; the OCR'd row is in the saved scene only (review d2-mailstart-r1, 6).
+        self.assertFalse(any("购买" in text for text in rt.logs), rt.logs)
+        self.assertTrue(any("危险按钮" in text for text in rt.logs), rt.logs)
+        self.assertTrue(any("购买" in call.args[1] for call in rt.diagnostic.call_args_list))
 
     def test_a_modal_at_the_start_sends_nothing(self):
         game = Game(script=[other(Screen("modal", {"close": [929, 177, 36, 36]}, title="兑换奖励"))] * 10)
