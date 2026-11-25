@@ -1,5 +1,5 @@
 {
-  "comment": "Android emulator controller and its read-only check task, applied on top of interface.json by scripts/android_interface.py for the Android development home (scripts/android_dev_home.py). No package uses it yet (phase F); the Windows package copies interface.json unchanged. Input is Maatouch only and capture RawByNetcat only (docs/android-support-plan.md decision 5); the client applies these instead of the device discovery's masks (phase B5b).",
+  "comment": "Android emulator controller and its read-only check task, applied on top of interface.json by scripts/android_interface.py for the Android development home (scripts/android_dev_home.py). No package uses it yet (phase F); the Windows package copies interface.json unchanged. Input is Maatouch only and capture RawWithGzip only (docs/android-support-plan.md decision 5); the client applies these instead of the device discovery's masks (phase B5b).",
   "controller": [
     {
       "name": "nikki_android",
@@ -10,7 +10,7 @@
       "attach_resource_path": ["./resource_android"],
       "adb": {
         "input": "Maatouch",
-        "screencap": "RawByNetcat"
+        "screencap": "RawWithGzip"
       }
     }
   ],

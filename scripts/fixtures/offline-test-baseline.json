@@ -146,7 +146,7 @@
     "RunnerTests.test_the_agent_gets_the_controller_and_its_own_data_root",
     "RunnerTests.test_the_command_line",
     "RunnerTests.test_the_log_summary_quotes_the_method_lines",
-    "RunnerTests.test_the_overlay_masks_are_maatouch_and_raw_by_netcat"
+    "RunnerTests.test_the_overlay_masks_are_maatouch_and_raw_with_gzip"
    ],
    "known_failures": [],
    "skips": []

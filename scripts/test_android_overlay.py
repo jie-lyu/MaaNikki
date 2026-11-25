@@ -38,7 +38,7 @@ class InterfaceTests(unittest.TestCase):
         android = controllers["nikki_android"]
         self.assertEqual((android["type"], android["display_short_side"]), ("Adb", 720))
         self.assertEqual(android["attach_resource_path"], ["./resource_android"])
-        self.assertEqual(android["adb"], {"input": "Maatouch", "screencap": "RawByNetcat"})
+        self.assertEqual(android["adb"], {"input": "Maatouch", "screencap": "RawWithGzip"})
         self.assertNotIn("nikki_macos", controllers)  # the stock runtime cannot drive the native Mac game
         agents = result["agent"] if isinstance(result["agent"], list) else [result["agent"]]
         self.assertTrue(all(agent["child_exec"] == "./python/bin/python3" for agent in agents))

@@ -24,8 +24,8 @@ class RunnerTests(unittest.TestCase):
     def setUp(self):
         self.interface = runner.android_interface()
 
-    def test_the_overlay_masks_are_maatouch_and_raw_by_netcat(self):
-        self.assertEqual(runner.masks(runner.controller_definition(self.interface)), (4, 8))
+    def test_the_overlay_masks_are_maatouch_and_raw_with_gzip(self):
+        self.assertEqual(runner.masks(runner.controller_definition(self.interface)), (4, 4))
         for bad in ({"input": "Minitouch", "screencap": "RawByNetcat"}, {"input": "Maatouch"}, {}):
             with self.subTest(adb=bad), self.assertRaises(runner.RunnerError):
                 runner.masks({"adb": bad})

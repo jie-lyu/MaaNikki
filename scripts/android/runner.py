@@ -6,7 +6,7 @@
 
 What it does, the way the client will (docs/android-support-plan.md, B6):
 - connects with the nikki_android controller of build/android/interface-overlay.json (input Maatouch and capture
-  RawByNetcat only, frames scaled to 720p, MaaAgentBinary for the Maatouch helper), refusing a frame that is not
+  RawWithGzip only, frames scaled to 720p, MaaAgentBinary for the Maatouch helper), refusing a frame that is not
   16:9 landscape;
 - loads resource/ and resource_android/ before the first recognition;
 - starts the agent (agent/main.py) as the client does, with PI_CONTROLLER set to that controller and its own data
