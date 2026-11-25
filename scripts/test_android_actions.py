@@ -234,6 +234,23 @@ class PlanTests(unittest.TestCase):
         self.assertIsNone(actions.confirm_tap(back, actions.read_screen(page), Scripted(modal=True, arrow=True)))
         self.assertIsNone(actions.confirm_tap(back, actions.read_screen(page), Scripted(arrow=True, title="地图")))
 
+    def test_an_unchanged_strip_confirms_even_when_ocr_reads_by_window_position(self):
+        class Skewed(Scripted):
+            def __call__(inner, node, override=None):  # the reading leans towards the window's centre, like OCR
+                result = Scripted.__call__(inner, node, override)
+                if node == actions.HUD_LABEL and result.hit and override and "roi" in override:
+                    x, _y, w, _h = override["roi"]
+                    if w == 18 * len(override["expected"]) + 24:
+                        shift = round(((x + w / 2) - (result.box[0] + result.box[2] / 2)) * 0.9)
+                        return hit([result.box[0] + shift, *result.box[1:]], result.best_result.text)
+                return result
+        decided = Skewed(duck=True)
+        screen = actions.read_screen(decided)
+        for action in ("shop", "monthly", "calendar", "dress"):
+            with self.subTest(action=action):
+                plan = actions.plan_tap(action, screen, decided)
+                self.assertEqual(actions.confirm_tap(plan, screen, Skewed(duck=True)), plan.target)
+
     def test_boxes_are_compared_where_they_would_be_tapped(self):
         quit = Scripted(quit=True, cancel=True, duck=True)
         screen = actions.read_screen(quit)

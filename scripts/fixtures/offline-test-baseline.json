@@ -12,6 +12,7 @@
    "tests": [
     "FrameworkTests.test_the_nodes_load_run_and_tell_the_hud_from_a_page",
     "PlanTests.test_a_shortcut_that_cannot_be_placed_is_refused",
+    "PlanTests.test_an_unchanged_strip_confirms_even_when_ocr_reads_by_window_position",
     "PlanTests.test_an_unknown_screen_gets_no_tap",
     "PlanTests.test_boxes_are_compared_where_they_would_be_tapped",
     "PlanTests.test_hud_actions_are_refused_off_the_hud",

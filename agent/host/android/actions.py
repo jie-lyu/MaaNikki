@@ -80,6 +80,7 @@ class Plan:
     key: str
     completes: bool
     label: str = ""
+    window_x: int = 0  # for a shortcut: the centre of the OCR window its target was read in
 
 
 def _hit(result) -> bool:
@@ -151,8 +152,9 @@ def _label_window(recognize, label, x):
 
 
 def locate_shortcut(recognize, label: str):
-    """The tap target of the HUD shortcut whose label is ``label``, or None when the label row does not show it
-    consistently. Only meaningful on a frame already recognised as the HUD."""
+    """``(target, window_x)`` for the HUD shortcut whose label is ``label`` (the tap target and the centre of the
+    window it was read in), or None when the label row does not show it consistently. Only meaningful on a frame
+    already recognised as the HUD."""
     x0, y, width, height = LABEL_ROW
     centres, tops = [], []
     for x in range(x0, x0 + width - LABEL_WINDOW + 1, LABEL_STEP):
@@ -175,10 +177,11 @@ def locate_shortcut(recognize, label: str):
     # The target is read again in a window about one label wide centred on the scan's estimate: it must read this
     # label there, so a point that drifted towards a neighbour (共鸣 sits next to 商城 and 奇迹之旅) is refused
     # instead of tapped, and the confirmation on the fresh frame measures the same way.
-    target = _label_window(recognize, label, round(median))
+    window_x = round(median)
+    target = _label_window(recognize, label, window_x)
     if target is None or abs(target[0] - median) > LABEL_AGREEMENT:
         return None
-    return target
+    return target, window_x
 
 
 def _near(found, target) -> bool:
@@ -211,10 +214,11 @@ def plan_tap(action: str, screen: Screen, recognize) -> Plan:
     if action == "map":
         return Plan(list(MINIMAP), "minimap", True)
     label = HUD_SHORTCUTS[action]
-    target = locate_shortcut(recognize, label)
-    if target is None:
+    found = locate_shortcut(recognize, label)
+    if found is None:
         raise ScreenUnrecognised(f"大世界的快捷栏上找不到「{label}」")
-    return Plan(target, "label", True, label)
+    target, window_x = found
+    return Plan(target, "label", True, label, window_x)
 
 
 def confirm_tap(plan: Plan, screen: Screen, recognize):
@@ -226,7 +230,9 @@ def confirm_tap(plan: Plan, screen: Screen, recognize):
     if plan.key == "minimap":
         return plan.target
     if plan.key == "label":
-        found = _label_window(recognize, plan.label, plan.target[0])  # both coordinates read again
+        # Read again in the same window as when deciding, so an unchanged strip reads the same; both coordinates
+        # are then compared.
+        found = _label_window(recognize, plan.label, plan.window_x)
         return found if _near(found, plan.target) else None
     box = fresh.targets.get(plan.key)
     return box if _near(box, plan.target) else None
