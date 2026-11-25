@@ -483,6 +483,25 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
                 log = (self.data_root / "logs" / "android-input.jsonl").read_text(encoding="utf-8").splitlines()
                 self.assertEqual(json.loads(log[-1])["outcome"], "cancelled")
 
+    def test_each_reservation_is_unique_and_written_whole(self):
+        markers = []
+        rt = self.tap_runtime()
+        rt.context.run_action_direct.side_effect = lambda *a: (markers.append(self.state.marker().read_bytes()),
+                                                               SimpleNamespace(success=True))[1]
+        real_write = os.write
+        # A device that writes one byte at a time: the loop still puts the whole payload down.
+        with patch("host.os.write", side_effect=lambda fd, data: real_write(fd, data[:1])), android_run(), \
+                patch("daily.runtime.active_session", return_value=None):
+            self.assertTrue(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
+            self.assertTrue(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
+        first, second = (json.loads(raw) for raw in markers)
+        self.assertNotEqual(first["nonce"], second["nonce"])  # never byte-identical
+        with patch("host.os.write", return_value=0), android_run(), \
+                patch("daily.runtime.active_session", return_value=None), self.assertRaises(host.UnsupportedInput):
+            rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame)  # a write that makes no progress
+        self.assertEqual(rt.context.run_action_direct.call_count, 2)
+        self.assertFalse(self.state.marker().exists())
+
     def test_a_touch_whose_intent_cannot_be_logged_is_not_sent(self):
         (self.data_root / "logs").write_text("")  # a file where the log directory goes
         rt = self.tap_runtime()

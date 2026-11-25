@@ -165,8 +165,17 @@ class DeviceInputState:
                 raise UnsupportedInput("无法记录安卓模拟器上的触摸（数据目录不可写），这一步暂不发送。") from None
             try:
                 import datetime as _dt
-                os.write(fd, json.dumps({"pid": os.getpid(),
-                                         "since": _dt.datetime.now().astimezone().isoformat()}).encode())
+                import uuid as _uuid
+                # A nonce per reservation: no two markers are byte-identical, so a fingerprint taken from one can
+                # never clear another. The whole payload must be on disk before the touch is sent.
+                payload = json.dumps({"pid": os.getpid(), "since": _dt.datetime.now().astimezone().isoformat(),
+                                      "nonce": _uuid.uuid4().hex}).encode()
+                written = 0
+                while written < len(payload):
+                    count = os.write(fd, payload[written:])
+                    if count <= 0:
+                        raise OSError("short write")
+                    written += count
                 os.fsync(fd)
                 os.close(fd)
             except OSError:

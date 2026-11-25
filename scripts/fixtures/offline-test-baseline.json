@@ -79,6 +79,7 @@
     "NoKeyboardOrMouseTests.test_an_unconfirmed_tap_halts_every_runtime_and_the_queue",
     "NoKeyboardOrMouseTests.test_an_unconfirmed_touch_halts_the_next_agent_process_under_any_serial",
     "NoKeyboardOrMouseTests.test_child_tasks_do_not_run",
+    "NoKeyboardOrMouseTests.test_each_reservation_is_unique_and_written_whole",
     "NoKeyboardOrMouseTests.test_each_touch_is_on_disk_before_it_is_sent_and_cleared_once_confirmed",
     "NoKeyboardOrMouseTests.test_edge_rectangles_tap_a_pixel_inside_them",
     "NoKeyboardOrMouseTests.test_every_key_is_refused",
