@@ -316,6 +316,69 @@ class ProbeTests(unittest.TestCase):
         self.assertFalse(sample["tap_ok"])
         self.assertNotIn(("key", 4), controller.events)
 
+    def _sample_with_states(self, states, *, opened=True, fail=()):
+        device, controller = self.device(fail=set(fail))
+        frames = iter([np.zeros((720, 1280, 3), np.uint8), np.full((720, 1280, 3), 3, np.uint8)])
+        device.capture = lambda: next(frames)
+        recognizer = mock.Mock()
+        recognizer.run.return_value = {"hit": opened}
+        windows = iter(["before", "after"])
+        with mock.patch.object(probe, "hud_state", side_effect=list(states)), \
+                mock.patch.object(probe, "mac_window_state", side_effect=lambda: next(windows)), \
+                mock.patch.object(probe.time, "sleep"):
+            return probe.background_sample(device, recognizer), controller
+
+    HUD = {"hud": True, "quit_dialog": False, "calendar_icon": [940, 47]}
+    QUIT = {"hud": False, "quit_dialog": True, "quit_cancel": [495, 481]}
+
+    def test_quit_guard_fails_closed(self):
+        class Recognizer:
+            def __init__(self, title, cancel):
+                self.title, self.cancel = title, cancel
+
+            def run_many(self, names, adhoc=None):
+                out = []
+                for n in names:
+                    if n == "AndroidProbe_HudLabels":
+                        out.append({"hit": True, "box": [1204, 63, 37, 23], "detail": {}})
+                    elif n == "AndroidProbe_QuitDialog":
+                        out.append(self.title)
+                    elif n == "AndroidProbe_QuitCancel":
+                        out.append(self.cancel)
+                    else:
+                        out.append({"hit": True, "box": [905, 65, 70, 18], "detail": {"text": "奇想日历"}})
+                return out
+        miss = {"hit": False, "box": None, "detail": {}}
+        error = {"hit": False, "box": None, "detail": {"error": "recognition did not start"}}
+        cancel = {"hit": True, "box": [466, 468, 60, 30], "detail": {}}
+        self.assertFalse(probe.hud_state(Recognizer(error, miss))["hud"])
+        self.assertFalse(probe.hud_state(Recognizer(miss, cancel))["hud"])  # 取消 visible, title not read
+        self.assertTrue(probe.hud_state(Recognizer(miss, miss))["hud"])
+        sample, controller = self._sample_with_states([{"hud": False, "quit_dialog": False, "guard_error": "x"}])
+        self.assertTrue(sample["stop"])
+        self.assertEqual(controller.events, [])
+
+    def test_failed_back_sends_nothing_more(self):
+        sample, controller = self._sample_with_states([self.HUD, self.QUIT], fail={"key"})
+        self.assertFalse(sample["back_ok"])
+        self.assertEqual([e[0] for e in controller.events], ["click", "key"])
+        self.assertEqual(sample["window_after"], "after")
+
+    def test_quit_dismissal_is_confirmed_on_a_fresh_frame(self):
+        sample, controller = self._sample_with_states([self.QUIT, self.QUIT])
+        self.assertTrue(sample["quit_cancelled"])
+        self.assertFalse(sample["quit_dismissed"])
+        self.assertTrue(sample["stop"])
+        sample, _ = self._sample_with_states([self.QUIT, self.HUD])
+        self.assertTrue(sample["quit_dismissed"])
+        self.assertNotIn("stop", sample)
+        self.assertEqual(sample["window_after"], "after")
+
+    def test_window_is_recorded_again_after_a_tap_that_did_not_open_the_calendar(self):
+        sample, controller = self._sample_with_states([self.HUD], opened=False)
+        self.assertEqual(controller.events, [("click", 940, 47, 0)])
+        self.assertEqual((sample["window"], sample["window_after"]), ("before", "after"))
+
     def test_bgcheck_fails_when_a_release_cannot_be_confirmed(self):
         device, controller = self.device(fail={"up"})
 

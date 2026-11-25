@@ -764,7 +764,13 @@ def hud_state(recognizer) -> dict:
     checks = {**HUD_CHECK, **CALENDAR_LABEL_WINDOWS}
     results = recognizer.run_many(list(checks), adhoc=checks)  # one capture for all of them
     labels, quit_dialog, cancel = results[:3]
-    state = {"hud": bool(labels["hit"] and not quit_dialog["hit"]), "quit_dialog": bool(quit_dialog["hit"])}
+    # The guard fails closed: a quit title that could not be recognised (an error) or a visible 取消 also rules the
+    # HUD out, even if the HUD labels are readable behind it.
+    guard_error = _find_error(quit_dialog.get("detail")) or _find_error(cancel.get("detail"))
+    state = {"hud": bool(labels["hit"] and not quit_dialog["hit"] and not cancel["hit"] and not guard_error),
+             "quit_dialog": bool(quit_dialog["hit"])}
+    if guard_error:
+        state["guard_error"] = guard_error
     centres, tops = [], []
     for result in results[3:]:
         text = str((result.get("detail") or {}).get("text") or "")
@@ -884,8 +890,9 @@ def frame_change(a, b) -> float:
 def background_sample(device: Device, recognizer) -> dict:
     """One measurement: window state, frame freshness, and (from the HUD only) a harmless input with an unambiguous
     result: open 奇想日历 by its shortcut, and close it with BACK only once the calendar page is recognised. The quit
-    dialog is a guard: wherever it is seen, its 取消 is tapped and nothing else is sent. Stops sending at the first
-    input that fails."""
+    dialog is a guard: wherever it is seen, its 取消 is tapped, its dismissal is checked on a fresh frame, and nothing
+    else is sent. Stops sending at the first input that fails. Whenever input was attempted, the window state is
+    recorded again afterwards."""
     sample = {"time": dt.datetime.now().astimezone().isoformat(timespec="seconds"), "window": mac_window_state()}
     first = device.capture()
     time.sleep(1)
@@ -895,34 +902,62 @@ def background_sample(device: Device, recognizer) -> dict:
     # A stale frame repeats pixel for pixel; a live scene with motion (water, foliage) does not. A static scene would
     # also repeat, so a zero here is a question, not proof of staleness.
     sample["change_1s"] = round(frame_change(first, second), 2)
-    state = hud_state(recognizer)
-    sample.update(hud=state["hud"], quit_dialog=state["quit_dialog"])
-    if state["quit_dialog"]:
-        return {**sample, **_cancel_quit(device, state)}
-    if not state["hud"] or "calendar_icon" not in state:
-        return {**sample, "input": "skipped: the open-world HUD or its 奇想日历 shortcut is not showing"}
-    sample["tap"] = state["calendar_icon"]
-    sample["tap_ok"] = device.tap(*state["calendar_icon"])
-    if not sample["tap_ok"]:
-        return {**sample, "input": "the tap failed; nothing else sent"}
-    time.sleep(1.5)
-    sample["calendar_opened"] = recognizer.run("MaaNikki_CalendarReady")["hit"]
-    if not sample["calendar_opened"]:
-        return {**sample, "input": "the tap did not open the calendar; nothing else sent"}
-    sample["back_ok"] = device.key(4)
-    time.sleep(1.5)
-    after = hud_state(recognizer)
-    sample.update(hud_after=after["hud"], quit_dialog_after=after["quit_dialog"])
-    if after["quit_dialog"]:
-        sample.update(_cancel_quit(device, after))
-    sample["window_after"] = mac_window_state()
+    try:
+        _sample_input(device, recognizer, sample)
+    finally:
+        if any(key in sample for key in ("tap_ok", "quit_cancelled")):
+            sample["window_after"] = mac_window_state()
     return sample
 
 
-def _cancel_quit(device: Device, state: dict) -> dict:
+def _sample_input(device: Device, recognizer, sample: dict) -> None:
+    state = hud_state(recognizer)
+    sample.update(hud=state["hud"], quit_dialog=state["quit_dialog"])
+    if "guard_error" in state:
+        sample.update(input="the quit-dialog guard could not be evaluated; nothing sent", stop=True)
+        return
+    if state["quit_dialog"]:
+        sample.update(_cancel_quit(device, recognizer, state))
+        return
+    if not state["hud"] or "calendar_icon" not in state:
+        sample["input"] = "skipped: the open-world HUD or its 奇想日历 shortcut is not showing"
+        return
+    sample["tap"] = state["calendar_icon"]
+    sample["tap_ok"] = device.tap(*state["calendar_icon"])
+    if not sample["tap_ok"]:
+        sample["input"] = "the tap failed; nothing else sent"
+        return
+    time.sleep(1.5)
+    sample["calendar_opened"] = recognizer.run("MaaNikki_CalendarReady")["hit"]
+    if not sample["calendar_opened"]:
+        sample["input"] = "the tap did not open the calendar; nothing else sent"
+        return
+    sample["back_ok"] = device.key(4)
+    if not sample["back_ok"]:
+        sample["input"] = "BACK failed; nothing else sent"
+        return
+    time.sleep(1.5)
+    after = hud_state(recognizer)
+    sample.update(hud_after=after["hud"], quit_dialog_after=after["quit_dialog"])
+    if "guard_error" in after:
+        sample.update(stop=True)
+    elif after["quit_dialog"]:
+        sample.update(_cancel_quit(device, recognizer, after))
+
+
+def _cancel_quit(device: Device, recognizer, state: dict) -> dict:
+    """Tap the quit dialog's 取消 and confirm on a fresh frame that the dialog is gone; anything else stops the run."""
     if "quit_cancel" not in state:
         return {"input": "quit dialog open but 取消 not found; nothing sent", "stop": True}
-    return {"quit_cancelled": device.tap(*state["quit_cancel"])}
+    result = {"quit_cancelled": device.tap(*state["quit_cancel"])}
+    if not result["quit_cancelled"]:
+        return {**result, "stop": True}
+    time.sleep(1.5)
+    after = hud_state(recognizer)
+    result["quit_dismissed"] = not after["quit_dialog"] and "guard_error" not in after
+    if not result["quit_dismissed"]:
+        result["stop"] = True
+    return result
 
 
 # ---------------------------------------------------------------- commands
@@ -1058,7 +1093,7 @@ def cmd_bgcheck(args) -> int:
                 handle.write(json.dumps(sample, ensure_ascii=False, default=_jsonable) + "\n")
             print(json.dumps(sample, ensure_ascii=False, default=_jsonable), flush=True)
             failed_input = sample.get("tap_ok") is False or sample.get("back_ok") is False \
-                or sample.get("quit_cancelled") is False
+                or sample.get("quit_cancelled") is False or sample.get("quit_dismissed") is False
             if sample.get("stop") or failed_input or device.held:
                 status = 1
                 break
