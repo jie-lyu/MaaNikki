@@ -15,6 +15,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -107,6 +108,23 @@ class WindowsResolutionUnchangedTests(unittest.TestCase):
                 for name in names:
                     self.assertEqual(resolve_resource_image(name, BASE), (root / name).resolve(), name)
 
+    def test_starlight_crystals_loads_its_edge_ring_from_the_android_layer(self):
+        from daily.starsea import Starsea
+        tmp = Path(tempfile.mkdtemp(prefix="maanikki-ring-"))
+        try:
+            base, android = tmp / "resource", tmp / "resource_android"
+            write_png(base / "image/nikki/common/crystal_edge_ring.png", 40)
+            write_png(android / "image/nikki/common/crystal_edge_ring.png", 220)
+            loaded = []
+            starsea = Starsea.__new__(Starsea)
+            starsea.resource = base
+            with target("macos", ADB_CONTROLLER), \
+                    patch("daily.starsea.prepared_template", side_effect=lambda path, **kw: loaded.append(path)):
+                starsea.crystal_markers(None, [])
+            self.assertEqual(loaded, [(android / "image/nikki/common/crystal_edge_ring.png").resolve()])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_starlight_crystals_loads_its_edge_ring_as_before(self):
         from daily.starsea import Starsea
         loaded = []
@@ -179,13 +197,14 @@ class AndroidOverlayTests(unittest.TestCase):
         from recognition.ui_template import UITemplateRecognition
         frame = np.zeros((40, 40, 3), np.uint8)
         frame[10:26, 10:26] = 60  # b.png's brightness
-        with target("macos", MACOS_CONTROLLER):
+        param = {"roi": [0, 0, 40, 40], "template": "game/b.png", "gray_limit": [40, 255], "threshold": .9}
+        argv = SimpleNamespace(image=frame, custom_recognition_param=json.dumps(param), node_name="X")
+        analyze = getattr(UITemplateRecognition.analyze, "__wrapped__", UITemplateRecognition.analyze)
+        with target("macos", MACOS_CONTROLLER), patch("recognition.ui_template.RESOURCE_ROOT", self.tmp):
             self.assertEqual(GameUI(None, self.base).asset_path("game/b.png"), (shared / "game/b.png").resolve())
-            box, detail = UITemplateRecognition._match_spec(
-                frame, {"roi": [0, 0, 40, 40], "template": "game/b.png", "gray_limit": [40, 255], "threshold": .9},
-                self.base)
-        self.assertIsNotNone(box, detail)
-        self.assertEqual(detail["template"], "game/b.png")
+            result = analyze(UITemplateRecognition(), None, argv)  # the real entry point and its root
+        self.assertIsNotNone(result.box, result.detail)
+        self.assertEqual(result.detail["template"], "game/b.png")
 
     def test_catalog_entries_merge_with_the_top_layer_winning(self):
         from daily.ui import catalog
@@ -288,8 +307,13 @@ class FrameworkLayeringTests(unittest.TestCase):
         self.assertEqual(outcome["layered"], [[0, 0, 120, 120], True])  # the later bundle's node and image
         # Without the overriding image the same nodes miss: the hit came from the image, not the region.
         self.assertEqual(outcome["layered_without_image"], [[0, 0, 120, 120], False])
-        expected = [True, True] if (ROOT / "resource_android").is_dir() else [True]
-        self.assertEqual(outcome["real_layers"], expected)
+        # A git checkout (CI, development) must ship the Android layer; only the release source archive, which does
+        # not list it yet (plan risk 13), checks the base layer alone.
+        if (ROOT / ".git").exists():
+            self.assertTrue((ROOT / "resource_android").is_dir(), "resource_android/ is missing from the checkout")
+            self.assertEqual(outcome["real_layers"], [True, True])
+        else:
+            self.assertEqual(outcome["real_layers"][0], True)
 
 
 if __name__ == "__main__":

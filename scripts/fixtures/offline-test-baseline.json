@@ -684,6 +684,7 @@
     "WindowsResolutionUnchangedTests.test_escaping_paths_are_still_refused",
     "WindowsResolutionUnchangedTests.test_every_shipped_image_resolves_exactly_as_before",
     "WindowsResolutionUnchangedTests.test_starlight_crystals_loads_its_edge_ring_as_before",
+    "WindowsResolutionUnchangedTests.test_starlight_crystals_loads_its_edge_ring_from_the_android_layer",
     "WindowsResolutionUnchangedTests.test_the_catalog_is_the_main_one"
    ],
    "known_failures": [],
