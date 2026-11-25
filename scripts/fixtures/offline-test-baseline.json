@@ -110,12 +110,11 @@
     "TaskListTests.test_an_unreadable_list_runs_nothing",
     "TaskListTests.test_the_admission_guard_refuses_unlisted_tasks_before_task_code",
     "TaskListTests.test_the_mac_development_switch_does_not_open_android_tasks",
-    "TaskListTests.test_the_shipped_list_is_well_formed_and_holds_only_the_read_only_check"
+    "TaskListTests.test_the_shipped_list_is_well_formed_and_holds_only_the_read_only_check",
+    "UnreachableDeviceTests.test_repeated_shell_failures_stop_with_adb_restart_advice"
    ],
    "known_failures": [],
-   "skips": [
-    "NoKeyboardOrMouseTests.test_only_one_agent_process_uses_android_input"
-   ]
+   "skips": []
   },
   "test_android_overlay.py": {
    "tests": [
@@ -138,6 +137,19 @@
     "DevHomeTests.test_a_runtime_without_the_adb_unit_is_refused",
     "DevHomeTests.test_the_home_links_the_repository_and_writes_the_interface"
    ]
+  },
+  "test_android_runner.py": {
+   "tests": [
+    "RunnerTests.test_a_blocking_step_that_overruns_ends_with_the_adb_advice",
+    "RunnerTests.test_options_resolve_to_defaults_or_the_chosen_case",
+    "RunnerTests.test_the_adb_check_has_a_timeout",
+    "RunnerTests.test_the_agent_gets_the_controller_and_its_own_data_root",
+    "RunnerTests.test_the_command_line",
+    "RunnerTests.test_the_log_summary_quotes_the_method_lines",
+    "RunnerTests.test_the_overlay_masks_are_maatouch_and_raw_by_netcat"
+   ],
+   "known_failures": [],
+   "skips": []
   },
   "test_app_paths.py": {
    "tests": [

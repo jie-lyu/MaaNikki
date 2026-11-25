@@ -93,6 +93,11 @@ class UnsupportedInput(Exception):
     catch it; the task stops instead."""
 
 
+class DeviceUnreachable(Exception):
+    """The ADB device stopped answering: several shell reads in a row failed (each has its own timeout). The run
+    stops with advice instead of waiting on an unreadable focus forever."""
+
+
 class InputUnconfirmed(Exception):
     """A touch the device may not have completed (its release was not confirmed). Like UnsupportedInput it is no
     OSError/RuntimeError/ValueError, so no fallback catches it: the run stops before any further input."""

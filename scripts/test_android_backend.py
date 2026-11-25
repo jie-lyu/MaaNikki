@@ -258,6 +258,25 @@ class TargetTests(FreshAndroidState):
             target.geometry()
 
 
+class UnreachableDeviceTests(FreshAndroidState):
+    def test_repeated_shell_failures_stop_with_adb_restart_advice(self):
+        controller = FakeShellController({"mCurrentFocus": FOCUS_GAME})
+        target = AndroidTarget(INFO, controller)
+        self.assertTrue(target.foreground())
+        controller.outputs.clear()  # the ADB server stops answering
+        self.assertFalse(target.foreground())
+        self.assertFalse(target.foreground())
+        with self.assertRaises(host.DeviceUnreachable) as caught:
+            target.foreground()
+        self.assertIn("adb kill-server", str(caught.exception))
+        controller.outputs["mCurrentFocus"] = FOCUS_GAME
+        self.assertTrue(target.foreground())  # a success starts the count again
+        controller.outputs.clear()
+        self.assertFalse(target.foreground())
+        controller.outputs["mCurrentFocus"] = FOCUS_GAME
+        self.assertTrue(target.foreground())
+
+
 class SessionTests(FreshAndroidState):
     """The real task session with an Android target: waits for device focus and sends no key on its own."""
 

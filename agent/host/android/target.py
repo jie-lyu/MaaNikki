@@ -98,17 +98,31 @@ class AndroidTarget:
     release_ignores_focus = True
     handle = 0
 
+    # Shell reads in a row that may fail (each times out after 5 s) before the device counts as unreachable.
+    SHELL_FAILURE_LIMIT = 3
+
     def __init__(self, info: dict, controller):
         self.serial = check_controller_info(info)
         self.controller = controller
+        self._shell_failures = 0
 
     def _shell(self, command: str) -> str | None:
         with _SHELL_LOCK:
             try:
                 job = self.controller.post_shell(command, 5000).wait()
-                return job.get() if getattr(job, "succeeded", False) else None
+                output = job.get() if getattr(job, "succeeded", False) else None
             except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
-                return None
+                output = None
+            if output is not None:
+                self._shell_failures = 0
+                return output
+            self._shell_failures += 1
+            if self._shell_failures >= self.SHELL_FAILURE_LIMIT:
+                from host import DeviceUnreachable
+                self._shell_failures = 0
+                raise DeviceUnreachable(f"安卓模拟器 {self.serial} 连续 {self.SHELL_FAILURE_LIMIT} 次没有回应 ADB 命令，任务已停止："
+                                        "请重启 ADB server（adb kill-server; adb start-server），确认模拟器还在，再重试。")
+            return None
 
     def exists(self) -> bool:
         # Only a confirmed absence ends the task as "game closed"; an unreadable answer is not one. Whether the
