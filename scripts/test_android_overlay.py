@@ -183,6 +183,10 @@ class CheckTaskTests(unittest.TestCase):
                 text = runtime.log.call_args.args[0]
                 self.assertEqual(text.splitlines()[0].split("——")[0], first_line)
                 self.assertEqual(len(text.splitlines()), 1 + 7)  # one line per named action
+                # The display never shows a page's OCR'd title (review d2-mailstart-r3, 1); the message log keeps it.
+                shown = runtime.log.call_args.kwargs["ui_text"]
+                self.assertEqual(shown.splitlines()[0].split("——")[0], first_line.replace("（设置）", ""))
+                self.assertNotIn("设置", shown.splitlines()[0])
                 runtime._recognizer_on.assert_called_once_with(frame)
                 runtime.action.assert_not_called()
                 runtime.key.assert_not_called()

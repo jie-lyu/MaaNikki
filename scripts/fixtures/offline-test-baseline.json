@@ -167,6 +167,8 @@
   "test_android_mailbox.py": {
    "tests": [
     "FrameworkTests.test_the_mail_page_is_one_page_whatever_spacing_ocr_reads_in_its_title",
+    "HudEntryTests.test_a_quit_dialog_read_first_on_the_confirming_frame_is_final",
+    "HudEntryTests.test_the_duck_is_guarded_around_the_whole_icon_on_both_frames",
     "MailboxTests.test_a_disabled_button_means_nothing_to_claim",
     "MailboxTests.test_a_fatal_device_error_sends_nothing_more",
     "MailboxTests.test_a_guard_refusal_ends_all_input_with_a_fixed_message",

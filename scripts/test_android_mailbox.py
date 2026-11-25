@@ -332,6 +332,39 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(rt.clicks, [])
 
 
+class HudEntryTests(unittest.TestCase):
+    """The strict HUD entries mail and monthly start with (review d2-mailstart-r3, 2 and 4)."""
+
+    def test_the_duck_is_guarded_around_the_whole_icon_on_both_frames(self):
+        # A paid label 44 px from the duck's centre but within the margin of the duck itself (the named action's
+        # guard): refused on the deciding and on the confirming frame, with that frame and a fixed message.
+        paid = {pages.FORBIDDEN: hit([100, 17, 205, 45], "解锁悠远颂歌")}
+        for frames, refusing in (([(HUD, paid)], 0), ([(HUD, {}), (HUD, paid)], 1)):
+            with self.subTest(refusing=refusing):
+                rt = Rt([(HUD, {})] + frames)  # the look, then the tap frames
+                with scripted(rt), self.assertRaises(pages.GuardRefusal) as caught:
+                    pages.tap_duck(rt)
+                self.assertEqual(rt.clicks, [])
+                self.assertIs(caught.exception.frame, rt.served[1 + refusing][0])
+                self.assertNotIn("解锁悠远颂歌", str(caught.exception))
+        rt = Rt([(HUD, {pages.FORBIDDEN: hit([140, 17, 205, 45], "解锁悠远颂歌")})])  # beyond the margin
+        with scripted(rt):
+            self.assertTrue(pages.tap_duck(rt))
+        self.assertEqual(rt.clicks, [("Click", [56, 44])])
+
+    def test_a_quit_dialog_read_first_on_the_confirming_frame_is_final(self):
+        # confirm_tap would read the same image again; a second reading of the HUD must not overrule the first.
+        plan = actions.Plan([785, 30, 30, 30], "label", True, "奇迹之旅", 800)
+        rt = Rt([(HUD, {}), (QUIT, {})])
+        with scripted(rt), patch.object(pages.actions, "plan_tap", return_value=plan), \
+                patch.object(pages.actions, "confirm_tap", return_value=plan.target) as confirm:
+            with self.assertRaises(pages.FrameMismatch) as caught:
+                pages.tap_shortcut(rt, "monthly")
+        confirm.assert_not_called()
+        self.assertEqual(rt.clicks, [])
+        self.assertIs(caught.exception.frame, rt.served[1][0])
+
+
 class StartFromMailTests(unittest.TestCase):
     """The mail task stopped on the mail page, then another task started (review d2-mailstart-r1, 1): every task
     leaves the observed page by its whole title, whitespace aside, and names it without its OCR'd title."""

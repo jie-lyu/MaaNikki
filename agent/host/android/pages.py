@@ -490,6 +490,10 @@ def tap_shortcut(rt, action: str, *, delay: float = .35) -> bool:
             return False
         if not (rt._frame_still_valid(decided) and rt._frame_still_valid(confirming)):
             continue
+        # The confirming frame's first reading decides: a quit dialog or any other screen read on it stops here,
+        # before confirm_tap reads the same image again (a second reading must not overrule a positive refusal).
+        if fresh is None or fresh.kind != "hud":
+            raise FrameMismatch(f"确认时画面已经不是大世界，没有点「{name}」快捷入口", fresh, confirming, recognize_b)
         target = actions.confirm_tap(plan, screen, recognize_b)
         if target is None:
             raise FrameMismatch(f"确认时画面已经不是大世界，或「{name}」快捷入口不在原处", fresh, confirming,
@@ -510,7 +514,8 @@ def tap_shortcut(rt, action: str, *, delay: float = .35) -> bool:
 
 def tap_duck(rt) -> bool:
     """The 美鸭梨 menu from the HUD by one strict tap on the duck (tap_on_layer: the HUD with the duck in the same
-    place on both tap frames, no forbidden label near it). Unlike the shared named action (Runtime.key("menu"), which
+    place on both tap frames, no forbidden label within FORBIDDEN_MARGIN of the whole duck on either, read as the
+    named action reads it, forbidden_word_near). Unlike the shared named action (Runtime.key("menu"), which
     cancels a quit dialog and decides again, architecture decision 2), a quit dialog or any other screen on any
     frame stops with that frame (FrameMismatch); there is no second attempt. False when the run stopped."""
     from host.android import touch_point
@@ -523,7 +528,10 @@ def tap_duck(rt) -> bool:
 
     def accept(screen_, _recognize_):
         return screen_.kind == "hud" and actions._near(screen_.targets.get("duck"), point)
-    return tap_on_layer(rt, "鸭子图标在原处的大世界", accept, point)
+
+    def guard(screen_, recognize_):  # around the whole duck as recognised on that frame, as the named action
+        return forbidden_word_near(recognize_, screen_.targets["duck"])
+    return tap_on_layer(rt, "鸭子图标在原处的大世界", accept, point, guard=guard)
 
 
 def back_through(rt, titles, attempts: int = 3) -> bool:
@@ -541,23 +549,28 @@ def back_through(rt, titles, attempts: int = 3) -> bool:
     return False
 
 
-def tap_on_layer(rt, what: str, accept, point, *, delay: float = .5, verify=None) -> bool:
+def tap_on_layer(rt, what: str, accept, point, *, delay: float = .5, verify=None, guard=None) -> bool:
     """Tap the fixed ``point`` on a screen that is not a page (e.g. a reward layer that closes on a tap on blank
     space), with the rules of tap_on_page: ``accept(screen, recognize)`` must recognise the layer on the deciding
     frame and again on a fresh confirming frame, no forbidden label may come within FORBIDDEN_MARGIN of the point on
     either, both frames must still be valid, and the tap carries the confirming frame. False when the run stopped;
     LayerMismatch (nothing sent, no second attempt) with the first tap frame that is not the layer; GuardRefusal next
     to a forbidden word. Only a frame voided by a focus change is decided again. ``verify(frame)``, when given, must
-    hold on both frames too (e.g. no input strip across the point), else LayerMismatch with that frame."""
+    hold on both frames too (e.g. no input strip across the point), else LayerMismatch with that frame.
+    ``guard(screen, recognize)``, when given, replaces the forbidden-label check around the point on both frames
+    (e.g. around the whole recognised icon); it returns the label that refuses, or None."""
     from task_control import ForegroundChanged
     box = [int(point[0]), int(point[1]), 1, 1]
+    if guard is None:
+        def guard(_screen, recognize_):
+            return _forbidden_near(recognize_, box)
     for _attempt in range(rt.TOUCH_KEY_ATTEMPTS):
         screen, decided, recognize = screen_now(rt)
         if decided is None:
             return False
         if not accept(screen, recognize) or (verify is not None and not verify(decided)):
             raise LayerMismatch(f"当前画面不是{what}", screen, decided, recognize)
-        word = _forbidden_near(recognize, box)
+        word = guard(screen, recognize)
         if word:
             raise GuardRefusal(GUARD_TAP, decided, word)
         if not rt._frame_still_valid(decided):
@@ -567,7 +580,7 @@ def tap_on_layer(rt, what: str, accept, point, *, delay: float = .5, verify=None
             return False
         if not accept(fresh, recognize_b) or (verify is not None and not verify(confirming)):
             raise LayerMismatch(f"确认时画面已经不是{what}", fresh, confirming, recognize_b)
-        word = _forbidden_near(recognize_b, box)
+        word = guard(fresh, recognize_b)
         if word:
             raise GuardRefusal(GUARD_TAP, confirming, word)
         if not (rt._frame_still_valid(decided) and rt._frame_still_valid(confirming)):

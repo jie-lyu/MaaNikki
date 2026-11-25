@@ -6,10 +6,12 @@ entry node exists only in resource_android/, and the Windows package ships neith
 """
 from __future__ import annotations
 
-def describe(screen, plans) -> str:
+def describe(screen, plans, *, detail: bool = False) -> str:
+    """The report. A page's OCR'd title is no text for the user: it is named only with ``detail`` (the message log,
+    not the display). The modal's name is the one this code gave it (兑换奖励), not OCR."""
     from host.android import actions
-    names = {"quit_dialog": "退出确认框", "modal": f"弹窗（{screen.title}）", "hud": "大世界", "page":
-             f"页面（{screen.title}）", "unknown": "认不出的画面"}
+    names = {"quit_dialog": "退出确认框", "modal": f"弹窗（{screen.title}）", "hud": "大世界",
+             "page": f"页面（{screen.title}）" if detail else "页面", "unknown": "认不出的画面"}
     lines = [f"当前画面：{names.get(screen.kind, screen.kind)}" + (f"——{screen.reason}" if screen.reason else "")]
     for action in sorted(plans):
         plan = plans[action]
@@ -43,7 +45,8 @@ def check(runtime) -> bool:
             except actions.ScreenUnrecognised as error:
                 plans[action] = str(error)
         if runtime._device_focus_now() and runtime._frame_still_valid(frame):
-            runtime.log(describe(screen, plans))
+            # The message log keeps the page's OCR'd title; the display shows the fixed description.
+            runtime.log(describe(screen, plans, detail=True), ui_text=describe(screen, plans))
             return True
     runtime.log(f"安卓检查：连续 {ATTEMPTS} 次判断期间游戏焦点都变过，没有得出结论。")
     return False
