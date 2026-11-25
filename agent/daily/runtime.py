@@ -544,23 +544,22 @@ class Runtime:
                     from host import UnsupportedInput
                     raise UnsupportedInput("无法写入安卓模拟器的输入记录，这一步暂不发送。")
                 intent = True
+                # Nothing may have been held when the source frame was captured (a contact left by anything earlier
+                # stops all input), and the dispatcher's latest event then is the baseline this touch's own lift
+                # must come after. A contact seen held is reported first, whatever else happened meanwhile.
+                if before is not None and before.state != "none":
+                    self._report_held_contact()
                 if state.halted or self.stopped:
                     return False
                 # A source frame whose touch reading was unreadable, with the user's stop seen here (e.g. requested
-                # during the intent write): the unsent touch is cancelled as a stop. A contact seen held is reported
-                # below, stop or not.
+                # during the intent write): the unsent touch is cancelled as a stop.
                 from host import android_user_stop
                 if before is None and android_user_stop(ask_tasker=False):
                     return False
-                # Nothing may have been held when the source frame was captured (a contact left by anything earlier
-                # stops all input), and the dispatcher's latest event then is the baseline this touch's own lift
-                # must come after.
-                if before is None or before.state != "none":
-                    self._halt_unconfirmed()
-                    from host import InputUnconfirmed
-                    raise InputUnconfirmed("安卓模拟器上还有按住的触点（或读不出设备的触摸状态），这一步没有发送，已停止所有输入；"
-                                           "请检查模拟器后重新启动 MaaNikki。")
-                if state.halted or self.stopped:
+                if before is None:
+                    self._report_held_contact()
+                # A stop published by now (or the cached stop) frees the reservation before any focus/ADB I/O.
+                if state.halted or self.stopped or android_user_stop(ask_tasker=False):
                     return False
                 if not self._device_focus_now():
                     raise ForegroundChanged("设备上游戏不在前台，已取消本次输入，等待重新核对")
@@ -736,6 +735,13 @@ class Runtime:
         except BaseException:
             self._halt_unconfirmed()
             raise
+
+    def _report_held_contact(self):
+        """Android, before a touch is sent: the source frame showed a contact held (or no readable touch state)."""
+        self._halt_unconfirmed()
+        from host import InputUnconfirmed
+        raise InputUnconfirmed("安卓模拟器上还有按住的触点（或读不出设备的触摸状态），这一步没有发送，已停止所有输入；"
+                               "请检查模拟器后重新启动 MaaNikki。")
 
     def _halt_unconfirmed(self):
         """The touch may have gone down without coming up: nothing more is sent by this process, and the tasker's

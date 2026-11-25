@@ -98,7 +98,8 @@ _BOOT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 
 class TouchSnapshot:
     """One `dumpsys input` reading: the touch state (see touch_state()), the latest event time in the dispatcher's
-    RecentQueue (-1 when it is empty) and the latest injected UP's event time (None when there is none)."""
+    RecentQueue (-1 when it is empty; None when a held contact was read but the queue was not) and the latest
+    injected UP's event time (None when there is none)."""
 
     def __init__(self, state, latest, injected_up, boot_id=None):
         self.state, self.latest, self.injected_up = state, latest, injected_up
@@ -147,12 +148,15 @@ TOUCH_READING = "cat /proc/sys/kernel/random/boot_id; echo __in''put__; dumpsys 
 
 def touch_snapshot(output: str | None) -> TouchSnapshot | None:
     """Touch state and recent events from one `dumpsys input` output, optionally preceded by the boot id and the
-    TOUCH_READING separator; None when the state or the events cannot be read."""
+    TOUCH_READING separator; None when the state or the events cannot be read, except that a contact read as held
+    is kept as held without the events."""
     booted = None
     if output is not None and output.count("__input__") == 1:
         head, output = output.split("__input__")
         booted = boot_id(head)
     state, events = touch_state(output), recent_events(output)
+    if state in ("injected", "other") and events is None:
+        return TouchSnapshot(state, None, None, booted)  # held, positively; only the event baseline is unknown
     if state is None or events is None:
         return None
     ups = [time for device, time, action in events if device == INJECTED_DEVICE and action == "UP"]

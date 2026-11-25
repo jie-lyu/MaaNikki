@@ -502,6 +502,8 @@ class ForegroundSession:
             self.bump_generation(paused=True)
             if self._background_active():
                 self._observed_foreground = adapter.foreground()
+            if android_user_stop(ask_tasker=False):  # Android: no resume notice after a stop published meanwhile
+                raise TaskStopped("任务已停止。")
             self.notify(resume_message)
         finally:
             self.paused_seconds += wall_time.monotonic()-begin

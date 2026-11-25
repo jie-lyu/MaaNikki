@@ -413,6 +413,14 @@ class StopIsNotAnAdbFaultTests(FreshAndroidState):
         path.write_text("stop", encoding="utf-8")
         return path
 
+    def test_a_contact_read_as_held_stays_held_when_the_recent_queue_is_unreadable(self):
+        truncated = RECENT.replace("length=3", "length=4")  # a cut-off queue: its events cannot be trusted
+        held = touch_snapshot(TOUCH_HELD + truncated)
+        self.assertEqual((held.state, held.latest, held.injected_up), ("injected", None, None))
+        self.assertFalse(held.released_after(900))
+        self.assertIsNone(touch_snapshot(TOUCH_NONE + truncated))  # nothing held: still unreadable as a whole
+        self.assertEqual(touch_snapshot(TOUCH_HELD + RECENT).latest, 47558064000000)
+
     def test_failed_reads_after_a_stop_request_are_not_counted(self):
         controller = FakeShellController({"mCurrentFocus": FOCUS_GAME})
         target = AndroidTarget(INFO, controller)
@@ -644,6 +652,27 @@ class StopIsNotAnAdbFaultTests(FreshAndroidState):
                 session._wait_until(adapter, lambda: False, "游戏已离开前台，任务暂停", "继续", check_hung=False,
                                     bring_back=False)
             session.notify.assert_not_called()
+
+    def test_a_stop_published_as_focus_returns_gives_no_resume_notice(self):
+        from task_control import ForegroundSession, TaskStopped
+        clock = SimpleNamespace(now=0.0)
+
+        def ready():
+            if clock.now >= .2:
+                self.request_stop()  # published during the last check before the pause would end
+            return True
+        with android_run():
+            session = ForegroundSession(SimpleNamespace(tasker=SimpleNamespace(stopping=False),
+                                                        get_node_data=Mock(return_value={})))
+            session.notify = Mock()
+            adapter = SimpleNamespace(stopped=lambda: False, target=SimpleNamespace(exists=lambda: True),
+                                      hung=lambda: False)
+            with patch("task_control.wall_time.monotonic", side_effect=lambda: clock.now), \
+                    patch("task_control.wall_time.sleep", side_effect=lambda s: setattr(clock, "now", clock.now + .1)), \
+                    self.assertRaises(TaskStopped):
+                session._wait_until(adapter, ready, "游戏已离开前台，任务暂停", "游戏已回到前台，任务继续。",
+                                    check_hung=False, bring_back=False)
+            session.notify.assert_called_once_with("游戏已离开前台，任务暂停")
 
     def test_a_stop_during_a_focus_pause_ends_it_as_stopped(self):
         from navigation.controller import ForegroundInput
@@ -1111,18 +1140,24 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
         self.assertEqual(json.loads(log[-1])["outcome"], "cancelled")
 
     def test_a_contact_seen_held_on_the_source_frame_is_reported_even_with_a_stop(self):
-        for index, before in enumerate((TouchSnapshot("injected", 500, 400), TouchSnapshot("other", 500, 400))):
-            with self.subTest(before=before.state), \
+        cases = [(before, how) for before in (TouchSnapshot("injected", 500, 400), TouchSnapshot("other", 500, 400),
+                                              TouchSnapshot("injected", None, None))  # queue unreadable, contact held
+                 for how in ("request", "post_stop")]
+        for index, (before, how) in enumerate(cases):
+            with self.subTest(before=before.state, latest=before.latest, how=how), \
                     patch.object(host, "_DEVICE_INPUT", self.fresh_state(self.data_root / f"held{index}")) as state:
                 self.state = state
                 rt = self.tap_runtime()
                 state.mark(self.frame, 0, before)
                 original = state.record_touch
 
-                def record(action, fields, outcome, state=state, original=original):
-                    if outcome == "sending":
-                        state.stop_request().parent.mkdir(parents=True, exist_ok=True)
-                        state.stop_request().write_text("stop")
+                def record(action, fields, outcome, state=state, original=original, how=how, rt=rt):
+                    if outcome == "sending":  # the stop arrives during the intent write
+                        if how == "request":
+                            state.stop_request().parent.mkdir(parents=True, exist_ok=True)
+                            state.stop_request().write_text("stop")
+                        else:
+                            rt.context.tasker.stopping = True
                     return original(action, fields, outcome)
                 with patch.object(state, "record_touch", side_effect=record), android_run(), \
                         patch("daily.runtime.active_session", return_value=None), \
@@ -1132,6 +1167,25 @@ class NoKeyboardOrMouseTests(FreshAndroidState):
                 self.assertTrue(state.halted)
                 self.assertFalse(state.marker().exists())  # nothing was sent: the reservation is released
                 state._owner.close()
+
+    def test_a_stop_published_during_the_intent_write_frees_the_reservation_before_any_device_query(self):
+        rt = self.tap_runtime()
+        original = self.state.record_touch
+        markers = []
+
+        def record(action, fields, outcome):
+            if outcome == "sending":
+                self.state.stop_request().parent.mkdir(parents=True, exist_ok=True)
+                self.state.stop_request().write_text("stop")
+            return original(action, fields, outcome)
+        rt._device_target.foreground.side_effect = lambda: (markers.append(self.state.marker().exists()), True)[1]
+        with patch.object(self.state, "record_touch", side_effect=record), android_run(), \
+                patch("daily.runtime.active_session", return_value=None):
+            self.assertFalse(rt.action("Click", target=[100, 200, 40, 20], source_frame=self.frame))
+        self.assertEqual(markers, [])  # no focus query ran with the touch reserved
+        rt.context.run_action_direct.assert_not_called()
+        self.assertFalse(self.state.marker().exists())
+        self.assertFalse(self.state.halted)
 
     def test_a_sent_touch_whose_lift_is_unreadable_halts_and_keeps_the_marker_even_after_a_stop(self):
         rt = self.tap_runtime()

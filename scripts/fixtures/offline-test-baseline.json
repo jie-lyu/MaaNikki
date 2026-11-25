@@ -153,7 +153,10 @@
     "StopIsNotAnAdbFaultTests.test_a_stop_published_while_the_failure_scene_is_saved_posts_no_notice",
     "StopIsNotAnAdbFaultTests.test_a_stop_published_while_a_pause_begins_gives_no_pause_notice",
     "NoKeyboardOrMouseTests.test_a_contact_seen_held_on_the_source_frame_is_reported_even_with_a_stop",
-    "NoKeyboardOrMouseTests.test_a_sent_touch_that_raises_an_ordinary_error_after_a_stop_is_still_unconfirmed"
+    "NoKeyboardOrMouseTests.test_a_sent_touch_that_raises_an_ordinary_error_after_a_stop_is_still_unconfirmed",
+    "StopIsNotAnAdbFaultTests.test_a_contact_read_as_held_stays_held_when_the_recent_queue_is_unreadable",
+    "StopIsNotAnAdbFaultTests.test_a_stop_published_as_focus_returns_gives_no_resume_notice",
+    "NoKeyboardOrMouseTests.test_a_stop_published_during_the_intent_write_frees_the_reservation_before_any_device_query"
    ],
    "known_failures": [],
    "skips": [
