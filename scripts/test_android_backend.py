@@ -274,7 +274,7 @@ class FrameFocusTests(unittest.TestCase):
         captures = iter(frames)
         session = SimpleNamespace(
             pause_generation=0, generation=0, wait=Mock(), stopped=lambda: False, ensure_adapter=lambda: adapter,
-            controller=SimpleNamespace(post_screencap=lambda: SimpleNamespace(wait=lambda: next(captures))),
+            controller=SimpleNamespace(post_screencap=Mock(side_effect=lambda: SimpleNamespace(wait=lambda: next(captures)))),
             evidence=SimpleNamespace(remember_frame=Mock()), validate_frame=Mock())
         return session
 
@@ -284,32 +284,51 @@ class FrameFocusTests(unittest.TestCase):
         image = np.full((720, 1280, 3), value, np.uint8)
         return SimpleNamespace(succeeded=True, get=lambda: image)
 
-    def run_probe(self, session):
+    def run_probe(self, session, original=99, probe=None):
         import numpy as np
-        probe, seen = self.recognition()
+        probe, seen = probe or self.recognition()
         argv = SimpleNamespace(task_detail=SimpleNamespace(task_id=51), node_name="X",
-                               image=np.full((720, 1280, 3), 99, np.uint8))  # the frame Maa took (launcher)
+                               image=np.full((720, 1280, 3), original, np.uint8))  # the frame Maa took
         with android_run(), patch("registration.task_session") as task_session:
             task_session.return_value.__enter__.return_value = session
             task_session.return_value.__exit__.return_value = False
             result = probe().analyze(SimpleNamespace(), argv)
         return result, seen
 
-    def test_the_frame_maa_took_is_replaced_by_one_with_focus_confirmed(self):
-        session = self.session([True], [self.frame(7)])
+    def test_the_frame_maa_took_is_replaced_by_one_with_focus_confirmed_around_the_capture(self):
+        session = self.session([True, True], [self.frame(7)])
         result, seen = self.run_probe(session)
         self.assertEqual((result, seen), ("hit", [7]))
         session.wait.assert_any_call(session.ensure_adapter(), require_foreground=True)
 
     def test_a_capture_that_lost_focus_is_taken_again(self):
-        session = self.session([False, True], [self.frame(5), self.frame(6)])
+        session = self.session([True, False, True, True], [self.frame(5), self.frame(6)])
         self.assertEqual(self.run_probe(session)[1], [6])
 
-    def test_no_frame_with_focus_means_no_result(self):
-        session = self.session([False, False, False], [self.frame(1), self.frame(2), self.frame(3)])
+    def test_without_focus_before_the_capture_nothing_is_captured(self):
+        # e.g. wait() returned at once because another callback is already waiting
+        session = self.session([False, False, False], [])
         result, seen = self.run_probe(session)
         self.assertIsNone(result)
         self.assertEqual(seen, [])
+        session.controller.post_screencap.assert_not_called()
+
+    def test_callbacks_given_the_same_frame_share_one_capture(self):
+        # The children of an And node get the same original frame; they must judge the same replacement.
+        session = self.session([True, True], [self.frame(8), self.frame(9)])
+        recognition = self.recognition()
+        first = self.run_probe(session, original=99, probe=recognition)
+        second = self.run_probe(session, original=99, probe=recognition)
+        self.assertEqual(recognition[1], [8, 8])
+        self.assertEqual(session.controller.post_screencap.call_count, 1)
+        self.assertEqual((first[0], second[0]), ("hit", "hit"))
+
+    def test_a_new_original_frame_gets_a_new_capture(self):
+        session = self.session([True, True, True, True], [self.frame(8), self.frame(9)])
+        recognition = self.recognition()
+        self.run_probe(session, original=1, probe=recognition)
+        self.run_probe(session, original=2, probe=recognition)
+        self.assertEqual(recognition[1], [8, 9])
 
 
 class FocusLostModeTests(unittest.TestCase):
