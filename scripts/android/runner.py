@@ -3,6 +3,9 @@
     .venv/bin/python scripts/android/runner.py run MaaNikki_AndroidCheck --purpose "why this run"
     .venv/bin/python scripts/android/runner.py run MaaNikki_Mailbox --option NAME=CASE --purpose "..."
     .venv/bin/python scripts/android/runner.py tasks          # the entries the Android interface defines
+    .venv/bin/python scripts/android/runner.py run MaaNikki_AndroidWalkProbe --option hint=X,Y --option target=X,Y \
+        [--option map=miraland --option timeout=S --option leash=U --option radius=U] --purpose "..."
+                                                              # dev-only: a supervised joystick walk (see DEV_ENTRIES)
 
 What it does, the way the client will (docs/android-support-plan.md, B6):
 - connects with the nikki_android controller of build/android/interface-overlay.json (input Maatouch and capture
@@ -132,6 +135,40 @@ def task_override(interface: dict, entry: str, chosen: dict[str, str]) -> list[d
     return overrides
 
 
+# Dev-only entries: not in the Android interface (so no client offers them) nor in agent/host/android/tasks.json. The
+# runner alone runs them: their --option values are free values (NAME=VALUE, not cases) turned into the entry node's
+# custom_action_param, and the agent of that one run is told it may run the entry (host.android.DEV_ENTRIES_ENV; the
+# agent accepts only names in its own fixed host.android.DEV_ENTRIES).
+DEV_ENTRIES_ENV = "MAANIKKI_ANDROID_DEV_ENTRIES"
+WALK_PROBE = "MaaNikki_AndroidWalkProbe"
+WALK_OPTIONS = {"map": str, "hint": "point", "target": "point", "timeout": float, "leash": float, "radius": float}
+
+
+def dev_override(entry: str, chosen: dict[str, str]) -> list[dict]:
+    """The pipeline override of a dev-only entry from its --option values (WALK_PROBE: map, hint=X,Y, target=X,Y,
+    timeout, leash, radius; hint and target required). The agent checks the ranges again."""
+    if entry != WALK_PROBE:
+        raise RunnerError(f"{entry} is not a dev-only entry")
+    unknown = set(chosen) - set(WALK_OPTIONS)
+    if unknown:
+        raise RunnerError(f"{entry} has no option {sorted(unknown)}; its options: {sorted(WALK_OPTIONS)}")
+    missing = {"hint", "target"} - set(chosen)
+    if missing:
+        raise RunnerError(f"{entry} needs --option {' and '.join(sorted(missing))} (X,Y in map units)")
+    param = {"kind": "android_walk_probe", "map": "miraland"}
+    for name, value in chosen.items():
+        kind = WALK_OPTIONS[name]
+        try:
+            if kind == "point":
+                x, y = (float(v) for v in value.split(","))
+                param[name] = [x, y]
+            else:
+                param[name] = kind(value)
+        except ValueError:
+            raise RunnerError(f"option {name}={value!r} is not valid for {entry}") from None
+    return [{entry: {"custom_action_param": param}}]
+
+
 def within(seconds: float, what: str, function):
     """``function()`` in a worker thread; RunnerError with the ADB restart advice if it does not return in time
     (the native call cannot be cancelled, so the runner then has to exit)."""
@@ -177,10 +214,13 @@ def methods_in_log(log_text: str) -> dict:
             "lines": [line[line.find("]", line.find("][", 60)) + 1:][:200] for line in lines][-8:]}
 
 
-def agent_environment(controller: dict, data_root: Path) -> dict:
-    env = {key: value for key, value in os.environ.items() if key.upper() != "PI_CONTROLLER"}
+def agent_environment(controller: dict, data_root: Path, dev_entry: str | None = None) -> dict:
+    """The agent's environment; DEV_ENTRIES_ENV names ``dev_entry`` only (an inherited value is never passed on)."""
+    env = {key: value for key, value in os.environ.items() if key.upper() not in ("PI_CONTROLLER", DEV_ENTRIES_ENV)}
     env.update({"PI_CONTROLLER": json.dumps(controller, ensure_ascii=False),
                 "MAANIKKI_DATA_ROOT": str(data_root), "MAANIKKI_RESOURCE_ROOT": str(ROOT), "PYTHONUTF8": "1"})
+    if dev_entry is not None:
+        env[DEV_ENTRIES_ENV] = dev_entry
     return env
 
 
@@ -270,7 +310,8 @@ def _run(args) -> int:
     controller_def = controller_definition(interface)
     input_mask, screencap_mask = masks(controller_def)
     chosen = dict(option.split("=", 1) for option in args.option)
-    override = task_override(interface, args.entry, chosen)
+    dev_entry = args.entry if args.entry == WALK_PROBE else None
+    override = dev_override(args.entry, chosen) if dev_entry else task_override(interface, args.entry, chosen)
     started = dt.datetime.now().astimezone()
     log_dir = LOG_ROOT / started.strftime("%Y%m%d-%H%M%S")
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -306,7 +347,7 @@ def _run(args) -> int:
         raise RunnerError("agent 客户端无法绑定资源")
     agent_log = open(log_dir / "agent.log", "w", encoding="utf-8")
     child = subprocess.Popen([sys.executable, str(ROOT / "agent" / "main.py"), client.identifier], cwd=str(ROOT),
-                             env=agent_environment(controller_def, data_root), stdout=agent_log,
+                             env=agent_environment(controller_def, data_root, dev_entry), stdout=agent_log,
                              stderr=subprocess.STDOUT)
     tasker = None
     # From the first SIGINT or SIGTERM on, further ones are deferred (SignalDeferral): the stop handshake, which may wait
@@ -717,7 +758,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("run", help="run one task entry on the emulator")
     p.add_argument("entry")
-    p.add_argument("--option", action="append", default=[], metavar="NAME=CASE")
+    p.add_argument("--option", action="append", default=[], metavar="NAME=CASE",
+                   help="an option's case; for a dev-only entry (MaaNikki_AndroidWalkProbe) NAME=VALUE")
     p.add_argument("--purpose", required=True, help="why this run; recorded with it")
     p.add_argument("--data-root", default=str(DEFAULT_DATA), help="the agent's data root (not the client's)")
     p.add_argument("--timeout", type=float, default=600, help="seconds the task may run")

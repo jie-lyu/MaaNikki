@@ -11,7 +11,7 @@ DIR defaults to .build/android. Reported, per measured run in DIR/phase-e-measur
   - the lag: settled - immediate frame distance (what LAG_U bounds);
   - the angle formula: the direction each step actually moved vs the one move.screen_angle's inverse predicts;
   - screens (unless --no-screens, needs ./maafw): move.classify on every saved HUD frame (expect "hud": no narration
-    false positives) through the real nodes, as the probe's walk does.
+    false positives) through the real nodes, as the walk does.
 """
 from __future__ import annotations
 

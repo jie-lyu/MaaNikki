@@ -20,8 +20,9 @@ the only touch this module sends; the bell press, off by default, is the one oth
    [MIN_STEP_S, MAX_STEP_S]. The camera is never turned.
 4. Settle: after a lift the minimap keeps easing for 0.6-0.9 s. A frame captured right after a step therefore shows
    the position up to LAG_U short along the step (2.8 u at most on the device frames). Instead of always waiting, the
-   walk waits only when the lag could change the decision: near a goal that must be reached precisely (the last point, or one with an action), i.e. when
-   remaining - LAG_U <= REACH_U, the walk waits until SETTLE_S after the lift and decides on a fresh frame. Far from
+   walk waits only when the lag could change the decision: near a goal that must be reached precisely (the last
+   point, or one with an action), i.e. when remaining - LAG_U <= REACH_U, it waits until SETTLE_S after the lift and
+   decides on a fresh frame. Far from
    such a goal the next step is a full-length step toward it with or without the lag, and an intermediate route point
    counts as passed when the segment between two fixes comes within its radius (navigation.geometry), which a lagging
    fix cannot hide. Arrival at a precise goal is only ever judged on a settled frame.
@@ -161,14 +162,14 @@ class _P:  # what navigation.geometry expects: .x and .y
 # ---- the walk ----
 
 class Walker:
-    """One walk on one map. ``io`` is the device binding (RuntimeIo in the agent, the probe's in scripts/android);
+    """One walk on one map. ``io`` is the device binding (RuntimeIo; walk_probe.DiagnosticIo for the dev walk);
     ``reader`` a minimap.MinimapReader (or anything with ``present(frame)`` and ``fix(frame, hint, search_radius)``)."""
 
     def __init__(self, io, reader, *, clock=time.monotonic, allow_bell: bool = False, allow_jump: bool = False,
                  leash=None):
         self.io, self.reader, self.clock = io, reader, clock
         self.allow_bell, self.allow_jump = allow_bell, allow_jump
-        self.leash = leash  # (x, y, radius): every fix must stay inside, a probe's safety fence
+        self.leash = leash  # (x, y, radius): every fix must stay inside, the dev walk's safety fence
         self.steps: list[dict] = []
         self.position = None
         self._lift_at = None  # the clock when the last gesture returned (its lift confirmed)

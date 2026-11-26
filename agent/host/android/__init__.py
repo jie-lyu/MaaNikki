@@ -81,8 +81,24 @@ def task_tiers():
     return parse_task_tiers(_task_list())
 
 
+# Dev-only entries (never in tasks.json, interface.json or an interface overlay): allowed only when the process's
+# environment names them in DEV_ENTRIES_ENV, which only scripts/android/runner.py sets, for that one run's agent.
+DEV_ENTRIES_ENV = "MAANIKKI_ANDROID_DEV_ENTRIES"
+DEV_ENTRIES = frozenset({"MaaNikki_AndroidWalkProbe"})  # host.android.walk_probe: supervised device walks
+
+
+def dev_entries() -> frozenset[str]:
+    """The dev-only entries this process may run: those of DEV_ENTRIES named in DEV_ENTRIES_ENV (none by default)."""
+    import os
+    named = {item.strip() for item in os.environ.get(DEV_ENTRIES_ENV, "").split(",")}
+    return DEV_ENTRIES & frozenset(named)
+
+
 def task_allowed(entry) -> bool:
-    """Whether the Android list lets ``entry`` run (verified or experimental); an unreadable list allows nothing."""
+    """Whether the Android list lets ``entry`` run (verified or experimental); an unreadable list allows nothing.
+    A dev-only entry is allowed only when the runner enabled it (dev_entries)."""
+    if entry in dev_entries():
+        return True
     try:
         verified, experimental, _excluded = task_tiers()
     except (OSError, ImportError, ValueError, KeyError, TypeError):

@@ -355,6 +355,13 @@
   },
   "test_android_move.py": {
    "tests": [
+    "DevEntryTests.test_each_step_and_its_frame_go_to_the_debug_folder_with_the_uid_masked",
+    "DevEntryTests.test_gameplay_runs_it_only_for_its_entry_and_kind_and_only_on_android",
+    "DevEntryTests.test_no_interface_task_list_or_package_offers_it",
+    "DevEntryTests.test_off_android_it_refuses_before_anything_else",
+    "DevEntryTests.test_the_agent_allows_the_entry_only_when_the_runner_names_it",
+    "DevEntryTests.test_the_parameters_are_checked_before_anything_runs",
+    "DevEntryTests.test_the_runner_turns_options_into_the_parameters_and_enables_only_that_agent",
     "FrameworkTests.test_the_hud_the_narration_band_and_other_screens",
     "FrameworkTests.test_the_narration_node",
     "GeometryTests.test_duration_is_clamped_and_follows_the_measured_model",

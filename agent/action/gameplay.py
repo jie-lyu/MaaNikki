@@ -35,6 +35,7 @@ class UIClickAction(CustomAction):
 
 
 ANDROID_CHECK_ENTRY = "MaaNikki_AndroidCheck"
+ANDROID_WALK_PROBE_ENTRY = "MaaNikki_AndroidWalkProbe"  # dev-only (host.android.walk_probe)
 
 
 @agent_action("nikki.gameplay")
@@ -55,6 +56,17 @@ class GameplayAction(CustomAction):
                 # Android only (its entry node is in resource_android/): one frame, no input, no recovery.
                 from host.android.check import check
                 return check(runtime)
+            walk_probe = getattr(getattr(argv, "task_detail", None), "entry", None) == ANDROID_WALK_PROBE_ENTRY
+            if walk_probe or kind == "android_walk_probe":
+                # Dev-only, Android only (entry node in resource_android/, allowed only when the runner enables it):
+                # bound to its entry like the check above; refused before importing host.android elsewhere.
+                from host import capabilities, game_backend
+                if not (walk_probe and kind == "android_walk_probe"
+                        and capabilities(game_backend()).touch_actions_only):
+                    runtime.log("走路探针的任务入口、参数或系统不符，没有执行。")
+                    return False
+                from host.android.walk_probe import run as walk
+                return walk(runtime, options) and not runtime.stopped
             game = Gameplay(runtime)
             if kind == "weekly_shop":
                 from host import capabilities, game_backend

@@ -19,8 +19,7 @@ the check and the dispatch, and a touchable overlay can take a tap while the gam
     python -I scripts/android/probe.py reco-all --frame PNG [--filter REGEX] [--any-roi] [--json OUT]
     python -I scripts/android/probe.py steps FILE.json --purpose TEXT
     python -I scripts/android/probe.py bgcheck --out FILE.jsonl --purpose TEXT [--samples N --interval S]
-    python -I scripts/android/probe.py walk --map ID --hint X Y --to X Y --out DIR --purpose TEXT
-                                       [--radius U] [--timeout S] [--leash U]   (phase E: joystick steps only)
+    python -I scripts/android/probe.py fix --map ID --hint X Y (--frame PNG ... | --live)   (no input)
 
 Coordinates are in the agent's frame, whose short side is 720 (1280x720 on a 16:9 device; the controller scales
 them to the device) unless
@@ -1193,164 +1192,33 @@ def cmd_screen(args) -> int:
     return 0
 
 
-# ---------------------------------------------------------------- walk (phase E movement calibration)
+# ---------------------------------------------------------------- fix (phase E movement, read-only)
 
 
-class WalkIo:
-    """The movement backend's I/O (host.android.move.Walker) on the probe's connection, for a device session that
-    walks to one nearby point. Each observation reads focus and the touch state in one shell call, then captures and
-    classifies that frame with the Android action table plus the narration band (resource/ + resource_android/), as
-    the agent does. Every decision frame and its step are kept under ``out`` (NNN-step.png, walk.jsonl). Ctrl-C or the
-    file ``out/STOP`` asks for a stop: a running gesture lifts at once and nothing more is sent."""
-
-    def __init__(self, device: Device, recognizer, out: Path):
-        self.device, self.recognizer, self.out = device, recognizer, out
-        self.out.mkdir(parents=True, exist_ok=True)
-        self.journal = (out / "walk.jsonl").open("a", encoding="utf-8")
-        self.count = 0
-        self.last_frame = self.last_reading = None
-        self.frame_used = True  # a frame authorises one input
-        self.stop_flag = False
-
-    def write(self, **record):
-        record["t"] = round(time.time(), 3)
-        line = json.dumps(record, ensure_ascii=False, default=_jsonable)
-        self.journal.write(line + "\n")
-        self.journal.flush()
-        print(line, flush=True)
-
-    def reading(self):
-        from host.android.target import TOUCH_READING, touch_snapshot
-        out = self.device.shell("dumpsys window | grep mCurrentFocus; echo __fo''cus__; " + TOUCH_READING)
-        if out is None or out.count("__focus__") != 1:
-            return None, None
-        focus, rest = out.split("__focus__")
-        return focused_package(lambda _command: focus), touch_snapshot(rest)
-
-    def stopped(self) -> bool:
-        return self.stop_flag or (self.out / "STOP").exists()
-
-    def observe(self):
-        from host.android import actions, move
-        at = time.monotonic()
-        focus, snapshot = self.reading()
-        if focus != GAME_PACKAGE:
-            raise ProbeError(f"the focused window is {focus!r}, not the game; the walk stops")
-        if snapshot is None or snapshot.state != "none":
-            raise ProbeError(f"the device reports a held contact or no readable touch state "
-                             f"({snapshot and snapshot.state}); the walk stops, check the emulator")
-        kind, reason = self.recognizer.on_one_frame(
-            lambda recognize: move.classify(actions.read_screen(recognize), recognize))
-        frame = self.recognizer.last_frame
-        if frame is None:
-            raise ProbeError("capture failed")
-        self.last_frame, self.last_reading, self.frame_used = frame, snapshot, False
-        return move.Observation(frame, kind, at, reason)
-
-    def gesture(self, gesture, *, source_frame):
-        """Runtime.gesture's rules on the probe: the script checked, decided on the last frame (captured with nothing
-        held) and used once, focus checked, logged, sent whole (gesture.perform lifts in finally), then the device must
-        show this gesture's own lift with nothing held."""
-        from host.android.gesture import ABORTED, DONE, check_gesture, perform
-        check_gesture(gesture)
-        if source_frame is None or source_frame is not self.last_frame or self.frame_used:
-            raise ProbeError("a gesture must be decided on the last frame captured, and a frame authorises one input")
-        self.frame_used = True
-        baseline = self.last_reading.latest
-        fields = gesture.log_fields()
-        self.device.check_foreground("gesture", fields)
-        self.device.log.write("gesture", fields, None, phase="sending")
-        result = perform(self.device.controller, gesture, self.stopped)
-        self.device.log.write("gesture", fields, result == DONE, phase="done", result=result)
-        for attempt in range(6):
-            if attempt:
-                time.sleep(.15)
-            _focus, snapshot = self.reading()
-            if snapshot is not None and snapshot.released_after(baseline):
-                break
-        else:
-            raise ProbeError("the gesture's lift was not confirmed on the device; nothing more is sent, check the "
-                             "emulator")
-        if result == ABORTED:
-            return False
-        if result != DONE:
-            raise ProbeError(f"the gesture ended {result}; nothing more is sent")
-        return True
-
-    def step(self, frame, angle, seconds, jump_at) -> bool:
-        from host.android import gesture
-        return bool(gesture.joystick_step(self, frame, angle, 1.0, seconds, jump_at))
-
-    def bell(self, frame) -> bool:
-        raise ProbeError("the bell is not part of the walk probe")
-
-    def pause(self, seconds) -> bool:
-        end = time.monotonic() + max(0.0, seconds)
-        while not self.stopped():
-            left = end - time.monotonic()
-            if left <= 0:
-                break
-            time.sleep(min(.05, left))
-        return not self.stopped()
-
-    def _save_frame(self, frame, name):
-        import cv2
-        if frame is None:
-            return None
-        path = self.out / f"{self.count:03d}-{name}.png"
-        self.count += 1
-        cv2.imwrite(str(path), frame)
-        return str(path)
-
-    def save(self, stage, reason, frame, details=None):
-        path = self._save_frame(frame, stage)
-        self.write(kind="stop", stage=stage, reason=reason, frame=path, details=details)
-        return path is not None
-
-    def log(self, text, *, detail=False):
-        self.write(kind="detail" if detail else "message", text=text)
-
-    def record(self, kind, record, frame):
-        path = self._save_frame(frame, kind)
-        self.write(kind=kind, frame=path, **record)
-        return path
-
-
-def cmd_walk(args) -> int:
-    """Walk to one nearby point with joystick steps (host.android.move), starting from a position hint. Only joystick
-    gestures are sent; it stops on anything but the open-world HUD, and never leaves --leash map units around the
-    hint."""
-    import signal
-
+def cmd_fix(args) -> int:
+    """The movement backend's reading of frames (host.android.minimap, host.android.move.classify): the minimap fix
+    around --hint, the camera yaw, whether the chevron sits at the pivot, and the screen class the walk would act on.
+    Sends no input (the device walk is the runner's dev-only MaaNikki_AndroidWalkProbe)."""
     if str(AGENT) not in sys.path:
         sys.path.insert(0, str(AGENT))
+    from host.android import actions, move
     from host.android.minimap import MinimapReader
-    from host.android.move import Goal, Walker
 
-    hint, target = tuple(args.hint), tuple(args.to)
-    if math.dist(hint, target) > args.leash:
-        raise ProbeError(f"the target is {math.dist(hint, target):.1f} map units from the hint, past --leash "
-                         f"{args.leash}")
     reader = MinimapReader(args.map, RESOURCE)
-    device = connect(args)
-    io = WalkIo(device, Recognizer(device.controller, android_layer=True), Path(args.out))
-
-    def request_stop(_signum, _frame):
-        io.stop_flag = True
-    previous = signal.signal(signal.SIGINT, request_stop)
-    try:
-        io.write(kind="start", map=args.map, hint=hint, target=target, radius=args.radius, leash=args.leash,
-                 timeout=args.timeout)
-        walker = Walker(io, reader, leash=(hint[0], hint[1], args.leash))
-        result = walker.walk([Goal(target[0], target[1], args.radius)], hint, args.timeout)
-        io.write(kind="result", outcome=result.outcome, message=result.message, position=result.position,
-                 steps=len(result.steps))
-        return 0 if result.ok else 3
-    finally:
-        signal.signal(signal.SIGINT, previous)
-        failed = device.release_all()
-        _focus, snapshot = io.reading()
-        io.write(kind="end", release_failed=failed, touch=snapshot and snapshot.state)
+    if args.live:
+        sources = [("live", connect(args).controller)]
+    else:
+        sources = [(path, frame_controller(Path(path))) for path in args.frame]
+    for name, controller in sources:
+        recognizer = Recognizer(controller, android_layer=True)
+        kind, reason = recognizer.on_one_frame(
+            lambda recognize: move.classify(actions.read_screen(recognize), recognize))
+        frame = recognizer.last_frame
+        fix = reader.fix(frame, tuple(args.hint), args.search)
+        print(json.dumps({"frame": str(name), "screen": kind, "reason": reason, "chevron": reader.present(frame),
+                          "fix": fix.log(), "from_hint": round(math.dist((fix.x, fix.y), args.hint), 2)},
+                         ensure_ascii=False), flush=True)
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1423,17 +1291,14 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--frame", nargs="+")
     group.add_argument("--live", action="store_true")
     p.set_defaults(func=cmd_screen)
-    p = sub.add_parser("walk", help="walk to a nearby point with joystick steps (phase E calibration)")
+    p = sub.add_parser("fix", help="the movement backend's minimap fix and screen class on frames (no input)")
     p.add_argument("--map", required=True, help="map id in resource/navigation/maps.json, e.g. miraland")
-    p.add_argument("--hint", type=float, nargs=2, required=True, metavar=("X", "Y"),
-                   help="where the character is now, in map units (the first fix is searched around it)")
-    p.add_argument("--to", type=float, nargs=2, required=True, metavar=("X", "Y"))
-    p.add_argument("--radius", type=float, default=1.8, help="arrival radius in map units")
-    p.add_argument("--timeout", type=float, default=60.0)
-    p.add_argument("--leash", type=float, default=15.0, help="never go farther than this from the hint")
-    p.add_argument("--out", required=True, help="directory for the step frames and walk.jsonl")
-    p.add_argument("--purpose", required=True)
-    p.set_defaults(func=cmd_walk)
+    p.add_argument("--hint", type=float, nargs=2, required=True, metavar=("X", "Y"))
+    p.add_argument("--search", type=float, default=40.0, help="search radius around the hint, map units")
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument("--frame", nargs="+")
+    group.add_argument("--live", action="store_true", help="one capture from the emulator (no input)")
+    p.set_defaults(func=cmd_fix)
     p = sub.add_parser("reco-all")
     p.add_argument("--frame", required=True)
     p.add_argument("--filter")

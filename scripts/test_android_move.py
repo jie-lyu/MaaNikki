@@ -497,6 +497,122 @@ class RealFrameTests(unittest.TestCase):
         self.assertEqual(result.outcome, "stopped")  # the second gesture "returned False": nothing further
 
 
+class DevEntryTests(unittest.TestCase):
+    """The dev-only walk entry: run by the runner only, through the agent's Runtime, never offered to a user."""
+
+    ENTRY = "MaaNikki_AndroidWalkProbe"
+
+    def test_the_agent_allows_the_entry_only_when_the_runner_names_it(self):
+        from unittest.mock import patch
+        import host.android as android
+        self.assertIn(self.ENTRY, android.DEV_ENTRIES)
+        verified, experimental, excluded = android.task_tiers()
+        self.assertNotIn(self.ENTRY, set(verified) | set(experimental) | set(excluded))
+        env = {k: v for k, v in os.environ.items() if k != android.DEV_ENTRIES_ENV}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertFalse(android.task_allowed(self.ENTRY))
+        for value, allowed in ((self.ENTRY, True), (f"MaaNikki_Other, {self.ENTRY}", True),
+                               ("MaaNikki_Other", False), ("", False)):
+            with self.subTest(value=value), patch.dict(os.environ, {**env, android.DEV_ENTRIES_ENV: value}, clear=True):
+                self.assertEqual(android.task_allowed(self.ENTRY), allowed)
+                self.assertFalse(android.task_allowed("MaaNikki_Other"))  # only names of the fixed set count
+
+    def test_no_interface_task_list_or_package_offers_it(self):
+        for path in ("interface.json", "build/android/interface-overlay.json", "agent/host/android/tasks.json",
+                     "scripts/fixtures/windows-package-files.txt"):
+            self.assertNotIn(self.ENTRY, (ROOT / path).read_text(encoding="utf-8"), path)
+        self.assertNotIn("android_walk_probe", (ROOT / "scripts/fixtures/windows-package-files.txt").read_text())
+
+    def test_the_runner_turns_options_into_the_parameters_and_enables_only_that_agent(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        sys.path.insert(0, str(ROOT / "scripts" / "android"))
+        import runner
+        override = runner.dev_override(self.ENTRY, {"hint": "9880.5,10010.6", "target": "9884.5,10016.5",
+                                                    "timeout": "45", "leash": "12"})
+        self.assertEqual(override, [{self.ENTRY: {"custom_action_param": {
+            "kind": "android_walk_probe", "map": "miraland", "hint": [9880.5, 10010.6], "target": [9884.5, 10016.5],
+            "timeout": 45.0, "leash": 12.0}}}])
+        for bad in ({"target": "1,2"}, {"hint": "1,2", "target": "3"}, {"hint": "1,2", "target": "3,4", "x": "1"},
+                    {"hint": "1,2", "target": "3,4", "timeout": "soon"}):
+            with self.subTest(options=bad), self.assertRaises(runner.RunnerError):
+                runner.dev_override(self.ENTRY, bad)
+        with self.assertRaises(runner.RunnerError):  # not an interface task: the ordinary path refuses it
+            runner.task_override(runner.android_interface(), self.ENTRY, {})
+        tasks, _options = runner.interface_options(runner.android_interface())
+        self.assertNotIn(self.ENTRY, [task.get("entry") for task in tasks])
+        controller = {"name": "nikki_android"}
+        from unittest.mock import patch
+        with patch.dict(os.environ, {runner.DEV_ENTRIES_ENV: self.ENTRY}):
+            self.assertNotIn(runner.DEV_ENTRIES_ENV, runner.agent_environment(controller, Path("/tmp/d")))
+            self.assertEqual(runner.agent_environment(controller, Path("/tmp/d"), self.ENTRY)[runner.DEV_ENTRIES_ENV],
+                             self.ENTRY)
+        import host.android as android
+        self.assertEqual(runner.DEV_ENTRIES_ENV, android.DEV_ENTRIES_ENV)
+
+    def test_gameplay_runs_it_only_for_its_entry_and_kind_and_only_on_android(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        from action import gameplay
+        from host.android import walk_probe
+        runtime = SimpleNamespace(stopped=False, log=Mock(), main=Mock())
+        param = json.dumps({"kind": "android_walk_probe", "hint": [1, 2], "target": [3, 4]})
+
+        def run(entry, raw, backend="android"):
+            argv = SimpleNamespace(custom_action_param=raw, task_detail=SimpleNamespace(entry=entry))
+            with patch.object(gameplay, "Executors", return_value=runtime), \
+                    patch("host.game_backend", return_value=backend), \
+                    patch.object(walk_probe, "run", return_value=True) as walk:
+                return gameplay.GameplayAction.run.__wrapped__(None, None, argv), walk
+        result, walk = run(self.ENTRY, param)
+        self.assertTrue(result)
+        walk.assert_called_once()
+        self.assertEqual(walk.call_args.args[1]["target"], [3, 4])
+        for entry, raw, backend in ((self.ENTRY, json.dumps({"kind": "main"}), "android"),
+                                    ("MaaNikki_Mailbox", param, "android"), (self.ENTRY, param, "win32"),
+                                    (self.ENTRY, param, "macos")):
+            with self.subTest(entry=entry, raw=raw, backend=backend):
+                result, walk = run(entry, raw, backend)
+                self.assertFalse(result)
+                walk.assert_not_called()
+        runtime.main.assert_not_called()
+
+    def test_the_parameters_are_checked_before_anything_runs(self):
+        from host.android.walk_probe import Params
+        good = {"map": "miraland", "hint": [9880.5, 10010.6], "target": [9884.5, 10016.5]}
+        self.assertEqual((Params(good).timeout, Params(good).leash, Params(good).radius), (60.0, 12.0, 1.8))
+        for change in ({"map": ""}, {"hint": [1]}, {"target": [1, float("nan")]}, {"timeout": 500},
+                       {"leash": 50}, {"radius": 9}, {"target": [9900, 10010.6]}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                Params({**good, **change})
+
+    def test_off_android_it_refuses_before_anything_else(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        from host.android import walk_probe
+        rt = SimpleNamespace(log=Mock(), stopped=False)
+        with patch("host.game_backend", return_value="win32"), \
+                patch("host.android.minimap.MinimapReader", side_effect=AssertionError("no map load")):
+            self.assertFalse(walk_probe.run(rt, {"map": "miraland", "hint": [1, 2], "target": [3, 4]}))
+        rt.log.assert_called_once()
+
+    def test_each_step_and_its_frame_go_to_the_debug_folder_with_the_uid_masked(self):
+        import numpy as np
+        import cv2
+        from host.android.walk_probe import DiagnosticIo
+        with tempfile.TemporaryDirectory() as folder:
+            io = DiagnosticIo(object(), Path(folder) / "walk")
+            frame = np.full((720, 1280, 3), 200, np.uint8)
+            name = io.record("step", {"step": 0, "fix": {"x": 1.0}, "angle": 75.7, "seconds": 1.5}, frame)
+            io.record("moved", {"step": 0, "moved": 4.2}, None)
+            saved = cv2.imread(str(Path(folder) / "walk" / name))
+            self.assertEqual(int(saved[710, 10].max()), 0)  # the UID corner is blacked out
+            self.assertEqual(int(saved[360, 640].min()), 200)
+            lines = [json.loads(line) for line in (Path(folder) / "walk/walk.jsonl").read_text(encoding="utf-8")
+                     .splitlines()]
+            self.assertEqual([(line["kind"], line["frame"]) for line in lines], [("step", name), ("moved", None)])
+            self.assertEqual(lines[0]["angle"], 75.7)
+
+
 FRAMEWORK_CHECK = r"""
 import json, sys
 from pathlib import Path
