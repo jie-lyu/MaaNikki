@@ -18,8 +18,9 @@ DIR defaults to .build/android. Reported, per measured run in DIR/phase-e-measur
     495 frames of the 2026-11-26 replay: 473 hud, 4 narration, 8 misread, and the 10 prompt frames). Also listed: each
     hud/hud_prompt frame with text the noise filters dropped near a gesture contact (move.contacts_clear: joystick,
     jump, bell), on which a step using that contact would stop.
-The screens run on one recognizer through scripts/android/replay.py (its frame, wall-time and memory limits; the
---all-frames set needs no raised limit). Run it in the foreground and never two at once.
+The screens run on one recognizer through scripts/android/replay.py; the measurement pass (OpenCV only) runs under a
+replay.Guard. Each pass gets the frame, wall-time and memory limits on its own (the --all-frames set needs no raised
+limit). Run it in the foreground and never two at once.
 """
 from __future__ import annotations
 
@@ -50,10 +51,26 @@ def main() -> int:
     replay.add_arguments(parser)
     args = parser.parse_args()
     build = Path(args.build)
+    limits = replay.limits_from(args)
+    try:
+        print(json.dumps(measure(build, limits), ensure_ascii=False, indent=1))
+        if not args.no_screens:
+            screens(build, args.all_frames, limits)
+    except replay.ReplayLimit as error:
+        print(error, file=sys.stderr)
+        return 2
+    return 0
+
+
+def measure(build: Path, limits=None) -> dict:
+    """The fixes, the tracking gate, the model, the lag and the angle formula (OpenCV only, no recognizer), under the
+    replay limits through a replay.Guard: every frame read counts."""
     import cv2
+    import replay
     from host.android import move
     from host.android.minimap import MinimapReader
 
+    guard = replay.Guard(limits or replay.Limits()).start()
     reader = MinimapReader("miraland", ROOT / "resource")
     deviations, scores, timings, gates, ratios, lags, angle_errors = [], [], [], [0, 0], [], [], []
     for folder, records in runs(build):
@@ -63,8 +80,10 @@ def main() -> int:
             before = record["before"]
             for key in ("after", "settled"):
                 observed = record.get(key)
+                guard.before_decode()
                 frame = cv2.imread(str(folder / f"{record['tag']}-{'a' if key == 'after' else 'b'}.png"))
                 if observed is None or frame is None:
+                    guard.after_frame()
                     continue
                 started = time.perf_counter()
                 fix = reader.fix(frame, (before["x"], before["y"]), move.TRACK_SEARCH)
@@ -76,6 +95,7 @@ def main() -> int:
                     gates[0] += 1
                     gates[1] += fix.reliable and math.dist((fix.x, fix.y), (before["x"], before["y"])) \
                         <= move.plausible_distance(seconds)
+                guard.after_frame()
             if record["kind"] == "camera" or record.get("mag", 1.0) != 1.0:
                 continue
             after, settled, seconds = record["after"], record["settled"], record["ms"] / 1000
@@ -86,7 +106,8 @@ def main() -> int:
                 predicted = (before["head"] + record["angle"] - 270) % 360
                 actual = move.bearing(settled["x"] - before["x"], settled["y"] - before["y"])
                 angle_errors.append((actual - predicted + 180) % 360 - 180)
-    print(json.dumps({
+    guard.finish()
+    return {
         "fixes": {"n": len(deviations), "max_deviation_from_log_u": round(max(deviations), 3),
                   "score_min": round(min(scores), 3), "score_median": round(statistics.median(scores), 3),
                   "ms_median": round(statistics.median(timings), 1), "ms_max": round(max(timings), 1)},
@@ -97,14 +118,7 @@ def main() -> int:
         "lag_u": {"n": len(lags), "max": round(max(lags), 2), "median": round(statistics.median(lags), 2)},
         "angle_error_deg": {"n": len(angle_errors), "median_abs": round(statistics.median(map(abs, angle_errors)), 1),
                             "max_abs": round(max(map(abs, angle_errors)), 1)},
-    }, ensure_ascii=False, indent=1))
-    if not args.no_screens:
-        try:
-            screens(build, args.all_frames, replay.limits_from(args))
-        except replay.ReplayLimit as error:
-            print(error, file=sys.stderr)
-            return 2
-    return 0
+    }
 
 
 LATER = ("reviews", "phase-e-walk", "heading-investigation")  # not in the --all-frames set (prefixes: every walk run)

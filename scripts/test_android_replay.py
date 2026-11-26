@@ -1,14 +1,18 @@
 """Offline tests of scripts/android/replay.py, the one supported way to replay saved frames: one recognizer for a whole
-replay, the memory, frame and wall-time limits, and everything freed on the way out (also on an exception)."""
+replay, the memory, frame and wall-time limits (also on move_frames' measurement pass), and everything freed on the
+way out: on an exception, on an abort and when setup fails half-way."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -85,8 +89,98 @@ class Fakes:
             item.stop()
 
 
+class FakeJob:
+    def __init__(self, succeeded):
+        self.succeeded = succeeded
+
+    def wait(self):
+        return self
+
+
+@contextlib.contextmanager
+def fake_framework(log, *, bundle_ok=True, bind_ok=True, connect_ok=True):
+    """Stand-in maa modules: the real probe.Recognizer, probe.frame_controller and probe.destroy_native run against
+    them and one step fails half-way. `log` gets each creation and each native destroy call, in order."""
+
+    class Native:
+        _own = True
+
+        def __init__(self):
+            self._handle = object()
+            log.append(f"create {type(self).__name__}")
+
+    class Resource(Native):
+        def __init__(self):
+            super().__init__()
+            self._custom_action_holder, self._custom_recognition_holder = {}, {}
+
+        def post_bundle(self, path):
+            return FakeJob(bundle_ok)
+
+        def register_custom_recognition(self, name, recognition):
+            self._custom_recognition_holder[name] = recognition
+            return True
+
+        def register_custom_action(self, name, action):
+            self._custom_action_holder[name] = action
+            return True
+
+    class Tasker(Native):
+        def bind(self, resource, controller):
+            self._resource_holder, self._controller_holder = resource, controller
+            return bind_ok
+
+    class Controller(Native):
+        pass
+
+    class CustomController(Controller):
+        def set_screenshot_target_short_side(self, side):
+            pass
+
+        def post_connection(self):
+            return FakeJob(connect_ok)
+
+    class CustomAction:
+        pass
+
+    def destroyer(name):
+        return lambda handle: log.append(name)
+
+    framework = SimpleNamespace(**{name: destroyer(name)
+                                   for name in ("MaaTaskerDestroy", "MaaResourceDestroy", "MaaControllerDestroy")})
+    modules = {"maa": ModuleType("maa")}
+    for name, members in (("resource", {"Resource": Resource}), ("tasker", {"Tasker": Tasker}),
+                          ("controller", {"Controller": Controller, "CustomController": CustomController}),
+                          ("custom_action", {"CustomAction": CustomAction}),
+                          ("library", {"Library": SimpleNamespace(framework=lambda: framework)})):
+        module = ModuleType(f"maa.{name}")
+        module.__dict__.update(members)
+        modules[f"maa.{name}"] = module
+    with patch.dict(sys.modules, modules), patch.object(probe, "agent_recognitions", lambda: {}), \
+            patch.dict(probe.NATIVE_DESTROYED, clear=True):
+        yield SimpleNamespace(Tasker=Tasker, Resource=Resource, Controller=Controller)
+
+
 def frames(n):
     return [Path(f"frame-{i:03d}.png") for i in range(n)]
+
+
+def no_rss():
+    return 1
+
+
+def images(folder, sizes, names=None):
+    import cv2
+    import numpy as np
+    paths = []
+    for i, size in enumerate(sizes):
+        paths.append(Path(folder, names[i] if names else f"{i}.png"))
+        cv2.imwrite(str(paths[-1]), np.full((*size, 3), i, np.uint8))
+    return paths
+
+
+def hd(image):
+    return image is not None and image.shape[:2] == (720, 1280)
 
 
 class OneRecognizerTests(unittest.TestCase):
@@ -98,7 +192,7 @@ class OneRecognizerTests(unittest.TestCase):
             return recognizer.on_one_frame(lambda captured: f"judged {captured}")
 
         with Fakes() as fakes:
-            results = replay.replay_frames(frames(40), callback, rss=lambda: 1)
+            results = replay.replay_frames(frames(40), callback, rss=no_rss)
         self.assertEqual((FakeRecognizer.built, FakeController.built), (1, 1))
         self.assertEqual(len({identity for identity, _, _ in seen}), 1)
         self.assertEqual([path for _, path, _ in seen], frames(40))
@@ -107,22 +201,31 @@ class OneRecognizerTests(unittest.TestCase):
         self.assertTrue(fakes.recognizers[0].android_layer)
         self.assertEqual(fakes.events, ["release recognizer", "destroy Controller"])  # tasker side first
 
-    def test_accept_skips_frames_without_a_callback_or_a_count(self):
-        import numpy as np
+    def test_accept_skips_frames_without_a_callback(self):
         with tempfile.TemporaryDirectory() as folder:
-            import cv2
-            paths = []
-            for i, size in enumerate(((720, 1280), (360, 640), (720, 1280))):
-                paths.append(Path(folder, f"{i}.png"))
-                cv2.imwrite(str(paths[-1]), np.full((*size, 3), i, np.uint8))
-            paths.append(Path(folder, "missing.png"))
+            paths = images(folder, [(720, 1280), (360, 640), (720, 1280)]) + [Path(folder, "missing.png")]
             with Fakes():
-                with replay.Replay(rss=lambda: 1) as session:
-                    done = [path.name for path, _ in session.run(
-                        paths, lambda r, path, image: None,
-                        accept=lambda image: image is not None and image.shape[:2] == (720, 1280))]
-                    self.assertEqual(session.frames, 2)
+                with replay.Replay(rss=no_rss) as session:
+                    done = [path.name for path, _ in session.run(paths, lambda r, path, image: None, accept=hd)]
+                    self.assertEqual((session.frames, session.guard.attempts), (2, 4))  # skipped: attempted
         self.assertEqual(done, ["0.png", "2.png"])
+
+    def test_an_open_replay_cannot_be_entered_again(self):
+        with Fakes() as fakes:
+            session = replay.Replay(rss=no_rss)
+            with session:
+                first = session.recognizer
+                with self.assertRaises(RuntimeError):
+                    with session:
+                        self.fail("entered twice")
+                self.assertIs(session.recognizer, first)  # still owned by the open block
+                self.assertEqual((FakeRecognizer.built, FakeController.built), (1, 1))  # nothing allocated
+                self.assertEqual(fakes.events, [])
+            self.assertEqual(fakes.events, ["release recognizer", "destroy Controller"])
+            self.assertEqual(first.released, 1)
+            with session:  # closed: a new block builds afresh
+                pass
+            self.assertEqual((FakeRecognizer.built, FakeController.built), (2, 2))
 
 
 class LimitTests(unittest.TestCase):
@@ -145,28 +248,92 @@ class LimitTests(unittest.TestCase):
                 replay.replay_frames(frames(3), lambda *a: self.fail("ran a frame"), rss=lambda: 4 * replay.GB)
         self.assertEqual(fakes.events, ["release recognizer", "destroy Controller"])
 
+    def test_the_last_partial_interval_is_checked_before_success(self):
+        for count, readings in ((6, [100, 2900, 3100]), (3, [100, 3100])):  # setup, every 5th frame, the end
+            with self.subTest(frames=count):
+                reads = iter(readings)
+                with Fakes() as fakes:
+                    with self.assertRaises(replay.ReplayLimit) as caught:
+                        replay.replay_frames(frames(count), lambda *a: None, rss=lambda: next(reads),
+                                             limits=replay.Limits(max_rss_bytes=3000))
+                self.assertIn(f"after {count} frames", str(caught.exception))
+                self.assertEqual(list(reads), [])
+                self.assertEqual(fakes.events, ["release recognizer", "destroy Controller"])
+
+    def test_skipped_frames_count_toward_the_memory_reads_and_the_frame_limit(self):
+        reads = []
+
+        def rss():
+            reads.append(1)
+            return 1
+
+        with tempfile.TemporaryDirectory() as folder:
+            paths = images(folder, [(360, 640)] * 6)  # all skipped by `accept`
+            with Fakes():
+                with replay.Replay(rss=rss, limits=replay.Limits(rss_every=2)) as session:
+                    self.assertEqual(list(session.run(paths, lambda *a: self.fail("ran"), accept=hd)), [])
+            self.assertEqual(len(reads), 1 + 3 + 1)  # setup, every 2 attempted decodes, the end
+            with Fakes():
+                with self.assertRaises(replay.ReplayLimit):  # an iterator of skipped frames is still stopped
+                    replay.replay_frames(iter(paths), lambda *a: self.fail("ran"), accept=hd, rss=no_rss,
+                                         limits=replay.Limits(max_frames=3))
+
+    def test_the_reported_peak_includes_the_high_water_mark(self):
+        with Fakes():
+            with replay.Replay(rss=lambda: 100, peak=lambda: 5000, limits=replay.Limits(max_rss_bytes=1000)) as s:
+                list(s.run(frames(2), lambda *a: None))
+                self.assertEqual(s.peak_rss, 5000)  # a spike between reads still shows; the guard acts on now
+
     def test_a_replay_over_more_frames_than_the_limit_is_refused_before_any_frame(self):
         with Fakes() as fakes:
             with self.assertRaises(replay.ReplayLimit) as caught:
                 replay.replay_frames(frames(11), lambda *a: self.fail("ran a frame"),
-                                     limits=replay.Limits(max_frames=10), rss=lambda: 1)
+                                     limits=replay.Limits(max_frames=10), rss=no_rss)
             self.assertIn("11 frames", str(caught.exception))
             calls = []
             with self.assertRaises(replay.ReplayLimit):  # an iterator has no length: stopped at the count
                 replay.replay_frames(iter(frames(11)), lambda r, p, i: calls.append(p),
-                                     limits=replay.Limits(max_frames=10), rss=lambda: 1)
+                                     limits=replay.Limits(max_frames=10), rss=no_rss)
         self.assertEqual(len(calls), 10)
         self.assertEqual(fakes.events, ["release recognizer", "destroy Controller"] * 2)
 
-    def test_the_wall_time_limit_stops_the_replay(self):
-        clock = iter([0.0, 1.0, 2.0, 7.0, 8.0])  # the start, then one read before each frame
-        calls = []
-        with Fakes(), patch.object(replay, "time", SimpleNamespace(monotonic=lambda: next(clock))):
+    def test_the_wall_time_is_checked_after_each_callback(self):
+        clock = iter([0.0, 0.5, 1.0, 1.5, 2.0, 7.0])  # start, after setup, then before and after each frame
+        results, calls = [], []
+        with Fakes() as fakes, patch.object(replay, "time", SimpleNamespace(monotonic=lambda: next(clock))):
             with self.assertRaises(replay.ReplayLimit) as caught:
-                replay.replay_frames(frames(5), lambda r, p, i: calls.append(p),
-                                     limits=replay.Limits(max_seconds=5), rss=lambda: 1)
-        self.assertEqual(len(calls), 2)
+                with replay.Replay(rss=no_rss, limits=replay.Limits(max_seconds=5)) as session:
+                    for item in session.run(frames(5), lambda r, p, i: calls.append(p)):
+                        results.append(item)
+        self.assertEqual((len(calls), len(results)), (2, 1))  # the slow second frame ran, its result is not given
         self.assertIn("wall-time", str(caught.exception))
+        self.assertEqual(fakes.events, ["release recognizer", "destroy Controller"])
+
+    def test_the_wall_time_starts_before_setup(self):
+        clock = iter([0.0, 9.0])  # setup took 9 s
+        with Fakes() as fakes, patch.object(replay, "time", SimpleNamespace(monotonic=lambda: next(clock))):
+            with self.assertRaises(replay.ReplayLimit):
+                with replay.Replay(rss=no_rss, limits=replay.Limits(max_seconds=5)):
+                    self.fail("entered")
+        self.assertEqual(fakes.events, ["release recognizer", "destroy Controller"])
+
+    def test_limits_must_be_finite_and_above_zero(self):
+        for field, value in (("max_seconds", math.nan), ("max_seconds", math.inf), ("max_seconds", 0),
+                             ("max_seconds", -1), ("max_rss_bytes", math.inf), ("max_rss_bytes", 0),
+                             ("max_frames", 0), ("max_frames", 1.5), ("max_frames", True), ("rss_every", 0)):
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(ValueError) as caught:
+                    replay.Limits(**{field: value})
+                self.assertIn(field, str(caught.exception))
+        import argparse
+        parser = argparse.ArgumentParser()
+        replay.add_arguments(parser)
+        for argv in (["--max-seconds", "nan"], ["--max-seconds", "inf"], ["--max-seconds", "0"],
+                     ["--max-frames", "0"], ["--max-rss-mb", "-5"], ["--max-frames", "x"]):
+            with self.subTest(argv=argv):
+                with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
+                    parser.parse_args(argv)
+                self.assertIn(argv[0], err.getvalue())
 
     def test_the_command_line_limits(self):
         import argparse
@@ -182,6 +349,55 @@ class LimitTests(unittest.TestCase):
         rss = replay.current_rss()
         self.assertGreater(rss, 1 << 20)  # an interpreter is at least a few MB
         self.assertLess(rss, 64 * replay.GB)
+        self.assertGreaterEqual(replay.process_peak_rss(), rss // 2)
+
+
+class MeasurePassTests(unittest.TestCase):
+    """move_frames' measurement pass (OpenCV only, no recognizer) under the same limits."""
+
+    @staticmethod
+    def build(folder, records):
+        run = Path(folder, "phase-e-measure", "m2-test")
+        run.mkdir(parents=True)
+        lines = []
+        for i in range(records):
+            tag = f"t{i:02d}"
+            images(run, [(72, 128), (72, 128)], [f"{tag}-a.png", f"{tag}-b.png"])
+            lines.append(json.dumps({"kind": "gesture", "tag": tag, "ms": 1000, "angle": 270, "mag": 1.0,
+                                     "before": {"x": 0, "y": 0, "head": 0}, "after": {"x": 0, "y": -2},
+                                     "settled": {"x": 0, "y": -3}}))
+        (run / "results.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return Path(folder)
+
+    @staticmethod
+    def reader(*_args):
+        fix = SimpleNamespace(x=0.0, y=-2.5, score=0.8, reliable=True)
+        return SimpleNamespace(fix=lambda frame, hint, search: fix)
+
+    def test_the_measurement_pass_runs_under_the_replay_limits(self):
+        import move_frames
+        reads = []
+
+        def rss():
+            reads.append(1)
+            return 1
+
+        with tempfile.TemporaryDirectory() as folder:
+            build = self.build(folder, 3)  # 6 frames read
+            with patch("host.android.minimap.MinimapReader", self.reader), patch.object(replay, "current_rss", rss):
+                with self.assertRaises(replay.ReplayLimit):
+                    move_frames.measure(build, replay.Limits(max_frames=4))
+                reads.clear()
+                report = move_frames.measure(build, replay.Limits(rss_every=2))
+                self.assertEqual(report["fixes"]["n"], 6)
+                self.assertEqual(len(reads), 3 + 1)  # every 2 frames read, then the end
+                with patch.object(sys, "argv", ["move_frames.py", "--build", str(build), "--no-screens",
+                                                "--max-frames", "1"]), \
+                        contextlib.redirect_stdout(io.StringIO()) as out, \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    self.assertEqual(move_frames.main(), 2)  # --no-screens is still under the limits
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("1-frame limit", err.getvalue())
 
 
 class ReleaseTests(unittest.TestCase):
@@ -192,7 +408,7 @@ class ReleaseTests(unittest.TestCase):
 
         with Fakes() as fakes:
             with self.assertRaises(ValueError):
-                replay.replay_frames(frames(5), callback, rss=lambda: 1)
+                replay.replay_frames(frames(5), callback, rss=no_rss)
         self.assertEqual(fakes.recognizers[0].released, 1)
         self.assertEqual(fakes.events, ["release recognizer", "destroy Controller"])
 
@@ -202,19 +418,57 @@ class ReleaseTests(unittest.TestCase):
 
         with Fakes() as fakes, patch.object(probe, "read_frame", unreadable):
             with self.assertRaises(probe.ProbeError):
-                replay.replay_frames(frames(2), lambda *a: None, rss=lambda: 1)
+                replay.replay_frames(frames(2), lambda *a: None, rss=no_rss)
         self.assertEqual(fakes.events, ["release recognizer", "destroy Controller"])
 
-    def test_the_controller_is_freed_when_the_recognizer_cannot_be_built(self):
-        with Fakes() as fakes, patch.object(probe, "Recognizer", side_effect=probe.ProbeError("no bundle")):
-            with self.assertRaises(probe.ProbeError):
-                with replay.Replay(rss=lambda: 1):
+    def test_a_bind_failure_frees_the_tasker_the_resource_and_the_controller(self):
+        log = []
+        with fake_framework(log, bind_ok=False):
+            with self.assertRaises(probe.ProbeError) as caught:
+                with replay.Replay(rss=no_rss):
                     self.fail("entered")
-        self.assertEqual(fakes.events, ["destroy Controller"])
+            destroyed = dict(probe.NATIVE_DESTROYED)
+        self.assertIn("bind", str(caught.exception))
+        self.assertEqual(log, ["create FrameController", "create Resource", "create Tasker",
+                               "MaaTaskerDestroy", "MaaResourceDestroy", "MaaControllerDestroy"])
+        self.assertEqual(destroyed, {"MaaTaskerDestroy": 1, "MaaResourceDestroy": 1, "MaaControllerDestroy": 1})
+
+    def test_a_resource_that_does_not_load_is_freed_inside_the_constructor(self):
+        log = []
+        with fake_framework(log, bundle_ok=False):
+            with self.assertRaises(probe.ProbeError):
+                probe.Recognizer(SimpleNamespace(), android_layer=True)
+        self.assertEqual(log, ["create Resource", "MaaResourceDestroy"])  # no tasker was made
+
+    def test_a_controller_that_does_not_connect_is_freed_inside_the_factory(self):
+        log = []
+        with fake_framework(log, connect_ok=False):
+            with self.assertRaises(probe.ProbeError):
+                probe.frame_controller()
+            with patch.object(probe, "read_frame", side_effect=probe.ProbeError("unreadable")):
+                with self.assertRaises(probe.ProbeError):
+                    probe.frame_controller(Path("missing.png"))
+        self.assertEqual(log, ["create FrameController", "MaaControllerDestroy"])  # unreadable frame: nothing made
+
+    def test_destroy_runs_once_and_only_for_an_owned_live_handle(self):
+        log = []
+        with fake_framework(log) as kinds:
+            tasker, borrowed = kinds.Tasker(), kinds.Tasker()
+            borrowed._own = False
+            handle = borrowed._handle
+            self.assertTrue(probe.destroy_native(tasker))
+            self.assertIsNone(tasker._handle)
+            self.assertFalse(probe.destroy_native(tasker))  # already freed: no second call
+            self.assertFalse(probe.destroy_native(borrowed))
+            self.assertIs(borrowed._handle, handle)  # not freed, so not cleared
+            self.assertEqual(dict(probe.NATIVE_DESTROYED), {"MaaTaskerDestroy": 1})
+            with self.assertRaises(TypeError):
+                probe.destroy_native(object())
+        self.assertEqual([entry for entry in log if entry.startswith("Maa")], ["MaaTaskerDestroy"])
 
     def test_run_outside_the_block_is_refused(self):
         with Fakes():
-            session = replay.Replay(rss=lambda: 1)
+            session = replay.Replay(rss=no_rss)
             with session:
                 pass
             with self.assertRaises(RuntimeError):
@@ -232,6 +486,21 @@ sys.path.insert(0, str(repo / "agent"))
 sys.path.insert(0, str(repo / "scripts" / "android"))
 import probe, replay
 from host.android import actions
+from maa.tasker import Tasker
+
+# a real half-built recognizer: the bind fails after the resource and the tasker exist
+bind = Tasker.bind
+Tasker.bind = lambda self, resource, controller: bind(self, resource, controller) and False
+controller = probe.frame_controller()
+try:
+    probe.Recognizer(controller)
+    partial_error = None
+except probe.ProbeError as error:
+    partial_error = str(error)
+Tasker.bind = bind
+partial = dict(probe.NATIVE_DESTROYED)
+probe.destroy_native(controller)
+probe.NATIVE_DESTROYED.clear()
 
 built = []
 original = probe.Recognizer.__init__
@@ -260,8 +529,9 @@ with replay.Replay() as session:
     tasker, resource = recognizer.tasker, recognizer.resource
     results = [[path.name] + result for path, result in session.run(
         [paths["hud"], paths["page"], paths["hud"]], callback)]
-    peak = session.peak_rss
-print(json.dumps({"results": results, "built": len(built), "peak_rss": peak,
+peak = session.peak_rss
+print(json.dumps({"results": results, "built": len(built), "peak_rss": peak, "destroyed": probe.NATIVE_DESTROYED,
+                  "partial": partial, "partial_error": partial_error,
                   "freed": [tasker._handle is None, resource._handle is None, controller._handle is None,
                             recognizer.tasker is None, session.recognizer is None]}))
 """
@@ -269,8 +539,9 @@ print(json.dumps({"results": results, "built": len(built), "peak_rss": peak,
 
 @unittest.skipUnless((ROOT / "maafw").exists(), "needs the MaaFramework runtime in ./maafw")
 class FrameworkTests(unittest.TestCase):
-    """The real framework on three composed frames (hud, page, hud) in a fresh interpreter: one recognizer, each
-    capture is the frame just shown, and the tasker, resource and controller are freed when the block ends."""
+    """The real framework in a fresh interpreter: a recognizer whose bind fails frees its tasker and resource; then
+    three composed frames (hud, page, hud) on one recognizer, each capture the frame just shown, and one native
+    destroy each for the tasker, the resource and the controller when the block ends."""
 
     def test_one_recognizer_sees_each_frame_and_is_freed(self):
         if not (ROOT / "resource_android").is_dir():
@@ -287,6 +558,10 @@ class FrameworkTests(unittest.TestCase):
                                               ["hud.png", "hud", True]])
         self.assertEqual(outcome["built"], 1)
         self.assertEqual(outcome["freed"], [True] * 5)
+        self.assertEqual(outcome["destroyed"],
+                         {"MaaTaskerDestroy": 1, "MaaResourceDestroy": 1, "MaaControllerDestroy": 1})
+        self.assertIn("bind", outcome["partial_error"])
+        self.assertEqual(outcome["partial"], {"MaaTaskerDestroy": 1, "MaaResourceDestroy": 1})
         self.assertLess(outcome["peak_rss"], replay.Limits().max_rss_bytes)
 
 

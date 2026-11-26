@@ -373,6 +373,14 @@ class Recognizer:
     ACTION = "android_probe.recognize"
 
     def __init__(self, controller, *, android_layer: bool = False):
+        self.tasker = self.resource = self._action = None
+        try:
+            self._build(controller, android_layer)
+        except BaseException:
+            self.release()  # a half-built recognizer: the tasker, then the resource (the controller is the caller's)
+            raise
+
+    def _build(self, controller, android_layer: bool) -> None:
         from maa.custom_action import CustomAction
         from maa.resource import Resource
         from maa.tasker import Tasker
@@ -472,13 +480,15 @@ class Recognizer:
         tasker, resource = getattr(self, "tasker", None), getattr(self, "resource", None)
         self.tasker = self.resource = self._action = None  # the action's closure holds self: break the cycle
         self._request, self._results, self.last_frame = ([], False, {}), None, None
-        if tasker is not None:
-            destroy_native(tasker)
-            tasker._resource_holder = tasker._controller_holder = None
-        if resource is not None:
-            destroy_native(resource)
-            resource._custom_action_holder.clear()
-            resource._custom_recognition_holder.clear()
+        try:
+            if tasker is not None:
+                destroy_native(tasker)
+                tasker._resource_holder = tasker._controller_holder = None
+        finally:
+            if resource is not None:
+                destroy_native(resource)
+                for holder in ("_custom_action_holder", "_custom_recognition_holder"):
+                    getattr(resource, holder, {}).clear()
 
 
 def judged(name: str, reco) -> dict:
@@ -686,18 +696,28 @@ def frame_controller(path: Path | None = None):
 
         key_down = key_up = click_key
 
+    image = read_frame(path) if path is not None else None  # before anything native exists
     controller = FrameController()
-    if path is not None:
-        controller.show(read_frame(path))
-    controller.set_screenshot_target_short_side(FRAME[1])
-    if not controller.post_connection().wait().succeeded:
-        raise ProbeError(f"could not load {path} as a frame" if path is not None else "could not connect the frames")
+    try:
+        controller.show(image)
+        controller.set_screenshot_target_short_side(FRAME[1])
+        if not controller.post_connection().wait().succeeded:
+            raise ProbeError(f"could not load {path} as a frame" if path is not None else "could not connect")
+    except BaseException:
+        destroy_native(controller)
+        raise
     return controller
 
 
-def destroy_native(obj) -> None:
+NATIVE_DESTROYED: dict[str, int] = {}  # destroy calls destroy_native made, by maafw function (tests read it)
+
+
+def destroy_native(obj) -> bool:
     """Free a maafw Tasker, Resource or Controller now instead of whenever the garbage collector gets to it (the
-    binding frees them only in __del__); its __del__ then does nothing. Free a tasker before what it is bound to."""
+    binding frees them only in __del__); its __del__ then does nothing. Free a tasker before what it is bound to.
+
+    Only an object that owns a live handle is destroyed; its handle is then cleared, and only then, so a cleared
+    handle means a destroy call ran. Returns whether one did."""
     from maa.controller import Controller
     from maa.library import Library
     from maa.resource import Resource
@@ -706,10 +726,12 @@ def destroy_native(obj) -> None:
     for kind, destroy in ((Tasker, "MaaTaskerDestroy"), (Resource, "MaaResourceDestroy"),
                           (Controller, "MaaControllerDestroy")):
         if isinstance(obj, kind):
-            if getattr(obj, "_handle", None) and getattr(obj, "_own", False):
-                getattr(Library.framework(), destroy)(obj._handle)
+            if not (getattr(obj, "_handle", None) and getattr(obj, "_own", False)):
+                return False
+            getattr(Library.framework(), destroy)(obj._handle)
             obj._handle = None
-            return
+            NATIVE_DESTROYED[destroy] = NATIVE_DESTROYED.get(destroy, 0) + 1
+            return True
     raise TypeError(f"not a maafw object: {type(obj).__name__}")
 
 
