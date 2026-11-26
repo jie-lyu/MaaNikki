@@ -10,8 +10,10 @@ read the result banner -> the modal's ✕ -> back to the HUD (strict back-arrow 
 The codes come from the shared collection (daily/redeem_codes.collect_candidate_codes with the task's options; an
 Android start submits empty options, so online sync and no manual codes). The PC class is not used: it reads the UID
 the PC way (the HUD footer, then ui.main()) for the account record and its run() reads and writes the host clipboard.
-The phone flow keeps its own record (Record below) in the data directory, not per game account: the phone client's
-UID is not read yet.
+The phone flow keeps its own record (Record below) per game account: back on the HUD at the start, the account is told
+from the UID in the HUD's corner (host.android.account.identify: two separate frames that agree, nothing sent) before
+the record is read; when it cannot be told the task refuses (nothing submitted, nothing skipped). The record of the
+data directory kept before that split (config/android/redeem_codes.json) belongs to an unknown account and is not read.
 
 What the frames show (1280x720): the gear on the menu's bottom bar ~(633,668); 设置 opens on 图像 (its 「基础设置」
 header); the 其他 tab label ~[82,600,55,32]; on 其他 the 兑换码 row is cut by the list's bottom fade until the list is
@@ -89,26 +91,31 @@ DISMISS_POINT = (600, 705)
 DISMISS_CLEAR = [480, 662, 240, 58]  # no text may be read here on either tap frame
 AFTER_DISMISS_WAIT = 5
 
-RECORD_FILE = ("config", "android", "redeem_codes.json")
+RECORD_NAME = "redeem_codes.json"  # per game account: account.record_path
+LEGACY_RECORD_FILE = ("config", "android", "redeem_codes.json")  # before the per-account split: never read
 RECORD_OUTCOMES = frozenset({"redeemed", "already_used", "expired", "cooldown"})
 
 
 class Record:
-    """The codes this data directory has seen an outcome for on the Android client (the PC keeps them per game account
-    in AccountState). Same skip rules as the PC: redeemed and already used codes are skipped, expired ones unless
-    entered manually; a cooldown is kept as evidence only and tried again next run."""
+    """The codes one game account (``key``: host.android.account) has seen an outcome for on the Android client (the
+    PC keeps them per game account in AccountState). Same skip rules as the PC: redeemed and already used codes are
+    skipped, expired ones unless entered manually; a cooldown is kept as evidence only and tried again next run."""
 
-    def __init__(self, root):
-        self.path = Path(root).joinpath(*RECORD_FILE)
+    def __init__(self, root, key):
+        from host.android.account import record_path
+        self.key = key
+        self.path = record_path(root, key, RECORD_NAME)
 
     def load(self) -> dict:
         if not self.path.is_file():
-            return {"schema_version": 1, "scope": "android_data_directory", "items": {}}
+            return {"schema_version": 1, "scope": "android_game_account", "account": self.key, "items": {}}
         data = json.loads(self.path.read_text(encoding="utf-8-sig"))
         items = data.get("items") if isinstance(data, dict) else None
         if not isinstance(items, dict) or any(not isinstance(v, dict) or v.get("outcome") not in RECORD_OUTCOMES
                                               for v in items.values()):
             raise ValueError("安卓兑换码记录无效")
+        if data.get("account") != self.key:  # a file copied from another account's folder
+            raise ValueError("安卓兑换码记录不属于这个游戏账号")
         return data
 
     def outcomes(self) -> dict:
@@ -682,20 +689,38 @@ def guarded(rt, step) -> bool:
     return False
 
 
+def identify(rt):
+    """The account key (host.android.account.identify on the HUD just reached), None when stopped; an account that
+    cannot be told refuses the task with its frames saved: nothing submitted, nothing skipped, nothing recorded."""
+    from host.android import account
+    try:
+        return account.identify(rt)
+    except account.Unidentified as error:
+        for index, frame in enumerate(error.frames):
+            rt.diagnostic(f"android_redeem_stop_{index}", str(error), image=frame)
+        fail(rt, f"{account.refusal(error)}，不知道该用哪个账号的兑换码记录，没有兑换")
+        return None
+
+
 def run(rt, collected=None) -> bool:
     from app_paths import DATA_ROOT
-    record = Record(DATA_ROOT)
+    # Back on the HUD first (a stop after the last code may have left the modal open), then the account from the HUD,
+    # and only then the record: which codes are pending depends on whose record it is.
+    if not guarded(rt, lambda: to_hud(rt, "开始前回到大世界", any_page=True)) or rt.stopped:
+        return False
+    key = identify(rt)
+    if key is None or rt.stopped:
+        return False
     try:
+        record = Record(DATA_ROOT, key)
         pending = pending_codes(candidates(rt) if collected is None else collected, record.outcomes())
     except (OSError, ValueError) as error:
         return fail(rt, f"读不了安卓兑换码记录（{error}）")
     if not pending:
         rt.log("兑换码领取：暂无待兑换的新兑换码，跳过。")
-        # Still checked: a stop after the last code may have left the modal open.
-        return guarded(rt, lambda: to_hud(rt, "确认已回到大世界", any_page=True))
+        return True
     rt.log(f"兑换码领取：待尝试 {len(pending)} 个兑换码。")
-    done = guarded(rt, lambda: to_hud(rt, "开始前回到大世界", any_page=True) and open_settings(rt)
-                   and open_modal(rt) and redeem_all(rt, record, pending))
+    done = guarded(rt, lambda: open_settings(rt) and open_modal(rt) and redeem_all(rt, record, pending))
     # The way back only after a successful result: after a stop, a guard refusal or a fatal error nothing more is sent.
     if not done or rt.stopped:
         return False

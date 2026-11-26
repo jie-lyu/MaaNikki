@@ -1,34 +1,36 @@
 """Dev-only Android entry MaaNikki_AndroidCrystalRoute: the first 星海 crystal route on the phone client, end to end.
 
-HUD -> big map on 星海 -> the card read: today's bell rung or not, positively (teleport.card_state: exactly the observed
-not-rung message, or exactly the PC card's three counters; anything else: stop, nothing pressed) -> not rung: unless
-this data directory already recorded a bell attempt for today's game day (then stop: the bell needs a manual
-check), teleport to 无界枢纽, the minimap fix confirms the hub, the attempt recorded, the bell pressed once (~4 s,
-gesture.bell_step, the one gesture allowed past 1.5 s) decided and confirmed on clean HUD frames with the bell button
-recognised, the map opened again and the card must now read rung (still not rung: stop, never a second press) ->
-teleport to 星梦群屿·主岛 -> xinghai_crystal_3 walked with host.android.move (the teleport point as the first position
-hint, the route's start radius, its jumps and its wait) -> after the walk, unless it ended on a screen that stops all
-input, the map card read again for the 星光结晶 count and the map left by its back arrow onto a confirmed HUD (the
-character stays where the walk ended: on the route, on the ground). Success: the walk arrived, both counts read, the
-final HUD confirmed and no stop requested.
+HUD (the game account told from the UID in its corner, host.android.account.identify, nothing sent) -> big map on 星海 ->
+the card read: today's bell rung or not, positively (teleport.card_state: exactly the observed not-rung message, or
+exactly the PC card's three counters; anything else: stop, nothing pressed) -> not rung: stop when the account could not
+be told (nothing pressed: whose bell record applies is unknown), and unless this account already recorded a bell attempt
+for today's game day (then stop: the bell needs a manual check), teleport to 无界枢纽, the minimap fix confirms the hub, the
+attempt recorded, the bell pressed once (~4 s, gesture.bell_step, the one gesture allowed past 1.5 s) decided and
+confirmed on clean HUD frames with the bell button recognised, the map opened again and the card must now read rung
+(still not rung: stop, never a second press) -> teleport to 星梦群屿·主岛 -> xinghai_crystal_3 walked with host.android.move
+(the teleport point as the first position hint, the route's start radius, its jumps and its wait) -> after the walk,
+unless it ended on a screen that stops all input, the map card read again for the 星光结晶 count and the map left by its
+back arrow onto a confirmed HUD (the character stays where the walk ended: on the route, on the ground). Success: the
+walk arrived, both counts read, the final HUD confirmed and no stop requested.
 
 The run starts from the open world: before the map opens the map is not known; the tap that opens it may be decided
 on a name-only tracker (a restart on 星海), and the map must then show the 星海 card positively (Teleport.open_map);
-walking and the bell accept a name-only tracker only on 星海 (move.first_frame_rule), which the teleports establish. Nothing on the route is a prompt to tap: route 3 has only plain points and one wait, and its crystals
-are collected by walking through them (as on PC, navigation.daily_route: crystal routes complete by traversal).
+walking and the bell accept a name-only tracker only on 星海 (move.first_frame_rule), which the teleports establish.
+Nothing on the route is a prompt to tap: route 3 has only plain points and one wait, and its crystals are collected by walking through them (as on PC, navigation.daily_route: crystal routes complete by traversal).
 
 This version always walks route 3 (PC picks one of eight routes from the crystal markers the bell reveals on the map;
 reading those markers on the phone is not done yet), so on a day the crystals lie on another route it collects
 little or nothing, which is expected.
 
-The bell record (BellRecord): config/android/bell_attempts.json in the data directory, keyed by the game day
-(account_state.game_day: 04:00 UTC+8) only, not by game account: the Android tasks do not read the phone client's UID
-yet (as the 兑换码 record). It is written right before the press is handed to the device path and removed only when
-the device input count (DeviceInputState.inputs, counted right before a touch's first contact goes down) shows that
-nothing went down; a press that may have gone down stays recorded, whatever it raised. The card, the record's key
-and the press belong to one game day: the card's from its own captures' times (Teleport.card), no press within
-RESET_WINDOW_MIN of the 04:00 reset (inclusive) or once the day changed, and the press's deadline capped at the next
-window's start. A record dated after the current game day is refused, never pruned.
+The bell record (BellRecord): per game account, config/android/accounts/<key>/bell_attempts.json in the data directory
+(host.android.account.record_path), keyed by the game day (account_state.game_day: 04:00 UTC+8). The record of the data
+directory kept before that split (config/android/bell_attempts.json) belongs to an unknown account and is not read. It
+is written right before the press is handed to the device path and removed only when the device input count
+(DeviceInputState.inputs, counted right before a touch's first contact goes down) shows that nothing went down; a press
+that may have gone down stays recorded, whatever it raised. The card, the record's key and the press belong to one game
+day: the card's from its own captures' times (Teleport.card), no press within RESET_WINDOW_MIN of the 04:00 reset
+(inclusive) or once the day changed, and the press's deadline capped at the next window's start. A record dated after
+the current game day is refused, never pruned.
 
 Never a user task, gated like MaaNikki_AndroidWalkProbe: its pipeline node exists only in
 resource_android/pipeline/android_crystal_route.json; it is not in agent/host/android/tasks.json, interface.json or any
@@ -63,15 +65,17 @@ BELL_S = 4.0
 AT_POINT_U = 15.0  # the first minimap fix after a teleport lies this close to the point (the walker's own trust aside)
 AFTER_BELL_WAIT = 15.0
 WALK_READ = ("arrived", "blocked", "timeout", "lost")  # outcomes after which the map may still be opened to read
-RECORD_FILE = ("config", "android", "bell_attempts.json")
+RECORD_NAME = "bell_attempts.json"  # per game account: account.record_path
+LEGACY_RECORD_FILE = ("config", "android", "bell_attempts.json")  # before the per-account split: never read
 RECORD_STATES = frozenset({"pressing", "pressed", "interrupted"})
 RESET_MINUTE = 4 * 60  # the daily reset, 04:00 UTC+8 (account_state.game_day)
 RESET_WINDOW_MIN = 10  # no press from 03:50 to 04:10
 MANUAL = "今天已经尝试过按铃（有当天的记录），没有再按；请手动打开星海地图看卡片，仍显示尚未召唤摇铃就手动摇一次铃"
 RECORD_BROKEN = "安卓按铃记录读不出或写不进去，没有按铃"
 RECORD_FUTURE = ("安卓按铃记录里有比今天还晚的日期（系统时间可能被调回过，或记录文件是从别处恢复的），没有按铃；"
-                 "请确认后删除数据目录里的 config/android/bell_attempts.json")
+                 "请确认后删除数据目录里这个账号的 config/android/accounts/<账号>/bell_attempts.json")
 RECORD_KEEP = 14  # days kept (the day being reserved always among them)
+UNIDENTIFIED = "认不出现在登录的是哪个游戏账号"
 
 
 def checkpoint(name: str) -> dict:
@@ -86,8 +90,7 @@ def checkpoint(name: str) -> dict:
 
 
 def record_key(day) -> str:
-    """The key of a bell attempt in the record: the game day alone, for this data directory. The one place the key
-    is made: once the phone client's UID is read from the HUD, the account joins it here (per-account records). Keys
+    """The key of a bell attempt in one account's record: the game day (the account is the record's folder). Keys
     sort in day order (ISO dates; BellRecord compares them for pruning and future-dated entries)."""
     return str(day)
 
@@ -97,21 +100,27 @@ class RecordError(Exception):
 
 
 class BellRecord:
-    """The bell attempts of this data directory, by game day (see the module's docstring)."""
+    """The bell attempts of one game account (``key``: host.android.account), by game day (see the module's
+    docstring)."""
 
-    def __init__(self, root):
-        self.path = Path(root).joinpath(*RECORD_FILE)
+    def __init__(self, root, key):
+        from host.android.account import record_path
+        self.key = key
+        try:
+            self.path = record_path(root, key, RECORD_NAME)
+        except ValueError as error:
+            raise RecordError(RECORD_BROKEN) from error
 
     def load(self) -> dict:
         if not self.path.is_file():
-            return {"schema_version": 1, "scope": "android_data_directory", "attempts": {}}
+            return {"schema_version": 1, "scope": "android_game_account", "account": self.key, "attempts": {}}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError) as error:
             raise RecordError(RECORD_BROKEN) from error
         attempts = data.get("attempts") if isinstance(data, dict) else None
         if not isinstance(attempts, dict) or any(not isinstance(v, dict) or v.get("state") not in RECORD_STATES
-                                                 for v in attempts.values()):
+                                                 for v in attempts.values()) or data.get("account") != self.key:
             raise RecordError(RECORD_BROKEN)
         return data
 
@@ -152,10 +161,12 @@ class BellRecord:
 
 
 class Run:
-    def __init__(self, rt, *, reader=None, world=None, io=None, record=None):
+    def __init__(self, rt, *, reader=None, world=None, io=None, record=None, identify=None):
         self.rt = rt
         self.map = Teleport(rt, world, io=io, reader=reader, now=lambda: now_utc())
         self._record = record
+        self._identify = identify  # host.android.account.identify unless given (tests)
+        self.account_key, self.unidentified = None, None  # set by identify_account at the start
 
     @property
     def reader(self):
@@ -167,10 +178,38 @@ class Run:
 
     @property
     def record(self) -> BellRecord:
+        """The bell record of the account told at the start; RecordError without one (nothing is pressed)."""
+        if self.account_key is None:
+            raise RecordError(UNIDENTIFIED)
         if self._record is None:
             from app_paths import DATA_ROOT
-            self._record = BellRecord(DATA_ROOT)
+            self._record = BellRecord(DATA_ROOT, self.account_key)
+        if self._record.key != self.account_key:
+            raise RecordError(RECORD_BROKEN)
         return self._record
+
+    def identify_account(self) -> bool:
+        """The account from the HUD at the start (host.android.account.identify; nothing sent). False when the run
+        stopped; an account that cannot be told is kept (unidentified) and refuses the press when one is needed."""
+        from host.android import account
+        try:
+            key = (self._identify or account.identify)(self.rt)
+        except account.Unidentified as error:
+            self.unidentified = error
+            say(self.rt, f"{account.refusal(error)}：今天的铃如果还没召唤，这次不会按。")
+            return not stopping(self.rt)
+        if key is None:
+            return False
+        self.account_key = key
+        return True
+
+    def refuse_unidentified(self):
+        """Stop (nothing pressed) when the account was not told: whose bell record applies is unknown."""
+        if self.account_key is None:
+            from host.android import account
+            error = self.unidentified
+            reason = account.refusal(error) if error is not None else UNIDENTIFIED
+            raise Stop(f"{reason}，不知道是哪个账号的按铃记录，没有按铃", list(getattr(error, "frames", ())))
 
     # -- the bell --
 
@@ -214,6 +253,7 @@ class Run:
         from host.android import gesture, touch_point
         from host.android.move import MAX_DECISION_AGE_S
         from task_control import ForegroundChanged
+        self.refuse_unidentified()
         same_day(day)
         if self.record.attempt(day) is not None:
             raise Stop(MANUAL, [])
@@ -274,11 +314,14 @@ class Run:
             raise NavigationError("读不出 3 号星光结晶路线，没有开始。")
         island = checkpoint((route.document.get("teleport") or {}).get("name", ""))
         hub = checkpoint(HUB)
+        if not self.identify_account():
+            return False
         card = self.open_card(None)
         if card is None:
             return False
         day = self.map.card_day  # the card's own day (its captures): the record's key, the only day to press on
         if card.kind == "not_rung":
+            self.refuse_unidentified()
             same_day(day, [self.map.card_frame])
             if self.record.attempt(day) is not None:
                 raise Stop(MANUAL, [self.map.card_frame])

@@ -850,16 +850,18 @@ class FakeMap:
         return "hud look" if self._leave else None
 
 
+ACCOUNT = "0123456789abcdef"  # the account key host.android.account.identify gives in these runs
 SAFE_NOON = __import__("datetime").datetime(2026, 11, 26, 4, 0, tzinfo=__import__("datetime").timezone.utc)  # 12:00 UTC+8
 
 
 def route_run(cards, *, outcome="arrived", ring=True, record=None, leave=True, user_stop=False,
-              stop_after_walk=False, clock=None):
+              stop_after_walk=False, clock=None, identify=None):
     rt = SimpleNamespace(stopped=False, logs=[], _frame_still_valid=Mock(return_value=True),
                          pause=Mock(return_value=True), diagnostic=Mock(), TOUCH_KEY_ATTEMPTS=3)
     rt.log = lambda text, detail=False: rt.logs.append(text)
-    record = record or crystal_route.BellRecord(tempfile.mkdtemp())
-    run = crystal_route.Run(rt, reader=READER, world=FakeWorld(), io=HudIo(), record=record)
+    record = record or crystal_route.BellRecord(tempfile.mkdtemp(), ACCOUNT)
+    run = crystal_route.Run(rt, reader=READER, world=FakeWorld(), io=HudIo(), record=record,
+                            identify=identify or (lambda rt_: ACCOUNT))
     run.map = FakeMap(cards, leave=leave)
     rings, walked = [], []
     times = iter(clock) if clock is not None else None
@@ -917,7 +919,7 @@ class RouteTests(unittest.TestCase):
 
     def test_an_attempt_recorded_today_is_never_pressed_again(self):
         # Review round 1, finding 2: a second run (restart) the same game day with the card still not rung.
-        record = crystal_route.BellRecord(tempfile.mkdtemp())
+        record = crystal_route.BellRecord(tempfile.mkdtemp(), ACCOUNT)
         _result, _rt, _calls, rings = route_run([Card("not_rung"), Card("not_rung")], record=record)
         self.assertEqual(rings, ["无界枢纽"])
         result, rt, calls, rings = route_run([Card("not_rung")], record=record)
@@ -926,6 +928,34 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(calls, ["open", "region", "card"])
         self.assertIn(crystal_route.MANUAL, rt.logs[-1])
         self.assertEqual(rt.diagnostic.call_args.kwargs["image"], "card frame")
+
+    def test_an_account_that_cannot_be_told_never_presses(self):
+        # Per-account bell records: the account from the HUD at the start; when it cannot be told a not-rung card
+        # stops before any teleport or press (whose record applies is unknown); a rung card needs no record.
+        from host.android import account
+
+        def unidentified(rt_):
+            raise account.Unidentified("左下角没有读到 UID", ["hud frame"])
+        record = crystal_route.BellRecord(tempfile.mkdtemp(), ACCOUNT)
+        result, rt, calls, rings = route_run([Card("not_rung")], identify=unidentified, record=record)
+        self.assertFalse(result)
+        self.assertEqual((rings, calls), ([], ["open", "region", "card"]))
+        self.assertIn("认不出现在登录的是哪个游戏账号（左下角没有读到 UID），不知道是哪个账号的按铃记录，没有按铃", rt.logs[-1])
+        self.assertEqual(rt.diagnostic.call_args.kwargs["image"], "hud frame")
+        self.assertFalse(record.path.exists())
+        result, rt, _calls, rings = route_run([RUNG4, RUNG9], identify=unidentified)
+        self.assertTrue(result, rt.logs)
+        self.assertEqual(rings, [])
+        self.assertTrue(any("认不出现在登录的是哪个游戏账号" in line for line in rt.logs))
+        result, rt, calls, rings = route_run([Card("not_rung")], identify=lambda rt_: None)  # stopped: nothing more
+        self.assertEqual((result, calls, rings), (False, [], []))
+
+    def test_another_accounts_attempt_does_not_block_this_one(self):
+        root = tempfile.mkdtemp()
+        crystal_route.BellRecord(root, "fedcba9876543210").mark(DAY, "pressed")
+        record = crystal_route.BellRecord(root, ACCOUNT)
+        _result, _rt, _calls, rings = route_run([Card("not_rung"), RUNG4, RUNG9], record=record)
+        self.assertEqual(rings, ["无界枢纽"])
 
     def test_an_unreadable_card_stops_before_any_teleport_or_bell(self):
         result, rt, calls, rings = route_run([Stop("读不出地图卡片", ["frame"])])
@@ -1064,9 +1094,10 @@ class BellTests(unittest.TestCase):
         reader = Mock()
         reader.present.return_value = True
         reader.fix.return_value = SimpleNamespace(x=HUB["x"] + (0 if at_hub else 30), y=HUB["y"], reliable=True)
-        record = record or crystal_route.BellRecord(tempfile.mkdtemp())
+        record = record or crystal_route.BellRecord(tempfile.mkdtemp(), ACCOUNT)
         io = HudIo(kinds=kinds, regions=regions, prompts=prompts, name_only=name_only, fragments=fragments)
         run = crystal_route.Run(rt, reader=reader, world=FakeWorld(), io=io, record=record)
+        run.account_key = ACCOUNT  # told at the start of run(), which these tests skip
         calls, states, outcomes = [], [], list(outcomes)
         device = SimpleNamespace(inputs=0)
         times = iter(clock) if clock is not None else None
@@ -1136,7 +1167,7 @@ class BellTests(unittest.TestCase):
         self.assertEqual(final, "pressing")  # the device took the press: a restart must not press again
 
     def test_a_recorded_attempt_blocks_the_press(self):
-        record = crystal_route.BellRecord(tempfile.mkdtemp())
+        record = crystal_route.BellRecord(tempfile.mkdtemp(), ACCOUNT)
         record.mark(DAY, "interrupted")
         _result, calls, error, _states, _final = self.ring(record=record)
         self.assertIsInstance(error, Stop)
@@ -1217,18 +1248,20 @@ class BellTests(unittest.TestCase):
     def test_future_dated_records_are_refused_and_the_reserved_day_is_never_pruned(self):
         # Route review round 3, finding 8.
         import datetime as dt
-        record = crystal_route.BellRecord(tempfile.mkdtemp())
+        record = crystal_route.BellRecord(tempfile.mkdtemp(), ACCOUNT)
         today = dt.date(2026, 11, 26)
         record.path.parent.mkdir(parents=True)
         later = {str(today + dt.timedelta(days=n)): {"state": "pressed", "at": "x"} for n in range(1, 15)}
-        record.path.write_text(json.dumps({"schema_version": 1, "attempts": later}), encoding="utf-8")
+        record.path.write_text(json.dumps({"schema_version": 1, "account": ACCOUNT, "attempts": later}),
+                               encoding="utf-8")
         for call in (lambda: record.attempt(today), lambda: record.mark(today, "pressing")):
             with self.assertRaises(crystal_route.RecordError) as caught:
                 call()
             self.assertIn("比今天还晚", str(caught.exception))
         self.assertEqual(json.loads(record.path.read_text(encoding="utf-8"))["attempts"], later)  # untouched
         earlier = {str(today - dt.timedelta(days=n)): {"state": "pressed", "at": "x"} for n in range(1, 31)}
-        record.path.write_text(json.dumps({"schema_version": 1, "attempts": earlier}), encoding="utf-8")
+        record.path.write_text(json.dumps({"schema_version": 1, "account": ACCOUNT, "attempts": earlier}),
+                               encoding="utf-8")
         record.mark(today, "pressing")
         kept = json.loads(record.path.read_text(encoding="utf-8"))["attempts"]
         self.assertEqual(len(kept), crystal_route.RECORD_KEEP)
@@ -1250,8 +1283,8 @@ class BellTests(unittest.TestCase):
                 self.assertEqual((calls, final), ([], None))
 
     def test_the_record_key_is_made_in_one_place(self):
-        # Per-account records later (the UID read from the HUD): every read and write goes through record_key.
-        record = crystal_route.BellRecord(tempfile.mkdtemp())
+        # Every read and write of a day's attempt in an account's record goes through record_key.
+        record = crystal_route.BellRecord(tempfile.mkdtemp(), ACCOUNT)
         with patch.object(crystal_route, "record_key", side_effect=lambda day: f"account-1/{day}"):
             record.mark(DAY, "pressed")
             self.assertEqual(record.attempt(DAY)["state"], "pressed")
@@ -1259,8 +1292,21 @@ class BellTests(unittest.TestCase):
             record.clear(DAY)
             self.assertIsNone(record.attempt(DAY))
 
+    def test_without_a_told_account_ring_never_presses(self):
+        run = crystal_route.Run(SimpleNamespace(stopped=False), reader=READER, world=FakeWorld(), io=HudIo(),
+                                record=crystal_route.BellRecord(tempfile.mkdtemp(), ACCOUNT))
+        from host.android import gesture
+        with patch.object(gesture, "bell_step") as press, \
+                patch.object(crystal_route, "now_utc", return_value=SAFE_NOON):
+            with self.assertRaises(Stop):
+                run.ring(HUB, DAY)
+            run.account_key = "fedcba9876543210"  # not the record's account
+            with self.assertRaises(crystal_route.RecordError):
+                run.ring(HUB, DAY)
+        press.assert_not_called()
+
     def test_a_broken_record_blocks_the_press(self):
-        record = crystal_route.BellRecord(tempfile.mkdtemp())
+        record = crystal_route.BellRecord(tempfile.mkdtemp(), ACCOUNT)
         record.path.parent.mkdir(parents=True)
         record.path.write_text("{not json", encoding="utf-8")
         with self.assertRaises(crystal_route.RecordError):

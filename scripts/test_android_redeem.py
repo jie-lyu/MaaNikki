@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import numpy as np  # noqa: E402
 
 import host  # noqa: E402
-from host.android import actions, pages, redeem  # noqa: E402
+from host.android import account, actions, pages, redeem  # noqa: E402
 from host.android.actions import Screen  # noqa: E402
 
 try:
@@ -263,24 +263,33 @@ class Game:
         return True
 
 
-def play(game, codes=("ABC123",), record=None):
+ACCOUNT = "0123456789abcdef"  # the account key identify() gives in these runs (host.android.account)
+
+
+def play(game, codes=("ABC123",), record=None, identify=None, legacy=None):
+    """``identify``: replaces host.android.account.identify (default: ACCOUNT); ``legacy``: a record written where the
+    data directory kept it before the per-account split."""
     rt = SimpleNamespace(stopped=False, logs=[], key=Mock(side_effect=AssertionError("shared named action")),
                          _frame_still_valid=Mock(return_value=True), pause=Mock(return_value=True),
                          diagnostic=Mock(), TOUCH_KEY_ATTEMPTS=3, action=game.action)
     rt.log = rt.logs.append
     game.rt = rt
     root = Path(tempfile.mkdtemp())
-    if record:
-        path = root.joinpath(*redeem.RECORD_FILE)
-        path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({"items": {code: {"outcome": outcome, "confirmed_at": "2026-11-26T00:00:00+00:00"}
-                                              for code, outcome in record.items()}}), encoding="utf-8")
+    for path, items, owner in ((redeem.Record(root, ACCOUNT).path, record, {"account": ACCOUNT}),
+                               (root.joinpath(*redeem.LEGACY_RECORD_FILE), legacy, {})):
+        if items:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({**owner, "items": {
+                code: {"outcome": outcome, "confirmed_at": "2026-11-26T00:00:00+00:00"}
+                for code, outcome in items.items()}}), encoding="utf-8")
     with patch.object(pages, "screen_now", side_effect=game.screen_now), \
             patch.object(pages, "send_text", side_effect=game.send_text), \
+            patch.object(account, "identify", side_effect=identify or (lambda rt_: ACCOUNT)), \
             patch("app_paths.DATA_ROOT", root), \
             patch("time.monotonic", side_effect=itertools.count(0, .25).__next__):
         outcome = redeem.run(rt, [(code, False) for code in codes])
-    rt.record = redeem.Record(root).outcomes()
+    rt.record = redeem.Record(root, ACCOUNT).outcomes()
+    rt.root = root
     return outcome, rt
 
 
@@ -350,6 +359,35 @@ class FlowTests(unittest.TestCase):
                 self.assertFalse(outcome)
                 self.assertEqual(game.touches, [])
                 self.assertEqual(len(stops(rt)), 1)
+
+    def test_an_account_that_cannot_be_told_refuses_before_the_record_is_used(self):
+        # Per-account records: the account from the HUD comes after the way back to it and before the record; when
+        # it cannot be told nothing is submitted and nothing is skipped or recorded, the frames saved (UID masked).
+        def unidentified(rt_):
+            raise account.Unidentified("两张截图上读到的 UID 不一样", ["frame 1", "frame 2"])
+        for start, touches in (("hud", []), ("modal", ["close", "back", "back"])):
+            with self.subTest(start=start):
+                game = Game(["already_used"], start=start, field="USED1" if start == "modal" else "")
+                outcome, rt = play(game, ("A",), record={"A": "already_used"}, identify=unidentified)
+                self.assertFalse(outcome)
+                self.assertEqual((game.touches, game.texts, rt.record), (touches, [], {"A": "already_used"}))
+                self.assertEqual([c.kwargs["image"] for c in stops(rt)], ["frame 1", "frame 2"])
+                self.assertIn("认不出现在登录的是哪个游戏账号（两张截图上读到的 UID 不一样），不知道该用哪个账号的兑换码记录，没有兑换",
+                              rt.logs[-1])
+        game = Game(["already_used"])
+        outcome, rt = play(game, ("A",), identify=lambda rt_: None)  # stopped while reading: no failure line
+        self.assertFalse(outcome)
+        self.assertEqual((game.touches, rt.logs), ([], []))
+
+    def test_the_record_kept_before_the_split_is_not_this_accounts(self):
+        # The data directory's old un-keyed record belongs to an unknown account: its codes are tried again here,
+        # and it is left as it was.
+        game = Game(["already_used"])
+        outcome, rt = play(game, ("A",), legacy={"A": "redeemed"})
+        self.assertTrue(outcome, rt.logs)
+        self.assertEqual((game.texts, rt.record), (["A"], {"A": "already_used"}))
+        legacy = json.loads(rt.root.joinpath(*redeem.LEGACY_RECORD_FILE).read_text(encoding="utf-8"))
+        self.assertEqual({code: v["outcome"] for code, v in legacy["items"].items()}, {"A": "redeemed"})
 
     def test_a_filled_field_is_cleared_by_its_x_before_the_field_is_tapped(self):
         game = Game(["already_used"], field="LEFTOVER")
