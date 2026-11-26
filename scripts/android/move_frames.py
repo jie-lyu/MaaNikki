@@ -1,7 +1,7 @@
 """Local check of the Android movement backend (host.android.move, host.android.minimap) on the saved phase E device
 frames; not part of the offline suite (.build/ is not in the repository). No device, no input.
 
-    python -I -X utf8 scripts/android/move_frames.py [--build DIR] [--no-screens]
+    python -I -X utf8 scripts/android/move_frames.py [--build DIR] [--no-screens] [--all-frames]
 
 DIR defaults to .build/android. Reported, per measured run in DIR/phase-e-measure/m2-*/results.jsonl:
   - fixes: the reader on each saved frame with the previous logged position as the hint, against what the session
@@ -11,7 +11,10 @@ DIR defaults to .build/android. Reported, per measured run in DIR/phase-e-measur
   - the lag: settled - immediate frame distance (what LAG_U bounds);
   - the angle formula: the direction each step actually moved vs the one move.screen_angle's inverse predicts;
   - screens (unless --no-screens, needs ./maafw): move.classify on every saved HUD frame (expect "hud" except the
-    「起风了」 narration frames and the 查看/拾取 interaction prompts) through the real nodes, as the walk does.
+    「起风了」 narration frames, "hud_prompt" for the 查看/拾取 interaction prompts) through the real nodes and on the
+    frame's own pixels, as the walk does. With --all-frames: every 1280x720 PNG under DIR (not reviews/ or the later
+    walk runs and investigations: phase-e-walk*, heading-investigation) whose screen read_screen calls the HUD (the
+    495 frames of the 2026-11-26 replay: 473 hud, 4 narration, 8 misread, and the 10 prompt frames).
 """
 from __future__ import annotations
 
@@ -37,6 +40,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--build", default=str(ROOT / ".build" / "android"))
     parser.add_argument("--no-screens", action="store_true")
+    parser.add_argument("--all-frames", action="store_true")
     args = parser.parse_args()
     build = Path(args.build)
     import cv2
@@ -88,20 +92,37 @@ def main() -> int:
                             "max_abs": round(max(map(abs, angle_errors)), 1)},
     }, ensure_ascii=False, indent=1))
     if not args.no_screens:
-        screens(build)
+        screens(build, args.all_frames)
     return 0
 
 
-def screens(build: Path):
+LATER = ("reviews", "phase-e-walk", "phase-e-walk2", "heading-investigation")  # not in the --all-frames set
+
+
+def screens(build: Path, all_frames: bool = False):
+    import cv2
     import probe
     from host.android import actions, move
-    frames = sorted((build / "phase-e-measure").glob("m*/*-hud.png")) + \
-        sorted(p for p in (build / "phase-e-measure").glob("m*/*.png") if not p.name.endswith("-hud.png"))[::6]
+    if all_frames:
+        frames = sorted(p for p in build.glob("*/**/*.png") if p.relative_to(build).parts[0] not in LATER)
+    else:
+        frames = sorted((build / "phase-e-measure").glob("m*/*-hud.png")) + \
+            sorted(p for p in (build / "phase-e-measure").glob("m*/*.png") if not p.name.endswith("-hud.png"))[::6]
     counts, odd = {}, []
     for path in frames:
+        image = cv2.imread(str(path))
+        if image is None or image.shape[:2] != (720, 1280):
+            continue
         recognizer = probe.Recognizer(probe.frame_controller(path), android_layer=True)
-        verdict = recognizer.on_one_frame(lambda recognize: move.classify(actions.read_screen(recognize),
-                                                                          recognize))
+
+        def judge(recognize, image=image):
+            screen = actions.read_screen(recognize)
+            if all_frames and screen.kind != "hud":
+                return None  # not an open-world frame: outside this set
+            return move.classify(screen, recognize, image)
+        verdict = recognizer.on_one_frame(judge)
+        if verdict is None:
+            continue
         kind, reason = verdict.kind, verdict.reason
         counts[kind] = counts.get(kind, 0) + 1
         if kind != "hud":

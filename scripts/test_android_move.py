@@ -28,6 +28,8 @@ from host.android.minimap import Fix  # noqa: E402
 from host.android.move import Goal, Observation, Walker  # noqa: E402
 
 FIXTURES = ROOT / "scripts/fixtures/android"
+PROMPT_EXTENT = (747, 324, 1021, 360)  # prompt_verdict's extent on m2-rl10 t00-b-hud
+PROMPT_CROP = (740, 310, 1040, 380)  # where each move_prompt_column.jpg crop was cut from its 1280x720 frame
 
 
 class Clock:
@@ -75,6 +77,8 @@ class FakeIo:
         self.present = True  # the minimap chevron on the next frames
         self.regions = lambda number: ("登上鸣鸣列车", move.TRACKER_DISTANCE)  # the tracker's rows on frame ``number``
         self.name_only = lambda number: False  # Verdict.name_only on frame ``number``
+        self.prompts = lambda number: (PROMPT_EXTENT,) if self.kinds_seen.get(number) == "hud_prompt" else ()
+        self.kinds_seen = {}
 
     def stopped(self):
         return (self.stop_after_steps is not None and len(self.steps) >= self.stop_after_steps) or (
@@ -96,8 +100,9 @@ class FakeIo:
         self.frames.append(frame)
         self.captured[frame.number] = self.clock()
         self.started[frame.number] = at
+        self.kinds_seen[frame.number] = kind
         return Observation(frame, kind, at, reason, self.clock(), self.regions(self.observed),
-                           name_only=self.name_only(self.observed))
+                           name_only=self.name_only(self.observed), prompts=self.prompts(self.observed))
 
     BELL_S = 4.0
 
@@ -1627,6 +1632,258 @@ class DevEntryTests(unittest.TestCase):
             self.assertEqual(lines[0]["angle"], 75.7)
 
 
+# The label rows full-frame OCR read on the 11 saved prompt frames, in move_prompt_column.jpg's order (m2-rl10
+# t00-b-hud, t00-b, t01-a, t04-b-hud, t04-b, t05-a; m2-rl10b t14-b-hud, t14-b; m4-jump4 t00-b-hud, t00-b;
+# phase-e-walk2's stop frame), as scripts/android/move_frames.py --all-frames reads them through the real nodes.
+PROMPT_ROWS = (("查看", [794, 329, 55, 31]),) * 6 + (("拾取", [793, 328, 57, 32]), ("拾取", [790, 326, 62, 35]),
+                                                   ("查看", [794, 329, 56, 31]), ("查看", [794, 329, 56, 31]),
+                                                   ("查看", [793, 329, 57, 31]))
+
+
+def _prompt_frame(index):
+    """A 1280x720 frame (flat grey) with the prompt column of saved prompt frame ``index`` at its place."""
+    import cv2
+    import numpy as np
+    strip = cv2.imread(str(FIXTURES / "move_prompt_column.jpg"))
+    x0, y0, x1, y1 = PROMPT_CROP
+    frame = np.full((720, 1280, 3), 90, np.uint8)
+    frame[y0:y1, x0:x1] = strip[index * (y1 - y0):(index + 1) * (y1 - y0)]
+    return frame
+
+
+def frame_verdict(frame, *rows):
+    """classify() on a recognised HUD whose full-frame OCR reads the HUD's own text and ``rows``, on ``frame``."""
+    from host.android.actions import Screen
+    return move.classify(Screen("hud", {"duck": [30, 18, 54, 54]}),
+                         lambda node, override=None: Ocr([Row(*row) for row in (*HUD_TEXT, *rows)]), frame)
+
+
+class PromptColumnTests(unittest.TestCase):
+    """The interaction-prompt column (coordinator's decision, 2026-11-26): the game's interaction prompt does not
+    block movement; it is judged by position and shape (the label's box, the hexagon icon, the gold line), never by
+    its words, and never tapped. Anything else in the column or beyond the HUD still stops. Pixels: the prompt column
+    of the 11 saved frames with a prompt (move_prompt_column.jpg); the real nodes on them: FrameworkTests."""
+
+    def test_the_saved_prompts_allow_movement(self):
+        self.assertEqual(len(PROMPT_ROWS), 11)
+        for index, row in enumerate(PROMPT_ROWS):
+            with self.subTest(index):
+                verdict = frame_verdict(_prompt_frame(index), row)
+                self.assertEqual((verdict.kind, verdict.reason), ("hud_prompt", ""))
+                self.assertEqual(len(verdict.prompts), 1)
+                self.assertTrue(move.controls_clear(verdict.prompts[0], jump=True, bell=move.RuntimeIo.BELL_POINT))
+                self.assertIn(verdict.kind, move.MOVE_KINDS)
+
+    def test_its_words_are_not_read(self):
+        frame = _prompt_frame(0)
+        for text, width in (("交谈", 55), ("采集", 55), ("大喵", 55), ("旅行商人雅兰", 165)):  # NPC names, labels
+            with self.subTest(text):
+                self.assertEqual(frame_verdict(frame, (text, [794, 329, width, 31])).kind, "hud_prompt")
+        # OCR boxing the icon and the bar with the label (as on the composites FrameworkTests reads)
+        for box in ([742, 316, 118, 55], [737, 313, 247, 65], [741, 308, 215, 74]):
+            with self.subTest(box=box):
+                self.assertEqual(frame_verdict(frame, ("查看", box)).kind, "hud_prompt")
+
+    def test_another_shape_in_the_column_stops(self):
+        import numpy as np
+        frame = _prompt_frame(0)
+        cases = {
+            "the label elsewhere in the column": (frame, (("查看", [900, 335, 55, 31]),)),
+            "a block taller than the row": (frame, (("查看", [794, 300, 55, 90]),)),
+            "a block below the row's middle": (frame, (("查看", [794, 350, 55, 31]),)),
+            "a label running past the bar": (frame, (("查看", [794, 329, 240, 31]),)),
+            "two rows (two prompts)": (frame, (PROMPT_ROWS[0], ("拾取", [880, 329, 57, 31]))),
+            "a glyph in the column": (frame, (PROMPT_ROWS[0], ("▶", [1000, 335, 20, 20]))),
+            "the label without the icon and line": (np.full((720, 1280, 3), 90, np.uint8), (PROMPT_ROWS[0],)),
+            "no frame to check the shape on": (None, (PROMPT_ROWS[0],)),
+        }
+        no_icon, no_line = frame.copy(), frame.copy()
+        no_icon[330:365, 755:792] = 90
+        no_line[318:330, 740:1040] = 90
+        cases["the label and line without the icon"] = (no_icon, (PROMPT_ROWS[0],))
+        cases["the label and icon without the line"] = (no_line, (PROMPT_ROWS[0],))
+        for name, (image, rows) in cases.items():
+            with self.subTest(name):
+                verdict = frame_verdict(image, *rows)
+                self.assertEqual(verdict.kind, "other")
+                self.assertTrue(verdict.reason)
+                self.assertFalse(any(text in verdict.reason for text, _box in rows))  # no OCR text for the user
+
+    def test_text_outside_the_column_still_stops(self):
+        frame = _prompt_frame(0)
+        cases = {
+            "a banner": (("获得新的服装", [500, 140, 280, 40]),),
+            "a tap prompt below": (("点击继续", [560, 560, 160, 28]),),
+            "a prompt-like block on the jump control": (("查看", [938, 521, 55, 31]),),
+            "a remark with the prompt": WIND,
+            "a prompt in the 心誓 bar": (("心誓5 点击领取", [520, 668, 240, 22]),),
+        }
+        for name, rows in cases.items():
+            with self.subTest(name):
+                verdict = frame_verdict(frame, PROMPT_ROWS[0], *rows)
+                self.assertIn(verdict.kind, NO_MOVE)
+                self.assertTrue(verdict.reason)
+        self.assertEqual(frame_verdict(frame, ("查看", [938, 521, 55, 31])).kind, "other")  # alone, off the column
+
+    def test_dialogue_and_narration_rules_are_unchanged(self):
+        frame = _prompt_frame(0)
+        self.assertEqual(frame_verdict(frame, *WIND).kind, "narration")  # pixels in the column but no text there
+        self.assertEqual(frame_verdict(frame, *BELL).kind, "narration")
+        self.assertEqual(frame_verdict(frame).kind, "hud")
+        for rows in ((("暖暖，你看那边", [480, 556, 300, 28]), ("好像有什么东西", [480, 578, 300, 28])),
+                     (("我知道了", [900, 420, 160, 30]),)):
+            self.assertEqual(frame_verdict(frame, *rows).kind, "other")
+
+    def test_the_column_is_clear_of_every_movement_control(self):
+        self.assertTrue(move.controls_clear(move.PROMPT_COLUMN, jump=True, bell=move.RuntimeIo.BELL_POINT))
+        over_jump = (900, 500, 1010, 560)
+        self.assertFalse(move.controls_clear(over_jump, jump=True))
+        self.assertTrue(move.controls_clear(over_jump, jump=False))  # a step that does not jump never touches it
+        self.assertFalse(move.controls_clear((250, 540, 300, 600)))  # on the joystick ring
+        self.assertFalse(move.controls_clear((300, 560, 340, 580)))  # next to it (within CONTROL_CLEAR_PX)
+        self.assertFalse(move.controls_clear((600, 600, 640, 640), bell=move.RuntimeIo.BELL_POINT))
+
+    def test_nothing_in_the_walk_taps(self):
+        source = Path(move.__file__).read_text(encoding="utf-8")
+        self.assertNotRegex(source, r"\.(action|click|tap|swipe|camera_drag|post_click)\(")
+        self.assertFalse({"tap", "click", "action", "swipe"} & set(dir(move.RuntimeIo)))
+
+
+class PromptWalkTests(unittest.TestCase):
+    """The walk on "hud_prompt" frames: starts and goes on, logs the class per step, sends nothing near a prompt."""
+
+    def test_a_prompt_neither_stops_the_walk_nor_is_tapped_and_each_step_logs_it(self):
+        world = World((0, 0), yaw=0.0)
+        walk, io = walker(world, kinds=["hud_prompt", "hud_prompt", "hud", "hud_prompt"])
+        result = walk.walk([Goal(0, -12)], (0, 0), 60)
+        self.assertTrue(result.ok, result.message)
+        steps = [record for kind, record in io.records if kind == "step"]
+        self.assertEqual(steps[0]["screen"], "hud_prompt")
+        self.assertEqual(steps[0]["prompts"], [list(PROMPT_EXTENT)])
+        self.assertTrue(all("screen" in record for record in steps))
+        self.assertEqual(io.saved, [])
+        self.assertEqual(io.bells, [])
+        self.assertTrue(any("hud_prompt" in text for detail, text in io.logs if detail))
+
+    def test_after_a_misread_a_prompt_frame_passes(self):
+        world = World((0, 0), yaw=0.0)
+        walk, io = walker(world, kinds=["hud", "misread", "hud_prompt"])
+        result = walk.walk([Goal(0, -12)], (0, 0), 60)
+        self.assertTrue(result.ok, result.message)
+
+    def test_a_prompt_next_to_a_control_the_step_uses_stops_with_the_frame_saved(self):
+        for name, extent, goal, options in (
+                ("over the jump button, the step jumps", (900, 500, 1010, 560), Goal(0, -5, jump=True),
+                 {"allow_jump": True}),
+                ("on the joystick ring", (250, 540, 300, 600), Goal(0, -12), {})):
+            with self.subTest(name):
+                walk, io = walker(World((0, 0), yaw=0.0), kinds=["hud_prompt"], **options)
+                io.prompts = lambda n, extent=extent: (extent,)
+                result = walk.walk([goal], (0, 0), 60)
+                self.assertEqual((result.outcome, io.steps), ("screen", []))
+                self.assertEqual(io.saved[0][2].number, 1)
+                self.assertIn("按键", result.message)
+
+    def test_a_prompt_over_the_jump_button_while_the_step_does_not_jump_moves(self):
+        walk, io = walker(World((0, 0), yaw=0.0), kinds=["hud_prompt"])
+        io.prompts = lambda n: ((900, 500, 1010, 560),)
+        result = walk.walk([Goal(0, -5)], (0, 0), 60)
+        self.assertTrue(result.ok, result.message)
+        self.assertTrue(all(step["jump_at"] is None for step in io.steps))
+
+
+class FreshHeadingTests(unittest.TestCase):
+    """A step is planned only with the camera yaw read from its own deciding frame (coordinator's decision B).
+    Frames: the minimap of phase-e-walk2 run 2 (move_minimap_walk2_0.jpg, its first frame, on which step 0 was
+    decided; move_minimap_walk2_1.jpg, step 1's), each reading yaw 73.2 on its own; ``withheld`` captures read with
+    the view-cone reading failing."""
+
+    @classmethod
+    def setUpClass(cls):
+        from host.android.minimap import MinimapReader
+        cls.reader = MinimapReader("miraland", ROOT / "resource")
+        cls.frames = [_frame("move_minimap_walk2_0.jpg"), _frame("move_minimap_walk2_1.jpg")]
+
+    def _walk(self, captures, withheld=(), steps=2):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from host.android.minimap import MinimapReader
+        clock = Clock()
+        io = FakeIo(World((0, 0)), clock)
+        queue, shots, sent = list(captures), [], []
+
+        def observe():  # every capture a new image (a copy), as on the device
+            frame = self.frames[queue.pop(0) if queue else captures[-1]].copy()
+            shots.append(frame)
+            io.frames.append(frame)
+            at = clock()
+            clock.t += 0.3
+            return Observation(frame, "hud", at, regions=TRACKER)
+
+        def step(frame, angle, seconds, jump_at, not_after=None):
+            sent.append((frame, angle))
+            clock.t += seconds + 0.1
+            return len(sent) < steps
+
+        def fix(frame, hint, radius):
+            number = next(n for n, shot in enumerate(shots, 1) if shot is frame)
+            if number in withheld:
+                with patch.object(self.reader.locator, "camera_heading", lambda *a, **k: (None, 0.0)):
+                    return MinimapReader.fix(self.reader, frame, hint, radius)
+            return MinimapReader.fix(self.reader, frame, hint, radius)
+        io.observe, io.step = observe, step
+        reader = SimpleNamespace(present=self.reader.present, within=self.reader.within, fix=fix)
+        result = Walker(io, reader, clock=clock).walk([Goal(9880.48, 10010.62)], (9883.52, 10015.73), 60)
+        return result, io, shots, sent
+
+    def test_each_step_uses_the_yaw_read_from_its_own_frame(self):
+        result, io, shots, sent = self._walk([0, 1, 1])
+        self.assertEqual(result.outcome, "stopped")  # the second gesture "returned False"
+        self.assertEqual([frame for frame, _angle in sent], [shots[0], shots[2]])  # 2: before the settle wait
+        records = [record for kind, record in io.records if kind == "step"]
+        for (frame, angle), record, device in zip(sent, records, (166.2, 160.4)):  # what the device run sent
+            own = self.reader.fix(frame, (record["fix"]["x"], record["fix"]["y"]), move.TRACK_SEARCH)
+            self.assertAlmostEqual(own.heading, 73.2, delta=0.5)
+            self.assertEqual(record["heading"], round(own.heading, 1))
+            self.assertEqual(record["fix"]["heading"], round(own.heading, 1))
+            self.assertAlmostEqual(angle, device, delta=0.3)
+            self.assertGreater(record["fix"]["heading_strength"], 1000)
+            runner_yaw, runner_strength = record["fix"]["heading_runner_up"]
+            self.assertLess(runner_strength, record["fix"]["heading_strength"] / 5)
+            self.assertEqual(record["fix"]["position_method"], "outside_camera_cone")
+            self.assertNotIn("method", record["fix"])
+
+    def test_a_frame_whose_cone_read_fails_yields_no_step(self):
+        # After step 0: three captures without a yaw (the settle frame, then one recapture): no step, the walk stops.
+        result, io, shots, sent = self._walk([0, 1, 1, 1], withheld={2, 3, 4})
+        self.assertEqual([frame for frame, _angle in sent], [shots[0]])
+        self.assertEqual(result.outcome, "lost")
+        self.assertIn("镜头朝向", result.message)
+        self.assertIs(io.saved[-1][2], shots[-1])
+        self.assertEqual(len(shots), 4)
+        # The first frame without a yaw: nothing is sent on it; the recapture reads one and the step uses that frame.
+        result, io, shots, sent = self._walk([0, 0, 1], withheld={1}, steps=1)
+        self.assertEqual([frame for frame, _angle in sent], [shots[1]])
+        self.assertEqual(result.outcome, "stopped")
+
+    def test_a_withheld_reading_carries_nothing_from_the_frame_before(self):
+        from unittest.mock import patch
+        self.reader.fix(self.frames[0], (9883.52, 10015.73), 12)  # a reading with a yaw first
+        with patch.object(self.reader.locator, "camera_heading", lambda *a, **k: (None, 0.0)):
+            fix = self.reader.fix(self.frames[1], (9884.27, 10015.77), 12)
+        self.assertEqual((fix.heading, fix.heading_strength, fix.heading_runner_up), (None, None, None))
+
+    def test_a_fix_from_another_frame_never_plans_a_step(self):
+        walk, io = walker(World((0, 0)))
+        first, second = io.observe(), io.observe()
+        fix = walk._fix_on(first, (0, 0), move.TRACK_SEARCH)
+        self.assertEqual(walk._step_heading(first, fix), 30.0)
+        with self.assertRaises(move.Halt) as caught:
+            walk._step_heading(second, fix)
+        self.assertEqual(caught.exception.result.outcome, "lost")
+        self.assertIs(io.saved[-1][2], second.frame)
+
+
 FRAMEWORK_CHECK = r"""
 import json, sys
 from pathlib import Path
@@ -1645,7 +1902,9 @@ fixtures = repo / "scripts/fixtures/android"
 crop = lambda name: cv2.imread(str(fixtures / name))
 duck = cv2.imread(str(repo / "resource_android/image/android/menu_duck.png"))
 row, settings = crop("hud_label_row.png"), crop("page_title.png")
-wind, bell, look = crop("move_narration_wind.jpg"), crop("move_narration_bell.jpg"), crop("move_prompt_look.jpg")
+wind, bell = crop("move_narration_wind.jpg"), crop("move_narration_bell.jpg")
+strip = crop("move_prompt_column.jpg")  # (740, 310)-(1040, 380) of the 11 saved prompt frames, stacked
+x0, y0, x1, y1 = 740, 310, 1040, 380
 
 def hud():
     frame = np.full((720, 1280, 3), 90, np.uint8)
@@ -1653,11 +1912,16 @@ def hud():
     return frame
 
 frames = {"hud": hud(), "blank": np.full((720, 1280, 3), 90, np.uint8)}
-for name, image, x, y in (("wind", wind, 240, 495), ("bell", bell, 240, 495), ("look prompt", look, 760, 315)):
+for name, image, x, y in (("wind", wind, 240, 495), ("bell", bell, 240, 495)):
     frames[name] = hud()
     frames[name][y:y + image.shape[0], x:x + image.shape[1]] = image
-frames["wind and look prompt"] = frames["wind"].copy()
-frames["wind and look prompt"][315:375, 760:900] = look
+for i in range(strip.shape[0] // (y1 - y0)):
+    frames[f"prompt {i}"] = hud()
+    frames[f"prompt {i}"][y0:y1, x0:x1] = strip[i * (y1 - y0):(i + 1) * (y1 - y0)]
+frames["wind and prompt"] = frames["wind"].copy()
+frames["wind and prompt"][y0:y1, x0:x1] = strip[:y1 - y0]
+frames["prompt without its icon"] = frames["prompt 0"].copy()
+frames["prompt without its icon"][330:365, 755:792] = 90  # the label alone: not the seen shape
 frames["starsea tracker"] = hud()
 frames["starsea tracker"][220:292, 100:270] = crop("move_tracker_starsea.jpg")
 frames["page"] = np.full((720, 1280, 3), 90, np.uint8)
@@ -1680,6 +1944,7 @@ class Judge(CustomAction):
         verdict = move.classify(actions.read_screen(recognize), recognize, image)
         results[current["name"]] = [verdict.kind, verdict.reason]
         results[current["name"] + "/tracker"] = [list(verdict.regions), verdict.name_only]
+        results[current["name"] + "/prompts"] = [list(extent) for extent in verdict.prompts]
         return CustomAction.RunResult(success=True)
 
 resource = Resource()
@@ -1704,7 +1969,9 @@ class FrameworkTests(unittest.TestCase):
     """The screen classes through the real nodes and full-frame OCR (both layers), on frames composed from device
     crops: the HUD label row and duck; the subtitle band of the two saved narration frames over the HUD (「暖暖」 /
     「起风了——大喵小心，别被吹跑啦。」, m2-goto1; 「大喵」 / 「暖暖，星之铃似乎在闪烁呢！摇动它试试吧？」, phase0); the
-    interaction prompt 「查看」 seen over the HUD in m2-rl10."""
+    interaction-prompt column of every saved frame with a prompt (move_prompt_column.jpg, top to bottom: m2-rl10
+    t00-b-hud, t00-b, t01-a, t04-b-hud, t04-b, t05-a, m2-rl10b t14-b-hud, t14-b (拾取), m4-jump4 t00-b-hud, t00-b,
+    phase-e-walk2's stop frame; 查看 on the others)."""
 
     def test_the_hud_the_narration_band_and_other_screens(self):
         if not (ROOT / "resource_android").is_dir():
@@ -1722,8 +1989,14 @@ class FrameworkTests(unittest.TestCase):
         self.assertEqual(outcome["hud/tracker"], [[], False])
         self.assertEqual(outcome["wind"], ["narration", ""])
         self.assertEqual(outcome["bell"], ["narration", ""])
-        self.assertEqual(outcome["look prompt"][0], "other")
-        self.assertEqual(outcome["wind and look prompt"][0], "other")  # narration with anything else: stop
+        for i in range(11):  # every real prompt: movement allowed, nothing tapped
+            with self.subTest(prompt=i):
+                self.assertEqual(outcome[f"prompt {i}"], ["hud_prompt", ""])
+                (extent,) = outcome[f"prompt {i}/prompts"]
+                self.assertTrue(move.controls_clear(extent, jump=True, bell=move.RuntimeIo.BELL_POINT))
+        self.assertEqual(outcome["wind and prompt"][0], "other")  # narration with anything else: stop
+        self.assertEqual(outcome["prompt without its icon"][0], "other")
+        self.assertEqual(outcome["hud/prompts"], [])
         self.assertEqual(outcome["blank"][0], "other")
         self.assertEqual(outcome["page"][0], "other")
         self.assertTrue(outcome["page"][1].startswith("另一个页面"))

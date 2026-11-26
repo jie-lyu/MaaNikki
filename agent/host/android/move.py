@@ -11,10 +11,16 @@ the only touch this module sends; the bell press, off by default, is the one oth
    clean HUD, its tracker showing a quest name and its distance, or (a quest tracked in another map, as on 星海) a
    name alone with the distance row positively empty (name_only_tracker), or nothing is sent. The one exception is ambient narration: a known companion's label (AMBIENT_SPEAKERS)
    over one short plain line in the subtitle band, no marker, no word of NARRATION_DENY: it pauses without input until
-   it goes (logged), up to NARRATION_MAX_S. Anything else (a prompt, a banner, a quest or interaction button, an
-   overlay glyph, a missing minimap chevron, another page, a dialog, the quit confirmation, an unrecognised or dark
-   screen) ends the walk on that first frame, saved, with nothing tapped. Only a capture that returned no image is
-   tried again, once.
+   it goes (logged), up to NARRATION_MAX_S. The other exception is the game's interaction prompt (查看, 拾取, an NPC's
+   name): one row in the prompt column (PROMPT_COLUMN) with the shape seen on the saved frames (the label's box, the
+   hexagon icon before it, the gold line above it; prompt_verdict, by position and shape, never by its words) and
+   nothing else beyond the HUD makes the frame "hud_prompt": the walk starts and goes on as on a clean HUD (logged
+   per step), never taps the prompt (nothing in this module taps; a prompt is tapped only by a task step that names
+   the prompt it expects, on a current frame), and stops, frame saved, if a prompt lies on or next to a control the
+   walk uses (controls_clear). Anything else (a prompt-column row of another shape, a banner, a quest or interaction
+   button, an overlay glyph, a missing minimap chevron, another page, a dialog, the quit confirmation, an unrecognised
+   or dark screen) ends the walk on that first frame, saved, with nothing tapped. Only a capture that returned no
+   image is tried again, once.
 2. Fix: the minimap position (host.android.minimap). The first fix needs a caller-supplied hint inside the map (later
    the teleport point's coordinates); no hint, or a hinted match under the score floor or far from the hint, refuses
    before any input, and so does a fix outside a route's start radius (the first fix and the one that authorises the
@@ -27,7 +33,9 @@ the only touch this module sends; the bell press, off by default, is the one oth
    right, 90 down; the camera looks "up" the screen, 270). The joystick is always at full deflection; the distance is
    set by the duration from the measured model expected_distance(T) = SPEED_U_S * (T - DEAD_S), clamped to
    [MIN_STEP_S, MAX_STEP_S] (MAX_STEP_S: the gesture cap less HOLD_MARGIN_S for dispatch latency) and to the time
-   left before the deadline. The camera is never turned. A decision is sent
+   left before the deadline. The camera is never turned. The yaw is the one read from the deciding frame itself
+   (Walker._step_heading: the last minimap reading was made on that frame and is that fix); a frame without one sends
+   nothing, one more frame is captured, and a second miss stops with the frame saved. A decision is sent
    with its frame's expiry (capture requested + MAX_DECISION_AGE_S, and early enough that its hold ends before the
    deadline: gesture ``not_after``): Runtime refuses it right before
    contact-down once expired (DecisionExpired) and the walk captures again and replans; the bell follows the same rule
@@ -59,7 +67,7 @@ import math
 import re
 import time
 
-from host.android.gesture import BELL_PRESS_MAX_S, GESTURE_MAX_S, DecisionExpired
+from host.android.gesture import BELL_PRESS_MAX_S, DEFAULT_LAYOUT, GESTURE_MAX_S, DecisionExpired
 from navigation.geometry import segment_distance
 
 # ---- the measured model ----
@@ -136,8 +144,10 @@ class Goal:
 
 @dataclass
 class Observation:
-    """One classified frame. ``kind``: "hud" (move), "narration" (pause), "blank" (the capture returned no image:
-    tried again once) or "other" (stop; ``reason`` says what, a fixed Chinese text). ``at``: the clock when its capture
+    """One classified frame. ``kind``: "hud" (move), "hud_prompt" (move: the HUD with an interaction prompt in its
+    column, never tapped; ``prompts``: each prompt's extent, x0, y0, x1, y1), "narration" (pause), "misread" (one
+    recapture), "blank" (the capture returned no image: tried again once) or "other" (stop; ``reason`` says what, a
+    fixed Chinese text). ``at``: the clock when its capture
     started; ``captured``: when it ended (the decision's age counts from there; ``at`` when not given). ``regions``:
     Verdict.regions, compared with the walk's first frame."""
     frame: object
@@ -148,6 +158,7 @@ class Observation:
     regions: tuple = ()
     blocks: tuple = ()  # Verdict.blocks
     name_only: bool = False  # Verdict.name_only
+    prompts: tuple = ()  # Verdict.prompts
 
     def __post_init__(self):
         if self.captured is None:
@@ -241,6 +252,7 @@ class Walker:
         self._name_only = False  # the first frame's tracker showed that name without a distance row
         self._blocks = None  # the first frame's permanent-HUD text block layout (Verdict.blocks)
         self._after_misread = False  # the frame just returned follows a misread one: its fix must hold, no retry
+        self._fixed = (None, None)  # (frame, fix) of the last minimap reading: a step's yaw must be that frame's own
 
     # -- entry --
 
@@ -315,10 +327,12 @@ class Walker:
                 best, since_best = remaining, 0
             elif since_best >= GOAL_STALL_STEPS:
                 self._fail("blocked", "连续多步没有靠近目标（可能被挡住了），已停止", obs)
-            if fix.heading is None:
+            heading = self._step_heading(obs, fix)  # read from this very frame, or None
+            if heading is None:  # no yaw on the deciding frame: nothing sent; one more frame, then stop
                 heading_misses += 1
                 if heading_misses >= HEADING_MISSES:
                     self._fail("lost", "读不出镜头朝向，已停止", obs)
+                self._detail("no camera yaw read on this frame: no step, captured once more")
                 self._pause(POLL_S)
                 obs, fix = self._refix(self._look(), fix)
                 continue
@@ -326,7 +340,7 @@ class Walker:
             # Plan on this frame; send only while the frame is recent enough to stand for the screen.
             world = bearing(goal.x - fix.x, goal.y - fix.y)
             seconds = step_seconds(remaining)
-            angle = screen_angle(world, fix.heading)
+            angle = screen_angle(world, heading)
             jump_at = None
             if goal.jump and self.allow_jump and expected_distance(seconds) >= remaining - goal.radius \
                     and seconds > JUMP_AT_S + 0.2:
@@ -346,11 +360,17 @@ class Walker:
                 stale = self._stale(stale, age, obs)
                 obs, fix = self._refix(self._look(), fix)
                 continue
+            self._check_controls(obs, jump=jump_at is not None)
+            if self._step_heading(obs, fix) != heading:  # the yaw sent is still this frame's own reading
+                self._fail("lost", "这一步要用的镜头朝向不是从当前这张图读出的，已停止", obs)
             self._check_stop()
-            record = {"step": len(self.steps), "goal": index, "fix": fix.log(), "remaining": round(remaining, 2),
-                      "bearing": round(world, 1), "angle": round(angle, 1), "seconds": round(seconds, 3),
-                      "jump_at": jump_at, "expected": round(expected_distance(seconds), 2),
-                      "decision_age": round(age, 3), "confirmed": False}
+            record = {"step": len(self.steps), "goal": index, "screen": obs.kind, "fix": fix.log(),
+                      "remaining": round(remaining, 2), "bearing": round(world, 1), "heading": round(heading, 1),
+                      "angle": round(angle, 1), "seconds": round(seconds, 3), "jump_at": jump_at,
+                      "expected": round(expected_distance(seconds), 2), "decision_age": round(age, 3),
+                      "confirmed": False}
+            if obs.prompts:
+                record["prompts"] = [list(extent) for extent in obs.prompts]
             try:  # the frame's expiry travels to the last check before contact-down (Runtime._dispatch_touch)
                 sent = self.io.step(obs.frame, angle, seconds, jump_at, not_after=self._not_after(obs, seconds))
             except DecisionExpired:
@@ -399,6 +419,22 @@ class Walker:
                 and _distance((fix.x, fix.y), (first.x, first.y)) > start_radius:
             self._fail("refused", "起点离路线的第一个点太远（超出路线规定的起点范围），没有开始移动", obs,
                        details={"fix": fix.log(), "start_radius": start_radius})
+
+    def _step_heading(self, obs, fix):
+        """The camera yaw a step decided on ``obs`` may use: ``fix.heading``, only when the walk's last minimap
+        reading was made on ``obs.frame`` and returned this ``fix`` (the deciding frame's own reading, never one
+        carried over from an earlier frame); anything else stops with the frame saved. None: no yaw on this frame."""
+        frame, last = self._fixed
+        if frame is None or frame is not obs.frame or last is not fix:
+            self._fail("lost", "这一步要用的镜头朝向不是从当前这张图读出的，已停止", obs)
+        return fix.heading
+
+    def _check_controls(self, obs, *, jump=False, bell=None):
+        """No interaction prompt on ``obs`` lies on or next to a control the gesture touches (the joystick ring, the
+        jump button when the step jumps, the bell point): else stop, frame saved, nothing sent."""
+        if obs.prompts and not all(controls_clear(extent, jump=jump, bell=bell) for extent in obs.prompts):
+            self._fail("screen", "交互提示挨着或盖住了移动要用的按键，已停止所有输入", obs,
+                       details={"prompts": [list(extent) for extent in obs.prompts]})
 
     def _not_after(self, obs, hold) -> float:
         """The latest contact-down for a gesture of ``hold`` seconds decided on ``obs``: within the frame's age limit
@@ -454,21 +490,21 @@ class Walker:
                 continue
             if obs.kind == "misread":  # no layout to compare with yet: a misread at the start is never waited through
                 self._fail("refused", "开始时大世界常驻界面的文字没有按原样读出，没有开始移动", obs)
-            if obs.kind not in ("hud", "narration"):
+            if obs.kind not in (*MOVE_KINDS, "narration"):
                 self._fail("refused", f"开始时画面不是干净的大世界（{obs.reason or '认不出的画面'}），没有开始移动", obs)
             if not self.reader.present(obs.frame):
                 self._fail("refused", "没有在默认位置认出小地图（界面布局可能改过，或被挡住了），没有开始移动", obs)
             names, distances = self._tracker_parts(obs)
             if len(names) > 1 or distances > 1 or any(word in name for name in names for word in NARRATION_DENY):
                 self._fail("refused", "开始时任务栏的位置有多余的文字，不是干净的大世界，没有开始移动", obs)
-            if obs.kind == "hud" and len(names) == 1 and distances == 1:
+            if obs.kind in MOVE_KINDS and len(names) == 1 and distances == 1:
                 self._regions, self._blocks = names[0], obs.blocks
-                return obs
-            if obs.kind == "hud" and len(names) == 1 and distances == 0 and obs.name_only \
+                return self._moving_on(obs)
+            if obs.kind in MOVE_KINDS and len(names) == 1 and distances == 0 and obs.name_only \
                     and _cjk(names[0]) >= TRACKER_NAME_MIN_CJK:
                 self._regions, self._blocks, self._name_only = names[0], obs.blocks, True
                 self.io.log("任务栏只显示任务名、没有距离（追踪的任务不在这张地图），之后每张图都要保持这样。")
-                return obs
+                return self._moving_on(obs)
             if obs.kind == "narration" and not logged:
                 logged = True
                 self.io.log("开始时画面上有一行环境旁白，等它消失再走。")
@@ -476,6 +512,12 @@ class Walker:
                 self._fail("refused", "开始时一直没有等到干净的大世界画面（任务栏没有显示任务名和距离，或旁白没有消失），"
                                       "没有开始移动", obs)
             self._pause(POLL_S, obs)
+
+    def _moving_on(self, obs):
+        if obs.kind == "hud_prompt":
+            self._detail(f"interaction prompt on the frame (hud_prompt, {[list(e) for e in obs.prompts]}): moving on, "
+                         "nothing tapped")
+        return obs
 
     @staticmethod
     def _tracker_parts(obs):
@@ -498,14 +540,14 @@ class Walker:
             obs = self.io.observe()
             if obs is None:
                 raise Halt(WalkResult("stopped", STOPPED))
-            hud_like = obs.kind in ("hud", "narration", "misread")
+            hud_like = obs.kind in (*MOVE_KINDS, "narration", "misread")
             if hud_like and not self.reader.present(obs.frame):  # before any exception
                 self._fail("screen", "小地图上的位置标记不见了（可能有东西挡住了大世界），已停止所有输入", obs)
             if hud_like and self._regions is not None and not self._tracker_kept(obs):
                 self._fail("screen", "大世界界面上的任务栏文字变了（可能出现了新的提示或任务），已停止所有输入", obs)
             if hud_like and self._blocks is not None and not same_blocks(obs.blocks, self._blocks):
                 self._fail("screen", "大世界常驻界面上出现了开始时没有的文字块，已停止所有输入", obs)
-            if misread and obs.kind != "hud":  # after a misread frame only a frame that passes fully goes on
+            if misread and obs.kind not in MOVE_KINDS:  # after a misread frame only a frame that passes fully goes on
                 self._fail("screen", "大世界常驻界面的文字连续两次没有按原样读出，已停止所有输入", obs)
             if obs.kind == "misread":
                 # Only a permanent-HUD block's string differs, its blocks where the first frame had them: an OCR
@@ -523,11 +565,11 @@ class Walker:
                 self._check_deadline(obs)
                 self._pause(POLL_S, obs)
                 continue
-            if obs.kind == "hud":
+            if obs.kind in MOVE_KINDS:
                 if narration_since is not None:
                     self.io.log("环境旁白已消失，继续移动。")
                 self._after_misread = misread
-                return obs
+                return self._moving_on(obs)
             if obs.kind == "blank":
                 blanks += 1
                 if blanks > BLANK_RETRIES:
@@ -568,7 +610,7 @@ class Walker:
         hint = (float(hint[0]), float(hint[1]))
         if not self.reader.present(obs.frame):
             self._fail("refused", "没有在默认位置认出小地图（界面布局可能改过），没有开始移动", obs)
-        fix = self.reader.fix(obs.frame, hint, FIRST_FIX_RADIUS)
+        fix = self._fix_on(obs, hint, FIRST_FIX_RADIUS)
         if not fix.reliable or _distance((fix.x, fix.y), hint) > FIRST_FIX_RADIUS:
             self._fail("refused", "在提示的起点附近认不出小地图上的位置，不从猜测的位置开始移动", obs,
                        details={"hint": list(hint), "fix": fix.log()})
@@ -599,7 +641,7 @@ class Walker:
         if anchor is not None:
             predicted = anchor
         self._require_minimap(obs)
-        fix = self.reader.fix(obs.frame, predicted, TRACK_SEARCH)
+        fix = self._fix_on(obs, predicted, TRACK_SEARCH)
         after_misread, self._after_misread = self._after_misread, False
         if self._good(fix, origin, seconds, anchor):
             return self._accept(obs, fix)
@@ -610,12 +652,19 @@ class Walker:
             self._pause(SETTLE_S - (self.clock() - self._lift_at), obs)
         obs = self._look()
         self._require_minimap(obs)
-        fix = self.reader.fix(obs.frame, anchor or origin, WIDE_SEARCH)
+        fix = self._fix_on(obs, anchor or origin, WIDE_SEARCH)
         if self._good(fix, origin, seconds, anchor):
             return self._accept(obs, fix)
         self._fail("lost", "小地图定位不可信（匹配分数太低或位置跳变），已停止", obs,
                    details={"origin": list(origin), "anchor": list(anchor) if anchor else None,
                             "fix": fix.log() if fix else None})
+
+    def _fix_on(self, obs, hint, radius):
+        """The minimap reading of ``obs.frame``; remembered with that frame (Walker._step_heading)."""
+        self._fixed = (None, None)
+        fix = self.reader.fix(obs.frame, hint, radius)
+        self._fixed = (obs.frame, fix)
+        return fix
 
     def _require_minimap(self, obs):
         if not self.reader.present(obs.frame):
@@ -648,6 +697,7 @@ class Walker:
                 self._check_start(obs, fix, *self._start)
             if self.clock() - obs.at > MAX_DECISION_AGE_S:  # the same age rule as a step: decide again
                 return (*self._refix(self._look(), fix), False)
+            self._check_controls(obs, bell=getattr(self.io, "BELL_POINT", None))
             self._check_stop()
             try:
                 sent = self.io.bell(obs.frame, not_after=self._not_after(obs, press))
@@ -787,13 +837,142 @@ NARRATION_DENY = ("点击", "点按", "继续", "跳过", "任务", "对话", "�
                   "跟着", "过来", "快来", "帮我", "帮忙", "请")
 
 
+MOVE_KINDS = ("hud", "hud_prompt")  # the classes a step may be decided on
+
+# ---- the interaction-prompt column ----
+# The game's interaction prompt (查看, 拾取; an NPC's name and other labels appear in the same place) on the 11 saved
+# frames that show one (phase-e-measure m2-rl10 t00-b-hud, t00-b, t01-a, t04-b-hud, t04-b, t05-a; m2-rl10b t14-b-hud,
+# t14-b; m4-jump4 t00-b-hud, t00-b; phase-e-walk2's stop frame on_error/...-3bdb0f67.jpg) is always one row at the
+# same place: a thin gold line on row 323-324 from x 747-748 to x 995-1023 (one warm run with gaps of up to 6 px
+# bridged; it fades out to the right), a white hexagon icon under it (bright low-saturation blob, box x 767-768,
+# y 337-338, 23-24 x 19-20 px, 322-343 px, fill 0.70-0.78) and the label right of the icon (full-frame OCR box x0
+# 790-794, y0 326-329, height 31-35, right edge 849-852). The column is judged like the HUD's other fixed text
+# regions, by position and shape only, never by its words. Every count below has margin around those measurements;
+# anything else in the column stops. Over the 630 saved 1280x720 frames (.build/android, without the walk runs) the
+# icon and the line are found together on exactly the 10 prompt frames; the line alone on 6 others (sandy paving and
+# settings pages), the icon alone on none. OCR's box for the label is stable on the full device frames but depends on
+# the surroundings: with the same prompt pasted into other frames (the test composites) the detector also boxed the
+# icon and the bar with it (x0 737-793, y0 308-329, height 31-74, right edge up to 984). So the block is judged by
+# where it lies (inside the prompt's row, starting no later than the label, centred on the row), the shape by the
+# icon and the line on the pixels.
+PROMPT_COLUMN = (735, 305, 1030, 385)  # x0, y0, x1, y1: the prompt's row; an OCR row centred here must lie inside it
+PROMPT_TEXT_X0_MAX = 800  # the block starts no later than the label (saved: 790-794; with the icon boxed: 737-764)
+PROMPT_TEXT_CY = (335, 355)  # its centre y (saved: 343.5-344.5; composites 340-348)
+PROMPT_ICON_AREA = (752, 326, 793, 366)  # where the icon is looked for (x0, y0, x1, y1)
+PROMPT_ICON_X0, PROMPT_ICON_Y0 = (763, 773), (333, 343)
+PROMPT_ICON_W, PROMPT_ICON_H = (18, 27), (16, 23)
+PROMPT_ICON_PIXELS = (260, 400)
+PROMPT_ICON_FILL = (0.6, 0.9)  # pixels / box area (a hexagon is ~0.75)
+PROMPT_LINE_ROWS = (320, 329)  # the gold line's rows (y0, y1)
+PROMPT_LINE_X = (740, 1040)
+PROMPT_LINE_SPAN = (756, 940)  # one warm run (gaps up to PROMPT_LINE_GAP px bridged) covers at least these x
+PROMPT_LINE_GAP = 6
+PROMPT_LINE_WARMTH, PROMPT_LINE_RED = 35, 140  # a gold pixel: red - blue above the first, red above the second
+# A gesture contact stays this far from any prompt's extent (on top of the control's own radius).
+CONTROL_CLEAR_PX = 40
+JUMP_RADIUS_PX = 60  # the jump button's drawn radius around Layout.jump (~55 px on the saved frames)
+BELL_RADIUS_PX = 30
+
+
+def _rect_disk_distance(extent, centre) -> float:
+    x0, y0, x1, y1 = extent
+    dx, dy = max(x0 - centre[0], 0, centre[0] - x1), max(y0 - centre[1], 0, centre[1] - y1)
+    return math.hypot(dx, dy)
+
+
+def controls_clear(extent, *, jump=False, bell=None, layout=DEFAULT_LAYOUT) -> bool:
+    """Whether a prompt's ``extent`` (x0, y0, x1, y1) keeps CONTROL_CLEAR_PX away from every control a gesture
+    touches: the joystick ring (its centre and every pushed point lie within Layout.ring of it), the jump button when
+    the step jumps, the bell point when it is pressed."""
+    controls = [(layout.joystick, layout.ring)]
+    if jump:
+        controls.append((layout.jump, JUMP_RADIUS_PX))
+    if bell is not None:
+        controls.append((tuple(bell), BELL_RADIUS_PX))
+    return all(_rect_disk_distance(extent, centre) > radius + CONTROL_CLEAR_PX for centre, radius in controls)
+
+
+def _usable(frame) -> bool:
+    shape = getattr(frame, "shape", None)
+    return shape is not None and tuple(shape) == (720, 1280, 3)
+
+
+def prompt_icon(frame):
+    """The prompt's hexagon icon on ``frame``: (x, y, w, h) of the one bright low-saturation blob in
+    PROMPT_ICON_AREA with the measured position, size, pixel count and fill; None without exactly one."""
+    import cv2
+    import numpy as np
+    if not _usable(frame):
+        return None
+    x0, y0, x1, y1 = PROMPT_ICON_AREA
+    hsv = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+    mask = ((hsv[..., 2] >= 200) & (hsv[..., 1] <= 60)).astype(np.uint8)
+    _count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask)
+    found = []
+    for x, y, w, h, pixels in stats[1:]:
+        x, y = int(x) + x0, int(y) + y0
+        if PROMPT_ICON_X0[0] <= x <= PROMPT_ICON_X0[1] and PROMPT_ICON_Y0[0] <= y <= PROMPT_ICON_Y0[1] \
+                and PROMPT_ICON_W[0] <= w <= PROMPT_ICON_W[1] and PROMPT_ICON_H[0] <= h <= PROMPT_ICON_H[1] \
+                and PROMPT_ICON_PIXELS[0] <= pixels <= PROMPT_ICON_PIXELS[1] \
+                and PROMPT_ICON_FILL[0] <= pixels / (w * h) <= PROMPT_ICON_FILL[1]:
+            found.append((x, y, int(w), int(h)))
+    return found[0] if len(found) == 1 else None
+
+
+def prompt_line(frame):
+    """The prompt's gold line on ``frame``: (x, y, length) of the longest warm run (gaps up to PROMPT_LINE_GAP px
+    bridged) over PROMPT_LINE_ROWS, when it covers PROMPT_LINE_SPAN (a warm background may extend it; the icon and
+    the label are checked separately); else None."""
+    import numpy as np
+    if not _usable(frame):
+        return None
+    patch = frame[PROMPT_LINE_ROWS[0]:PROMPT_LINE_ROWS[1], PROMPT_LINE_X[0]:PROMPT_LINE_X[1]].astype(int)
+    gold = ((patch[..., 2] - patch[..., 0]) > PROMPT_LINE_WARMTH) & (patch[..., 2] > PROMPT_LINE_RED)
+    best = None
+    for row, line in enumerate(gold):
+        xs = np.flatnonzero(line)
+        if not len(xs):
+            continue
+        for run in np.split(xs, np.flatnonzero(np.diff(xs) > PROMPT_LINE_GAP + 1) + 1):
+            length = int(run[-1] - run[0] + 1)
+            if best is None or length > best[2]:
+                best = (int(run[0]) + PROMPT_LINE_X[0], row + PROMPT_LINE_ROWS[0], length)
+    if best is None or best[0] > PROMPT_LINE_SPAN[0] or best[0] + best[2] - 1 < PROMPT_LINE_SPAN[1]:
+        return None
+    return best
+
+
+def prompt_verdict(column, frame):
+    """(why, extents) for the OCR rows centred in PROMPT_COLUMN (``column``: [(text, box)], at least one): why is ""
+    when they are one interaction prompt with the shape seen on the saved frames (one block inside the row, starting
+    no later than the label and centred on the row; the hexagon icon and the gold line on ``frame``), else a fixed
+    Chinese text; extents: that prompt's (x0, y0, x1, y1). Its words are never looked at."""
+    if not _usable(frame):
+        return "交互提示的位置上有文字，但没有画面可以核对它的形状", ()
+    if len(column) != 1:
+        return "交互提示的位置上有不止一行文字（没见过的形状）", ()
+    _text, (x, y, w, h) = column[0]
+    x0, y0, x1, y1 = PROMPT_COLUMN
+    if not (x0 <= x and y0 <= y and x + w <= x1 and y + h <= y1 and x <= PROMPT_TEXT_X0_MAX
+            and PROMPT_TEXT_CY[0] <= y + h / 2 <= PROMPT_TEXT_CY[1]):
+        return "交互提示的位置上有文字，但位置或大小和见过的交互提示不一样", ()
+    icon, line = prompt_icon(frame), prompt_line(frame)
+    if icon is None or line is None:
+        return "交互提示的位置上有文字，但没有交互提示的图标和横线（没见过的形状）", ()
+    extent = (min(icon[0], line[0], x), min(icon[1], line[1], y), max(x + w, line[0] + line[2]),
+              max(icon[1] + icon[3], y + h))
+    return "", (extent,)
+
+
 @dataclass(frozen=True)
 class Verdict:
-    kind: str  # "hud", "narration", "misread" (only a permanent-HUD block's text differs: see Walker) or "other"
+    kind: str  # "hud", "hud_prompt", "narration", "misread" (only a permanent-HUD block's text differs: see Walker)
+    #            or "other"
     reason: str = ""  # for "other": a fixed Chinese text (never OCR text)
     regions: tuple = ()  # the quest tracker's rows top to bottom: tracker_name() for a name, TRACKER_DISTANCE
     blocks: tuple = ()  # Rows.blocks: the permanent-HUD text block layout
-    name_only: bool = False  # name_only_tracker on the frame (set on "hud" verdicts only)
+    name_only: bool = False  # name_only_tracker on the frame (set on "hud" and "hud_prompt" verdicts only)
+    prompts: tuple = ()  # "hud_prompt": the prompt's extent (prompt_verdict)
 
 
 def _inside(box, region) -> bool:
@@ -824,6 +1003,7 @@ class Rows:
     blocks: tuple  # ((region, x0, x1, cy, ping), ...) of every counted block in BLOCK_REGIONS, matching or misread
     misread: int  # blocks in BLOCK_REGIONS whose text is not that region's exact form
     raw: tuple = ()  # every OCR row with a box, at any score, before any filtering: (text, box)
+    column: tuple = ()  # [(text, box)] counted rows centred in PROMPT_COLUMN (judged by prompt_verdict)
 
 
 def read_rows(result) -> Rows:
@@ -831,7 +1011,7 @@ def read_rows(result) -> Rows:
     labels read in place, the permanent-HUD block layout, and how many of those blocks were misread (in a HUD region,
     not in its exact form; Walker gives such a frame one recapture when nothing else differs from the first frame)."""
     from host.android import actions, pages
-    outside, tracker, blocks, labels, covered, misread, raw = [], [], [], 0, 0, 0, []
+    outside, tracker, blocks, labels, covered, misread, raw, column = [], [], [], 0, 0, 0, [], []
     if result is not None and actions._hit(result):
         for row in pages._rows(result):
             if row is None:
@@ -851,7 +1031,7 @@ def read_rows(result) -> Rows:
             region = next((name for name, area in HUD_REGIONS if _inside(box, area)), None)
             squashed = re.sub(r"\s", "", text)
             if region is None:
-                outside.append((text, box))
+                (column if _inside(box, PROMPT_COLUMN) else outside).append((text, box))
                 continue
             if region == "tracker":
                 distance = TRACKER_DISTANCE_FORM.fullmatch(squashed)
@@ -871,7 +1051,7 @@ def read_rows(result) -> Rows:
                 if region == "labels":  # the labels whose places the misread block covers
                     covered += sum(1 for _label, x in LABEL_CENTRES if box[0] <= x <= box[0] + box[2])
     return Rows(outside, tuple(entry for _y, _x, entry in sorted(tracker)), labels + covered,
-                tuple(sorted(blocks)), misread, tuple(raw))
+                tuple(sorted(blocks)), misread, tuple(raw), tuple(column))
 
 
 # A quest tracker without a distance row. On 星海 the tracked story quest lies in another map and the tracker shows
@@ -982,10 +1162,12 @@ def narration_verdict(rows) -> str:
 def classify(screen, recognize, frame=None) -> Verdict:
     """The Verdict for one frame, from host.android.actions.read_screen's ``screen`` and ``recognize`` on it: "hud"
     when the HUD is positively recognised and no text is read outside the HUD's own text regions (each region matching
-    its pattern); "narration" when the only such text is one ambient remark (narration_verdict); otherwise "other" with
-    a fixed description (what OCR read is never part of it). The quest tracker's text is returned for the walk to
-    compare with its first frame, and on a "hud" verdict whether ``frame`` (the image OCR read) shows the tracker's
-    name with its distance row positively empty (name_only_tracker; never without the frame)."""
+    its pattern); "hud_prompt" when the only other text is one interaction prompt in its column with the seen shape on
+    ``frame`` (prompt_verdict; never without the frame); "narration" when the only such text is one ambient remark
+    (narration_verdict); otherwise "other" with a fixed description (what OCR read is never part of it). The quest
+    tracker's text is returned for the walk to compare with its first frame, and on a "hud" or "hud_prompt" verdict
+    whether ``frame`` (the image OCR read) shows the tracker's name with its distance row positively empty
+    (name_only_tracker; never without the frame)."""
     from host.android import pages
     if screen.kind != "hud":
         what = pages.SCREEN_KINDS.get(screen.kind, "认不出的画面")
@@ -997,12 +1179,19 @@ def classify(screen, recognize, frame=None) -> Verdict:
     regions, blocks = rows.regions, rows.blocks
     if rows.labels < MIN_LABELS:  # positive evidence from this pass itself, not only read_screen's label check
         return Verdict("other", "画面（全画面文字里没有在原位读到大世界的快捷栏）", regions, blocks)
+    prompts = ()
+    if rows.column:  # the interaction-prompt column: one prompt of the seen shape, and nothing else beyond the HUD
+        why, prompts = prompt_verdict(rows.column, frame)
+        if why:
+            return Verdict("other", why, regions, blocks)
+        if rows.outside:
+            return Verdict("other", "交互提示之外还有别的文字（可能是旁白、提示、横幅或按钮）", regions, blocks)
     if rows.outside:
         why = narration_verdict(rows.outside) if not rows.misread else "大世界的界面文字读错了，同时还有别的文字"
         return Verdict("narration", "", regions, blocks) if not why else Verdict("other", why, regions, blocks)
     if rows.misread:
         return Verdict("misread", "大世界常驻界面的文字没有按原样读出", regions, blocks)
-    return Verdict("hud", "", regions, blocks, name_only_tracker(rows, frame))
+    return Verdict("hud_prompt" if prompts else "hud", "", regions, blocks, name_only_tracker(rows, frame), prompts)
 
 
 class RuntimeIo:
@@ -1039,7 +1228,7 @@ class RuntimeIo:
         recognize = self.rt._recognizer_on(frame)
         verdict = classify(actions.read_screen(recognize), recognize, frame)
         return Observation(frame, verdict.kind, at, verdict.reason, captured, verdict.regions, verdict.blocks,
-                           verdict.name_only)
+                           verdict.name_only, verdict.prompts)
 
     def step(self, frame, angle, seconds, jump_at, *, not_after=None) -> bool:
         from host.android import gesture

@@ -50,14 +50,30 @@ class Fix:
     heading: float | None
     heading_confidence: float
     reliable: bool
-    method: str = ""
+    method: str = ""  # the position match used (logged as position_method)
     candidate: tuple[float, float] | None = None
+    heading_strength: float | None = None  # the selected view-cone candidate's signal strength (this reading's)
+    heading_runner_up: tuple[float, float] | None = None  # (yaw, strength) of the strongest other cone candidate
 
     def log(self) -> dict:
         return {"x": round(self.x, 2), "y": round(self.y, 2), "score": round(self.score, 3),
                 "heading": None if self.heading is None else round(self.heading, 1),
-                "heading_confidence": round(self.heading_confidence, 2), "reliable": self.reliable,
-                "method": self.method}
+                "heading_confidence": round(self.heading_confidence, 2),
+                "heading_strength": None if self.heading_strength is None else round(self.heading_strength, 1),
+                "heading_runner_up": None if self.heading_runner_up is None else
+                [round(self.heading_runner_up[0], 1), round(self.heading_runner_up[1], 1)],
+                "reliable": self.reliable, "position_method": self.method}
+
+
+def cone_candidates(diagnostics) -> tuple[float | None, tuple[float, float] | None]:
+    """(selected strength, (yaw, strength) of the strongest other candidate) from one camera_heading call's
+    diagnostics; None where there is none."""
+    candidates = [c for c in (diagnostics or {}).get("candidates") or () if isinstance(c, dict)]
+    selected = (diagnostics or {}).get("selected")
+    strength = float(selected["strength"]) if isinstance(selected, dict) and "strength" in selected else None
+    others = [c for c in candidates if c is not selected]
+    runner = max(others, key=lambda c: float(c["strength"])) if others else None
+    return strength, None if runner is None else (float(runner["heading"]), float(runner["strength"]))
 
 
 def to_pc(frame, center=CENTER, radius=RADIUS):
@@ -144,6 +160,7 @@ class MinimapReader:
             raise NavigationError("没有位置提示，不做小地图的全图搜索。")
         locator = self.locator
         locator.camera_background.reset()  # each reading stands alone, as in the offline and device measurements
+        locator.heading_diagnostics = {}  # nothing from an earlier frame can be read below
         if not self.within(float(hint[0]), float(hint[1])):
             raise NavigationError("位置提示在地图之外，不做小地图匹配。")
         try:
@@ -151,9 +168,10 @@ class MinimapReader:
                                   commit=False)
         except cv2.error:  # a window the matcher cannot use (e.g. at the map's edge): no trusted position
             return Fix(float(hint[0]), float(hint[1]), 0.0, None, 0.0, False, "match_error")
-        diagnostics = locator.heading_diagnostics or {}
+        diagnostics = locator.heading_diagnostics or {}  # set by this locate's own camera_heading on this frame
         score = float(pose.score) if pose.score is not None and math.isfinite(pose.score) else 0.0
         candidate = diagnostics.get("candidate_position")
+        strength, runner_up = cone_candidates(diagnostics)
         return Fix(float(pose.x), float(pose.y), score, pose.heading, float(pose.heading_confidence or 0.0),
                    bool(pose.position_reliable) and score >= SCORE_FLOOR, str(diagnostics.get("position_match", "")),
-                   tuple(float(v) for v in candidate) if candidate else None)
+                   tuple(float(v) for v in candidate) if candidate else None, strength, runner_up)
