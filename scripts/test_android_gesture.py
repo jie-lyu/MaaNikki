@@ -1100,6 +1100,69 @@ class NotAfterTests(GestureTestCase):
         self.assert_nothing_sent()
 
 
+
+class MovementNotAfterTests(GestureTestCase):
+    """Runtime.action's Android-only _not_after on a _movement tap or swipe (host.android.teleport's map input; route
+    review round 2, finding 3), and DeviceInputState.inputs as the "sent" signal the bell record relies on (finding
+    1): it changes only once a touch is past every refusal and about to go down."""
+
+    def test_an_expired_map_tap_or_swipe_sends_nothing_and_halts_nothing(self):
+        import time as real_time
+        for action, fields in (("Click", {"target": [640, 360]}),
+                               ("Swipe", {"begin": [400, 300], "end": [800, 300], "duration": 500})):
+            with self.subTest(action=action):
+                self.setUp()
+                rt = self.runtime()
+                with android_run(), self.assertRaises(g.DecisionExpired):
+                    rt.action(action, **fields, source_frame=self.frame, _movement=True,
+                              _not_after=real_time.monotonic() - 1)
+                self.assert_nothing_sent(outcomes=[(action, "sending"), (action, "cancelled")])
+                self.assertEqual(self.state.inputs, 0)
+                with android_run():
+                    self.assertTrue(rt.action(action, **fields, source_frame=self.fresh_frame(), _movement=True,
+                                              _not_after=real_time.monotonic() + 60))
+                self.assertEqual(self.state.inputs, 1)
+
+    def test_expiry_during_the_final_focus_query_is_caught_before_submission(self):
+        import time as real_time
+        rt = self.runtime()
+
+        def slow_focus():
+            end = real_time.monotonic() + 0.1
+            while real_time.monotonic() < end:
+                pass
+            return True
+        rt._device_target.foreground.side_effect = slow_focus
+        with android_run(), self.assertRaises(g.DecisionExpired):
+            rt.action("Click", target=[640, 360], source_frame=self.frame, _movement=True,
+                      _not_after=real_time.monotonic() + 0.05)
+        self.assert_nothing_sent(outcomes=[("Click", "sending"), ("Click", "cancelled")])
+
+    def test_an_expiry_needs_the_movement_rule_and_a_finite_time(self):
+        import time as real_time
+        rt = self.runtime()
+        for fields in ({"_not_after": real_time.monotonic() + 60}, {"_movement": True, "_not_after": float("nan")},
+                       {"_movement": True, "_not_after": "soon"}):
+            with self.subTest(fields=fields), android_run(), self.assertRaises(host.UnsupportedInput):
+                rt.action("Click", target=[640, 360], source_frame=self.frame, **fields)
+        self.assert_nothing_sent()
+
+    def test_the_input_count_changes_only_for_a_touch_that_went_down(self):
+        import time as real_time
+        rt = self.runtime()
+        with android_run(), self.assertRaises(g.DecisionExpired):  # refused at the last check
+            g.bell_step(rt, self.frame, (616, 612), 4.0, not_after=real_time.monotonic() - 1)
+        self.assertEqual(self.state.inputs, 0)
+        stop_requested(self.state)  # a stop request seen before contact-down: False, nothing sent
+        with android_run():
+            self.assertFalse(g.bell_step(rt, self.fresh_frame(), (616, 612), 4.0))
+        self.assertEqual((self.state.inputs, self.controller.calls), (0, []))
+        self.state.stop_request().unlink()
+        rt = self.runtime()
+        with android_run():
+            self.assertTrue(g.bell_step(rt, self.fresh_frame(), (616, 612), 4.0))
+        self.assertEqual(self.state.inputs, 1)
+
 class DesktopTests(unittest.TestCase):
     def test_the_gesture_api_and_capture_changes_are_unreachable_on_windows_and_native_mac(self):
         # A fresh interpreter: Runtime.gesture refuses on the desktop backends before host.android is imported,

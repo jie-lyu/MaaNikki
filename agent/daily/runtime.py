@@ -411,10 +411,17 @@ class Runtime:
 
     def action(self, action, *, ui_click=True, focus_generation=None, source_frame=None, **fields):
         touch_only = capabilities(game_backend()).touch_actions_only
-        movement = False
+        movement, not_after = False, None
         if touch_only:
             # host.android.gesture.camera_drag: a movement swipe, with the gesture freshness rule (_dispatch_touch)
             movement = bool(fields.pop("_movement", False))
+            # Android only, with _movement: the deciding frame's expiry (time.monotonic), checked by _dispatch_touch
+            # right before the input is submitted, as a gesture's not_after (host.android.teleport's map input).
+            not_after = fields.pop("_not_after", None)
+            if not_after is not None and (not movement or type(not_after) not in (int, float)
+                                          or not math.isfinite(not_after)):
+                from host import UnsupportedInput
+                raise UnsupportedInput("安卓模拟器上的点击的截止时间无效，没有发送。")
             from host.android import check_touch_fields
             check_touch_fields(action, {k: v for k, v in fields.items() if k != "window_cursor_pos"})
             if source_frame is None:
@@ -504,7 +511,8 @@ class Runtime:
             inputs.check(require_foreground=True)
         if touch_only:
             if movement:
-                return self._dispatch_touch(action, fields, focus_generation, source_frame, movement=True)
+                return self._dispatch_touch(action, fields, focus_generation, source_frame, movement=True,
+                                            not_after=not_after)
             return self._dispatch_touch(action, fields, focus_generation, source_frame)
         fields = native_key_fields(action, fields)
         with measure("input.action"):
@@ -526,8 +534,9 @@ class Runtime:
         (DeviceInputState.inputs); a gesture or movement swipe also needs the latest completed capture
         (DeviceInputState.captures), and its device confirmation ends by a wall-clock deadline.
         Every touch is confirmed by an UP newer than its frame's baseline and the last UP that confirmed a touch.
-        ``not_after`` (a gesture's, wall_time.monotonic): past it at the very last check before sending,
-        host.android.gesture.DecisionExpired, nothing sent, nothing halted."""
+        ``not_after`` (a gesture's, or a movement tap's or swipe's from Runtime.action's _not_after;
+        wall_time.monotonic): past it at the very last check before sending, host.android.gesture.DecisionExpired,
+        nothing sent, nothing halted."""
         from task_control import ForegroundChanged
         if send is not None:
             from host.android.gesture import ABORTED, DONE, OVERRUN

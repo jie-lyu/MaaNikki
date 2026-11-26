@@ -40,6 +40,7 @@ from dataclasses import dataclass
 import math
 import re
 import time
+import unicodedata
 
 import cv2
 import numpy as np
@@ -101,7 +102,7 @@ DOTS = "·•・‧∙⋅."
 # ---- the card ----
 NOT_RUNG_MESSAGE = ("今日尚未进行召唤摇铃", "快前往流转之枢吧")  # survey 03-06: the card's two rows, top to bottom
 SURVEY_REGIONS = ("纪念山地",)  # region cards seen on the device whose region checkpoints.json does not list
-COUNTER = re.compile(r"^(\d{1,3})[/／](\d{1,3})$")
+COUNTER = re.compile(r"^([0-9]{1,3})[/／]([0-9]{1,3})$")
 TOTALS = (3, 30, 100)  # 星之魄, 星光结晶, 星光微尘 (the PC card's counters)
 CRYSTAL_TOTAL = 30
 # ---- waits (seconds) ----
@@ -363,16 +364,6 @@ def map_state(rt, screen, frame, recognize) -> str:
     return "other"
 
 
-def loading_frame(recognize) -> bool:
-    """A frame that can be the teleport's loading screen, positively as far as the frames go: nothing recognised
-    (checked by the caller) and full-frame OCR reading no text of two or more CJK characters. (No loading screen has
-    been saved yet: one with tips or other text is an unknown frame, given only UNKNOWN_WAIT.)"""
-    from host.android.move import SCREEN_TEXT
-    result = recognize(SCREEN_TEXT)
-    if result is None:
-        return False
-    return not any(_cjk(text) >= 2 for text, _box in _rows(result))
-
 
 @dataclass(frozen=True)
 class Card:
@@ -383,16 +374,26 @@ class Card:
     counters: tuple = ()
 
 
-def message_text(text) -> str:
-    """A card row as compared with NOT_RUNG_MESSAGE: whitespace and punctuation dropped (CJK and letters/digits kept)."""
-    return "".join(ch for ch in str(text or "") if _cjk(ch) or (ch.isascii() and ch.isalnum()))
+MESSAGE_PUNCTUATION = "，。！、,.!"  # the only characters message_text drops besides whitespace (the observed variants)
+COUNTER_MARKS = "/／"
+
+
+def message_text(text) -> str | None:
+    """A card row as compared with NOT_RUNG_MESSAGE: whitespace and MESSAGE_PUNCTUATION dropped, nothing else; None
+    for a row holding a digit (any script) or a slash, which no message row has (a counter must never be normalised
+    into the message)."""
+    text = str(text or "")
+    if any(ch.isdigit() or unicodedata.numeric(ch, None) is not None or ch in COUNTER_MARKS for ch in text):
+        return None
+    return "".join(ch for ch in text if not ch.isspace() and ch not in MESSAGE_PUNCTUATION)
 
 
 def card_state(recognize) -> Card:
     """The card's state, positively both ways and from the card's whole message area: every row read there must
-    belong to one known state. "not_rung": exactly the two rows of NOT_RUNG_MESSAGE, top to bottom; "rung": exactly
-    three rows, the counters of 星之魄 (/3), 星光结晶 (/30) and 星光微尘 (/100) once each (the PC card; not seen on the
-    phone yet); any other text, a contradictory row, a misread counter or a row missing: "unknown"."""
+    belong to one known state. "not_rung": exactly the two rows of NOT_RUNG_MESSAGE, top to bottom, no digit or slash
+    in either; "rung": exactly three rows, the counters of 星之魄 (/3), 星光结晶 (/30) and 星光微尘 (/100) in ASCII digits
+    once each (the PC card; not seen on the phone yet); any other text, a contradictory row, a misread counter or a
+    row missing: "unknown"."""
     result = recognize(CARD_TEXT)
     if result is None:
         return Card("unknown")
@@ -434,8 +435,14 @@ class Panel:
     title: str
     buttons: tuple  # every text read in the button band, sorted
     words: tuple  # map words read inside the panel
-    teleport: list | None  # the 传送 box
-    detail: list | None  # the 详情 box
+    teleport: list | None  # the 传送 box of the button band's full pass
+    detail: list | None  # the 详情 box of the same pass
+    agree: bool = False  # the narrower 传送 pass (TELEPORT) read the same label over an overlapping box
+
+
+def _overlap(a, b) -> bool:
+    """Two boxes [x, y, w, h] share at least one pixel (half-open)."""
+    return a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
 
 
 def read_panel(recognize) -> Panel:
@@ -444,17 +451,20 @@ def read_panel(recognize) -> Panel:
     x, y, w, h = PANEL_ZONE
     words = tuple(sorted(squash(text) for text, box in _rows(recognize(MAP_WORDS))
                          if len(box) == 4 and x <= _centre(box)[0] <= x + w and y <= _centre(box)[1] <= y + h))
-    teleport = recognize(TELEPORT)
+    teleports = [box for text, box in rows if text == "传送"]
+    teleport = teleports[0] if len(teleports) == 1 and len(teleports[0]) == 4 else None
     detail = next((box for text, box in rows if text == "详情"), None)
-    return Panel(title, tuple(sorted(text for text, _box in rows)), words,
-                 actions._box(teleport) if actions._hit(teleport) else None, detail)
+    narrow = recognize(TELEPORT)
+    agree = bool(teleport is not None and actions._hit(narrow) and squash(actions._text(narrow)) == "传送"
+                 and _overlap(actions._box(narrow), teleport))
+    return Panel(title, tuple(sorted(text for text, _box in rows)), words, teleport, detail, agree)
 
 
 def panel_ok(panel: Panel, name: str) -> bool:
     """The panel of ``name`` with exactly the buttons 详情 and 传送 (every text read in the button band accounted for),
-    no map word on it, 详情 clear of 传送's margin."""
+    the narrower 传送 pass agreeing with the band's, no map word on it, 详情 clear of 传送's margin."""
     return (panel.title == point_name(name) and panel.buttons == tuple(sorted(PANEL_BUTTON_NAMES))
-            and not panel.words and panel.teleport is not None and panel.detail is not None
+            and not panel.words and panel.teleport is not None and panel.detail is not None and panel.agree
             and not pages._within_margin(panel.detail, panel.teleport))
 
 
@@ -470,26 +480,75 @@ def tracker_parts(obs):
     return names, len(obs.regions) - len(names)
 
 
-def hud_unclean(obs, reader, first=None):
-    """Why ``obs`` (move.RuntimeIo.observe) is not a clean HUD frame to touch, with the walker's checks: the HUD and
-    nothing else (move.classify "hud"), the minimap's player chevron at the default pivot (so the minimap is where its
-    tap point is), the quest tracker showing one quest name (no NARRATION_DENY word) and at most its distance (on the
-    saved 星海 frames the tracked quest lies on another map and no distance shows). ``first``: the deciding frame, for
-    a confirming frame: the same quest name and the permanent-HUD text blocks where the deciding frame had them
-    (move.same_blocks). None when clean."""
-    from host.android.move import NARRATION_DENY, same_blocks
-    if obs.kind != "hud":
-        return obs.reason or "不是干净的大世界"
+def first_shape(obs, reader):
+    """The walker's first-frame rule (move.Walker._first_look, the same order and checks) on one observation
+    (move.RuntimeIo.observe), for the frame that decides a touch on the HUD: ``("ok", "", shape)`` with shape
+    "distance" (one quest name and its distance) or "name_only" (one name of at least TRACKER_NAME_MIN_CJK CJK
+    characters with its distance row positively empty, Observation.name_only); ``("wait", reason, None)`` for a frame
+    the walker waits through (a blank capture, an ambient remark, a distance neither read nor shown absent);
+    ``("stop", reason, None)`` for one it refuses on (a misread before any clean frame, anything but the HUD, the
+    minimap chevron away from its default pivot, extra tracker text or a NARRATION_DENY word in it). Reasons are
+    fixed text."""
+    from host.android.move import NARRATION_DENY, TRACKER_NAME_MIN_CJK
+    if obs.kind == "blank":
+        return "wait", "没有拿到截图", None
+    if obs.kind == "misread":
+        return "stop", "大世界常驻界面的文字没有按原样读出", None
+    if obs.kind not in ("hud", "narration"):
+        return "stop", obs.reason or "不是干净的大世界", None
     if not reader.present(obs.frame):
-        return "没有在默认位置认出小地图"
+        return "stop", "没有在默认位置认出小地图", None
     names, distances = tracker_parts(obs)
-    if len(names) != 1 or any(word in names[0] for word in NARRATION_DENY):
-        return "任务栏的文字不是一个任务名"
-    if distances > 1:
-        return "任务栏的文字不是一个任务名"
-    if first is not None and (names != tracker_parts(first)[0] or not same_blocks(obs.blocks, first.blocks)):
-        return "大世界的界面文字和判断时不一样"
-    return None
+    if len(names) > 1 or distances > 1 or any(word in name for name in names for word in NARRATION_DENY):
+        return "stop", "任务栏的位置有多余的文字", None
+    if obs.kind == "hud" and len(names) == 1 and distances == 1:
+        return "ok", "", "distance"
+    if obs.kind == "hud" and len(names) == 1 and distances == 0 and obs.name_only \
+            and _cjk(names[0]) >= TRACKER_NAME_MIN_CJK:
+        return "ok", "", "name_only"
+    return "wait", "有旁白，或任务栏没有显示任务名和距离", None
+
+
+def confirm_shape(obs, first, shape, reader):
+    """The walker's later-frame rule (Walker._look) for the frame that confirms a touch decided on ``first``
+    (first_shape gave ``shape``): ``("ok", "")``; ``("restart", reason)`` for an ambient remark or a blank capture
+    (the decision pair starts again once it clears); ``("stop", reason)`` for anything else: not the HUD (a misread
+    included), the minimap chevron gone, another tracker name, a distance appearing on a name-only tracker or a
+    second one, a permanent-HUD text block where neither ``first`` nor the HUD's fixed slots have one."""
+    from host.android.move import same_blocks
+    if obs.kind in ("narration", "blank"):
+        return "restart", "有旁白或没有拿到截图"
+    if obs.kind != "hud":
+        return "stop", obs.reason or "不是干净的大世界"
+    if not reader.present(obs.frame):
+        return "stop", "没有在默认位置认出小地图"
+    names, distances = tracker_parts(obs)
+    if names != tracker_parts(first)[0] or distances > (0 if shape == "name_only" else 1):
+        return "stop", "任务栏的文字和判断时不一样"
+    if not same_blocks(obs.blocks, first.blocks):
+        return "stop", "大世界常驻界面上出现了判断时没有的文字块"
+    return "ok", ""
+
+
+def observation(look, verdict):
+    """A move.Observation of a Look classified by move.classify (for first_shape on frames the map flow captured)."""
+    from host.android.move import Observation
+    return Observation(look.frame, verdict.kind, look.at, verdict.reason, regions=verdict.regions,
+                       blocks=verdict.blocks, name_only=verdict.name_only)
+
+
+def stopping(rt) -> bool:
+    """The run stopped or the Android stop published (checked before anything reaches the user)."""
+    from host import android_user_stop
+    return bool(rt.stopped or android_user_stop())
+
+
+def say(rt, text, *, detail=False) -> bool:
+    """Log ``text`` unless the run is stopping (a published stop included); False when it was not logged."""
+    if stopping(rt):
+        return False
+    rt.log(text, detail=detail)
+    return True
 
 
 @dataclass
@@ -594,10 +653,11 @@ class Teleport:
         """One tap (or swipe) on the map: ``decide(look)`` returns its fields (target, or begin/end/duration) when a
         frame shows the whole expected state and None when it does not (a guard raises GuardRefusal itself). Decided
         on a fresh frame, confirmed on the next (same fields within actions.CONFIRM_TOLERANCE), sent with that second
-        frame only while it is younger than move.MAX_DECISION_AGE_S (from its capture request) and still valid, with
-        the gesture freshness rule (``_movement``: Runtime._dispatch_touch refuses a frame captured before the last
-        input or superseded by a later capture). A frame that is not the state stops with it (no second attempt);
-        only a focus change or a confirmation that aged out decides again. False when the run stopped."""
+        frame with the gesture freshness rule (``_movement``: refused when captured before the last input or
+        superseded by a later capture) and its expiry (``_not_after``: its capture request + move.MAX_DECISION_AGE_S,
+        checked by Runtime._dispatch_touch right before submission). A frame that is not the state stops with it (no
+        second attempt); only a focus change or an expired confirmation decides again. False when the run stopped."""
+        from host.android.gesture import DecisionExpired
         from host.android.move import MAX_DECISION_AGE_S
         from task_control import ForegroundChanged
         last = None
@@ -619,65 +679,81 @@ class Teleport:
             if again is None or not _same_fields(fields, again):
                 raise Stop(f"确认{what}时画面变了，没有点", [second.frame])
             last = second
-            if time.monotonic() - second.at > MAX_DECISION_AGE_S:
-                continue  # the confirmation is too old to stand for the screen: decided again on new frames
+            not_after = second.at + MAX_DECISION_AGE_S
+            if time.monotonic() > not_after:
+                continue  # already too old to stand for the screen: decided again on new frames
             if not (self.rt._frame_still_valid(first.frame) and self.rt._frame_still_valid(second.frame)):
                 continue
             try:
-                sent = self.rt.action(action, **again, source_frame=second.frame, _movement=True)
-            except ForegroundChanged:
+                sent = self.rt.action(action, **again, source_frame=second.frame, _movement=True,
+                                      _not_after=not_after)
+            except (ForegroundChanged, DecisionExpired):
                 continue
             return bool(sent) and bool(self.rt.pause(delay))
         raise Stop(f"连续 {self.rt.TOUCH_KEY_ATTEMPTS} 次没能在新的截图上及时确认{what}",
                    [last.frame] if last is not None else [])
 
     def clean_hud(self, what, seconds=None):
-        """A clean HUD frame to decide a touch on (hud_unclean): an allowed ambient remark or a once-misread
-        permanent-HUD text is waited through without input up to HUD_SETTLE_S; anything else stops with that frame.
-        None when the run stopped."""
-        start, misread = time.monotonic(), False
+        """``(obs, shape)``: a frame to decide a touch on the HUD, by the walker's first-frame rule (first_shape):
+        frames it waits through are waited through without input up to move.STARTUP_WAIT_S; a frame it refuses
+        stops with that frame. None when the run stopped."""
+        from host.android.move import STARTUP_WAIT_S
+        start = time.monotonic()
         while not self.rt.stopped:
             obs = self.io.observe()
             if obs is None:
                 return None
-            reason = hud_unclean(obs, self.reader)
-            if reason is None:
-                return obs
-            waiting = obs.kind == "narration" or (obs.kind == "misread" and not misread)
-            misread = misread or obs.kind == "misread"
-            if obs.kind != "blank" and not waiting:
+            verdict, reason, shape = first_shape(obs, self.reader)
+            if verdict == "ok":
+                return obs, shape
+            if verdict == "stop":
                 raise Stop(f"要{what}时画面不是干净的大世界（{reason}），没有点", [obs.frame])
-            if time.monotonic() - start >= (HUD_SETTLE_S if seconds is None else seconds):
+            if time.monotonic() - start >= (STARTUP_WAIT_S if seconds is None else seconds):
                 raise Stop(f"要{what}时一直没有等到干净的大世界画面（{reason}），没有点", [obs.frame])
             if not self.rt.pause(STEP):
                 return None
         return None
 
     def hud_pair(self, what, locate):
-        """A touch on the HUD decided on a clean HUD frame and confirmed on the next one (hud_unclean against the
-        first): ``locate(obs)`` returns the target box (raising Stop or GuardRefusal itself). Returns ``(first,
-        second, target)``, the target as found on the second; Stop with the second frame when it is not clean or
-        the target moved. None when the run stopped."""
-        first = self.clean_hud(what)
-        if first is None:
-            return None
-        target = locate(first)
-        second = self.io.observe()
-        if second is None:
-            return None
-        reason = hud_unclean(second, self.reader, first)
-        if reason is not None:
-            raise Stop(f"确认{what}时画面变了（{reason}），没有点", [second.frame])
-        again = locate(second)
-        if not actions._near(again, target):
-            raise Stop(f"确认{what}时目标的位置变了，没有点", [second.frame])
-        return first, second, again
+        """A touch on the HUD decided on a frame that passes the walker's first-frame rule and confirmed on the next
+        by its later-frame rule against the first (confirm_shape): ``locate(obs)`` returns the target box (raising
+        Stop or GuardRefusal itself). Ambient narration (or a blank capture) on the confirming frame starts the pair
+        again once it clears, within move.NARRATION_MAX_S; any other confirming frame that fails stops with it.
+        Returns ``(first, second, target)``, the target as found on the second. None when the run stopped."""
+        from host.android.move import NARRATION_MAX_S
+        start = time.monotonic()
+        while not self.rt.stopped:
+            found = self.clean_hud(what)
+            if found is None:
+                return None
+            first, shape = found
+            target = locate(first)
+            second = self.io.observe()
+            if second is None:
+                return None
+            verdict, reason = confirm_shape(second, first, shape, self.reader)
+            if verdict == "restart":
+                if time.monotonic() - start >= NARRATION_MAX_S:
+                    raise Stop(f"确认{what}时旁白一直没有消失，没有点", [second.frame])
+                if not self.rt.pause(STEP):
+                    return None
+                continue
+            if verdict == "stop":
+                raise Stop(f"确认{what}时画面变了（{reason}），没有点", [second.frame])
+            again = locate(second)
+            if not actions._near(again, target):
+                raise Stop(f"确认{what}时目标的位置变了，没有点", [second.frame])
+            return first, second, again
+        return None
 
     # -- open, region, zoom --
 
-    def open_map(self) -> bool:
-        """From a clean HUD (both tap frames, the minimap at its default place): one tap on the minimap, then the map."""
+    def open_map(self):
+        """From the HUD (both tap frames by the walker's rules, the minimap chevron at its default pivot so the
+        minimap is where its tap point is): one tap on the minimap, then the map. Returns the first Look of the map
+        page (the map or 地图切换), carried into the next step; None when the run stopped."""
         from host.android import touch_point
+        from host.android.gesture import DecisionExpired
         from host.android.move import MAX_DECISION_AGE_S
         from task_control import ForegroundChanged
 
@@ -688,21 +764,25 @@ class Teleport:
         for _attempt in range(self.rt.TOUCH_KEY_ATTEMPTS):
             pair = self.hud_pair("点小地图打开大地图", minimap)
             if pair is None:
-                return False
+                return None
             first, second, box = pair
-            if time.monotonic() - second.at > MAX_DECISION_AGE_S:
+            not_after = second.at + MAX_DECISION_AGE_S
+            if time.monotonic() > not_after:
                 continue
             if not (self.rt._frame_still_valid(first.frame) and self.rt._frame_still_valid(second.frame)):
                 continue
             try:
-                sent = self.rt.action("Click", target=touch_point(box), source_frame=second.frame, _movement=True)
-            except ForegroundChanged:
+                sent = self.rt.action("Click", target=touch_point(box), source_frame=second.frame, _movement=True,
+                                      _not_after=not_after)
+            except (ForegroundChanged, DecisionExpired):
                 continue
             if not (sent and self.rt.pause(.5)):
-                return False
-            return self.wait("打开大地图", lambda state, f, r: state in ("map", "menu"), ("hud", "transition"),
-                             OPEN_WAIT) is not None
+                return None
+            found = self.wait("打开大地图", lambda state, f, r: state in ("map", "menu"), ("hud", "transition"),
+                              OPEN_WAIT)
+            return None if found is None else Look(time.monotonic(), found[1], found[2], found[3], found[0])
         raise Stop(f"连续 {self.rt.TOUCH_KEY_ATTEMPTS} 次没能在新的截图上及时确认要点的小地图", [])
+
 
     def _menu_target(self, node):
         """decide for a tap in 地图切换: the list open (its title read) on the page titled exactly 地图, the target
@@ -722,14 +802,20 @@ class Teleport:
             return {"target": box}
         return decide
 
-    def region(self, name: str = STARSEA) -> bool:
+    def region(self, name: str = STARSEA, entry=None) -> bool:
         """The map showing ``name``: read on the card (region_card); otherwise 地图切换 opened by the card's title (a
         positively read region card of another region), the row tapped (expanded provinces collapsed first while
-        the row is not in the list, the list read once more after the last collapse), and the card read again."""
-        found = self.wait("读取地图区域", lambda state, f, r: state in ("map", "menu"), (), 0)
-        if found is None:
-            return False
-        state, _screen, frame, recognize = found
+        the row is not in the list, the list read once more after the last collapse), and the card read again.
+        ``entry``: the frame the caller already has (open_map's first map frame), judged first: anything but the map
+        or 地图切换 stops with it."""
+        if entry is None:
+            found = self.wait("读取地图区域", lambda state, f, r: state in ("map", "menu"), (), 0)
+            if found is None:
+                return False
+            entry = Look(time.monotonic(), found[1], found[2], found[3], found[0])
+        if entry.state not in ("map", "menu"):
+            raise Stop("读取地图区域时出现了不该出现的画面", [entry.frame])
+        state, frame, recognize = entry.state, entry.frame, entry.recognize
         if state == "map" and region_card(recognize) == name:
             return True
         if state == "map":
@@ -852,9 +938,10 @@ class Teleport:
                 raise Stop("拖动地图后地图移动的距离和预期不符", [moved[2]])
         raise Stop(f"拖动 {MAX_DRAGS} 次后「{name}」仍然不在画面中间", [frame])
 
-    def select(self, name, x, y, pose) -> bool:
+    def select(self, name, x, y, pose):
         """Tap the pillar of the point at world (x, y): on both tap frames the map with nothing over it at ``pose``,
-        the pillar found within PILLAR_TOLERANCE of where the point's icon should be, guarded."""
+        the pillar found within PILLAR_TOLERANCE of where the point's icon should be, guarded. Returns the first frame
+        that shows a panel (validated by confirm, never replaced by a later capture); None when the run stopped."""
         expected = pillar_expected(pose, x, y)
         window = {"roi": pillar_window(expected)}
 
@@ -868,18 +955,19 @@ class Teleport:
             guard(look.recognize, actions._box(result), look.frame)
             return {"target": actions._box(result)}
         if not self.send(f"点「{name}」的传送点图标", pillar):
-            return False
-        return self.wait(f"打开「{name}」的详情", lambda state, f, r: state == "panel", ("map", "transition"),
-                         PANEL_WAIT) is not None
+            return None
+        found = self.wait(f"打开「{name}」的详情", lambda state, f, r: state == "panel", ("map", "transition"),
+                          PANEL_WAIT)
+        return None if found is None else Look(time.monotonic(), found[1], found[2], found[3], found[0])
 
-    def confirm(self, name) -> bool:
-        """On the point panel: exactly the panel of ``name`` (title, the buttons 详情 and 传送 and nothing else read
-        in the button band, no map word) on both tap frames -> one tap on 传送 (by its OCR box). Any other panel:
-        saved and stopped at once, nothing tapped (not even its ✕)."""
-        found = self.wait(f"读取「{name}」的详情", lambda state, f, r: state == "panel", (), 0)
-        if found is None:
-            return False
-        reject(found[3], found[2], name)
+    def confirm(self, name, panel_look) -> bool:
+        """On the point panel: ``panel_look`` (the first frame that showed a panel) must already be exactly the panel
+        of ``name`` (title, the buttons 详情 and 传送 and nothing else read in the button band, the two 传送 passes
+        agreeing, no map word), else it is saved and the task stops, nothing tapped (not even its ✕). Then one tap on
+        传送 (the band's OCR box), decided and confirmed on fresh frames held to the same check."""
+        if not pages.is_exactly(panel_look.screen, MAP_TITLE):
+            raise Stop(f"打开「{name}」的详情时出现了不该出现的画面", [panel_look.frame])
+        reject(panel_look.recognize, panel_look.frame, name)
 
         def teleport(look):
             if look.state != "panel" or not pages.is_exactly(look.screen, MAP_TITLE):
@@ -889,38 +977,47 @@ class Teleport:
             return {"target": panel.teleport}
         if not self.send(f"点「{name}」的传送", teleport):
             return False
-        self.rt.log(f"已点「{name}」的传送。", detail=True)
+        say(self.rt, f"已点「{name}」的传送。", detail=True)
         return True
 
     # -- arrival --
 
-    def await_hud(self, what, seconds, destination=None):
-        """Wait, without input, for a clean HUD (move.classify "hud") after 传送 (``destination``: the point's name) or
-        after the bell. On the way: loading frames (nothing recognised, no text: loading_frame) up to ``seconds``;
-        frames with nothing recognised but text, up to UNKNOWN_WAIT; ambient narration and one misread HUD text;
-        after 传送, up to MAP_LINGER, the map and the destination's own panel. Anything else positively recognised
-        (a dialog, a popup, another page or panel, a HUD with a prompt or banner) stops with that frame at once, and
-        so does the time running out. Returns the Look of the clean HUD frame; None when the run stopped."""
+    def hud_verdict(self, look, what):
+        """A HUD Look judged by the walker: ``"ok"`` when it passes the walker's first-frame rule (classify with the
+        frame, then first_shape), ``"wait"`` for what the walker waits through; anything it refuses stops here with
+        that frame (a prompt, a tracker with 点击继续, a misread before a clean frame, ...)."""
         from host.android.move import classify
-        start, unknown_since, misread = time.monotonic(), None, False
+        verdict, reason, _shape = first_shape(observation(look, classify(look.screen, look.recognize, look.frame)),
+                                              self.reader)
+        if verdict == "stop":
+            raise Stop(f"{what}大世界上{reason}", [look.frame])
+        return verdict
+
+    def await_hud(self, what, seconds, destination=None):
+        """Wait, without input, for a HUD frame the walker would start on (hud_verdict) after 传送 (``destination``:
+        the point's name) or after the bell. On the way: loading frames (nothing recognised, no text: loading_frame)
+        up to ``seconds``; frames with nothing recognised but plain text up to UNKNOWN_WAIT; after 传送, up to
+        MAP_LINGER, the map and the destination's own panel; HUD frames the walker waits through (an ambient remark,
+        the tracker's distance not yet settled). Anything else stops with that frame on first sight: a dialog, a
+        popup, another page or panel, a HUD the walker refuses, and text that reads as a prompt (a NARRATION_DENY
+        word or an overlay glyph) on a frame with nothing recognised. Returns that HUD Look; None when stopped."""
+        start, unknown_since = time.monotonic(), None
         while not self.rt.stopped:
             look = self.capture()
             if look is None:
                 return None
             elapsed = time.monotonic() - start
             if look.state == "hud":
-                verdict = classify(look.screen, look.recognize)
-                if verdict.kind == "hud":
+                if self.hud_verdict(look, what) == "ok":
                     return look
-                if verdict.kind == "misread" and not misread:
-                    misread = True
-                elif verdict.kind != "narration":
-                    raise Stop(f"{what}大世界上出现了{verdict.reason or '认不出的东西'}", [look.frame])
             elif look.state in ("map", "panel") and destination is not None and elapsed <= MAP_LINGER:
                 if look.state == "panel" and not panel_ok(read_panel(look.recognize), destination):
                     raise Stop(f"{what}出现了别的地点的详情", [look.frame])
             elif look.state == "transition":
-                if not loading_frame(look.recognize):
+                kind = transition_text(look.recognize)
+                if kind == "prompt":
+                    raise Stop(f"{what}出现了像是要点击或指引的文字", [look.frame])
+                if kind == "text":
                     unknown_since = time.monotonic() if unknown_since is None else unknown_since
                     if time.monotonic() - unknown_since >= UNKNOWN_WAIT:
                         raise Stop(f"{what}出现了认不出的画面，等了 {UNKNOWN_WAIT} 秒没有变化", [look.frame])
@@ -933,23 +1030,37 @@ class Teleport:
 
     # -- the whole teleport --
 
-    def transport(self, checkpoint):
+    def transport(self, checkpoint, entry=None):
         """Teleport to ``checkpoint`` (a checkpoints.json record of 星海: name, x, y) from the HUD or from the map page
-        of 星海; returns ``(x, y)``, the walker's position hint, once a clean HUD shows. None when the run stopped."""
+        of 星海; returns ``(x, y)``, the walker's position hint, once a HUD the walker would start on shows. ``entry``:
+        the frame the caller already has of the map (carried, not replaced); without it the first frame captured here
+        must be the HUD or the map (anything else stops with it at once). None when the run stopped."""
         name, x, y = checkpoint["name"], float(checkpoint["x"]), float(checkpoint["y"])
-        state = self.look()[0]
-        if state is None:
-            return None
-        if state == "hud" and not self.open_map():
-            return None
-        if not (self.region(STARSEA) and self.zoom()):
+        if entry is None:
+            entry = self.capture()
+            if entry is None:
+                return None
+            while entry.state == "invalid" and not self.rt.stopped:
+                entry = self.capture()
+                if entry is None:
+                    return None
+            if entry.state == "hud":
+                entry = self.open_map()
+                if entry is None:
+                    return None
+        if entry.state not in ("map", "menu"):
+            raise Stop(f"要传送到「{name}」时画面不是大地图", [entry.frame])
+        if not (self.region(STARSEA, entry) and self.zoom()):
             return None
         pose = self.center(name, x, y)
-        if pose is None or not self.select(name, x, y, pose) or not self.confirm(name):
+        if pose is None:
+            return None
+        panel = self.select(name, x, y, pose)
+        if panel is None or not self.confirm(name, panel):
             return None
         if self.await_hud(f"传送到「{name}」时", ARRIVE_WAIT, destination=name) is None:
             return None
-        self.rt.log(f"已传送到「{name}」。")
+        say(self.rt, f"已传送到「{name}」。")
         return x, y
 
     def card(self) -> Card | None:
@@ -977,8 +1088,10 @@ class Teleport:
 
     def leave(self):
         """The map page left by its back arrow (one tap: the map with nothing over it on both tap frames, the arrow
-        guarded by full OCR boxes), then the HUD on fresh frames. Returns the Look of the final HUD frame (clean or
-        with an allowed remark; anything else stops with that frame); None when the run stopped."""
+        guarded by full OCR boxes). Frames of the map page and loading frames are waited through up to
+        pages.LEAVE_PAGE_WAIT; the very first frame that is anything else must be a HUD the walker would start on
+        (hud_verdict; a remark is waited through, up to CLEAN_HUD_WAIT), else it is saved and the task stops.
+        Returns the HUD Look; None when the run stopped."""
         def back(look):
             if look.state != "map" or not pages.is_exactly(look.screen, MAP_TITLE):
                 return None
@@ -989,12 +1102,39 @@ class Teleport:
             return {"target": actions._box(result)}
         if not self.send("点地图的返回箭头", back):
             return None
-        state, frame, after = pages.left_page(self.rt, MAP_TITLE)
-        if state is None:
-            return None
-        if state != "left" or after.kind != "hud":
-            raise Stop("点了地图的返回箭头之后没有回到大世界", [frame])
-        return self.await_hud("离开地图后", CLEAN_HUD_WAIT)
+        start, left = time.monotonic(), False
+        while not self.rt.stopped:
+            look = self.capture()
+            if look is None:
+                return None
+            elapsed = time.monotonic() - start
+            if look.state == "hud":
+                left = True
+                if self.hud_verdict(look, "离开地图后") == "ok":
+                    return look
+            elif look.state != "invalid":
+                waiting = not left and (look.state == "map" or (
+                    look.state == "transition" and transition_text(look.recognize) == "none"))
+                if not waiting:
+                    raise Stop("点了地图的返回箭头之后没有回到干净的大世界", [look.frame])
+            if elapsed >= (CLEAN_HUD_WAIT if left else pages.LEAVE_PAGE_WAIT):
+                raise Stop("点了地图的返回箭头之后没有回到干净的大世界", [look.frame])
+            self.rt.pause(STEP)
+        return None
+
+
+def transition_text(recognize) -> str:
+    """What a frame with nothing recognised reads (full-frame OCR): "prompt" (a NARRATION_DENY word or an overlay
+    glyph: an instruction or a tap marker), "text" (other text of two or more CJK characters) or "none" (a loading
+    frame, loading_frame)."""
+    from host.android.move import NARRATION_DENY, SCREEN_TEXT, _glyph
+    result = recognize(SCREEN_TEXT)
+    if result is None:
+        return "text"
+    texts = [text for text, _box in _rows(result)]
+    if any(_glyph(text) or any(word in text for word in NARRATION_DENY) for text in texts):
+        return "prompt"
+    return "text" if any(_cjk(text) >= 2 for text in texts) else "none"
 
 
 def reject(recognize, frame, name) -> Panel:

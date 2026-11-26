@@ -13,7 +13,8 @@ decide there, through the real nodes (both resource layers):
   - on 地图切换: the 星海 row (and whether it is a province header) or the collapse chevron, with the guards;
   - on a point panel: its title, buttons, map words, whether it passes for 星梦群屿·主岛, the 传送 tap and its guards;
   - on the HUD frames (DIR/map-survey and DIR/survey/walk): the bell button, the walk's screen class and whether the
-    frame is clean enough to decide the minimap tap or the bell on (teleport.hud_unclean), with the tap's guards.
+    frame passes the walker's first-frame rule for the minimap tap or the bell (teleport.first_shape), with
+    the tap's guards.
 """
 from __future__ import annotations
 
@@ -117,11 +118,11 @@ def judge(world, frame_path):
             bell = recognize(teleport.HUD_BELL)
             out["bell"] = touch_point(actions._box(bell)) if actions._hit(bell) else None
             out["bell_in_place"] = actions._hit(bell) and actions._near(touch_point(actions._box(bell)), BELL_POINT)
-            verdict = move.classify(screen, recognize)
+            verdict = move.classify(screen, recognize, frame)
             out["walk_class"] = verdict.kind
             obs = move.Observation(frame, verdict.kind, 0.0, verdict.reason, regions=verdict.regions,
-                                   blocks=verdict.blocks)
-            out["touch_clean"] = teleport.hud_unclean(obs, _Reader) or "clean"
+                                   blocks=verdict.blocks, name_only=verdict.name_only)
+            out["touch_rule"] = list(teleport.first_shape(obs, _Reader))
             out["minimap_tap_guard"] = pages._forbidden_near(recognize, list(actions.MINIMAP)) or \
                 teleport.word_near(recognize, list(actions.MINIMAP))
         return out

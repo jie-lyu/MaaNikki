@@ -742,15 +742,17 @@ def touches(data_root: Path, since: dt.datetime) -> list[dict]:
 
 
 def agent_messages(data_root: Path, since: dt.datetime) -> list[str]:
-    """The agent's user-facing messages written during this run (its message log under the data root)."""
+    """The agent's user-facing messages written during this run (its message log under the data root): only their
+    display text; rows without one (details, failure scenes, which may quote OCR) stay in the log and diagnostics."""
     messages = []
     folder = data_root / "debug" / "messages"
     for path in sorted(folder.glob("*.log")) if folder.is_dir() else []:
         try:
             for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
                 entry = json.loads(line)
-                if dt.datetime.fromisoformat(entry["timestamp"]) >= since:
-                    messages.append(str(entry.get("message", "")))
+                display = entry.get("display")
+                if dt.datetime.fromisoformat(entry["timestamp"]) >= since and isinstance(display, str) and display:
+                    messages.append(display)
         except (OSError, ValueError, KeyError, TypeError):
             continue
     return messages[-20:]
