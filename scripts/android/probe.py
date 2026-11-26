@@ -1195,6 +1195,12 @@ def cmd_screen(args) -> int:
 # ---------------------------------------------------------------- fix (phase E movement, read-only)
 
 
+def _opaque(text: str) -> dict:
+    """A quest-tracker row without its OCR text: its length and a short hash (equal hashes: the same text)."""
+    import hashlib
+    return {"length": len(text), "sha1": hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]}
+
+
 def cmd_fix(args) -> int:
     """The movement backend's reading of frames (host.android.minimap, host.android.move.classify): the minimap fix
     around --hint, the camera yaw, whether the chevron sits at the pivot, and the screen class the walk would act on.
@@ -1216,7 +1222,7 @@ def cmd_fix(args) -> int:
         frame = recognizer.last_frame
         fix = reader.fix(frame, tuple(args.hint), args.search)
         print(json.dumps({"frame": str(name), "screen": verdict.kind, "reason": verdict.reason,
-                          "tracker": list(verdict.regions), "chevron": reader.present(frame),
+                          "tracker": [_opaque(entry) for entry in verdict.regions], "chevron": reader.present(frame),
                           "fix": fix.log(), "from_hint": round(math.dist((fix.x, fix.y), args.hint), 2)},
                          ensure_ascii=False), flush=True)
     return 0

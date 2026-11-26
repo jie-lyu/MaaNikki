@@ -71,9 +71,9 @@ class FakeIo:
         self.stop_after_steps = None
         self.stop_after_observations = None
         self.bell_raises = None
-        self.captured = {}
+        self.captured, self.started, self.not_afters = {}, {}, []
         self.present = True  # the minimap chevron on the next frames
-        self.regions = lambda number: ()  # the quest tracker's rows on frame ``number``
+        self.regions = lambda number: ("登上鸣鸣列车", move.TRACKER_DISTANCE)  # the tracker's rows on frame ``number``
 
     def stopped(self):
         return (self.stop_after_steps is not None and len(self.steps) >= self.stop_after_steps) or (
@@ -94,13 +94,15 @@ class FakeIo:
         frame = Frame(self.observed, (x, y), kind, reason=reason, present=self.present)
         self.frames.append(frame)
         self.captured[frame.number] = self.clock()
+        self.started[frame.number] = at
         return Observation(frame, kind, at, reason, self.clock(), self.regions(self.observed))
 
     BELL_S = 4.0
 
     def step(self, frame, angle, seconds, jump_at, *, not_after=None):
         assert frame is self.frames[-1], "a step must be decided on the frame just captured"
-        assert not_after is not None and not_after == frame_captured(self, frame) + move.MAX_DECISION_AGE_S
+        assert not_after is not None and not_after <= self.started[frame.number] + move.MAX_DECISION_AGE_S + 1e-9
+        self.not_afters.append(not_after)
         assert not any(kind == "step" and record["step"] == len(self.steps) for kind, record in self.records), \
             "a step's record is written only after its lift"
         ok = self.step_results.pop(0) if self.step_results else True
@@ -120,7 +122,8 @@ class FakeIo:
 
     def bell(self, frame, *, not_after=None):
         assert frame is self.frames[-1]
-        assert not_after == frame_captured(self, frame) + move.MAX_DECISION_AGE_S
+        assert not_after is not None and not_after <= self.started[frame.number] + move.MAX_DECISION_AGE_S + 1e-9
+        self.not_afters.append(not_after)
         if self.bell_raises is not None:
             error, self.bell_raises = self.bell_raises, None
             raise error
@@ -437,7 +440,10 @@ def hud_with(*rows, ocr_fails=False):
 WIND = (("暖暖", [609, 506, 59, 31]), ("起风了——大喵小心，别被吹跑啦。", [446, 557, 374, 30]))  # m2-goto1, as read
 BELL = (("暖暖，", [401, 561, 73, 22]), ("星之铃似乎在闪烁呢！摇动它试试吧", [466, 555, 390, 31]),
         ("大喵", [608, 502, 61, 38]))  # phase0/hud-1280x720.png, as read
-HUD_TEXT = (("商城", [630, 60, 40, 20]), ("登上鸣鸣列车", [110, 235, 120, 25]), ("1049米", [120, 262, 60, 20]),
+LABEL_ROW = (("商城", [638, 62, 38, 22]), ("共鸣", [708, 62, 38, 22]),
+             ("奇迹之旅活动大厅奇想日历无限之心", [761, 62, 284, 22]), ("任务", [1059, 62, 38, 22]),
+             ("设计图", [1125, 62, 54, 22]), ("换装", [1203, 62, 38, 22]))  # where the saved frames read them
+HUD_TEXT = (*LABEL_ROW, ("登上鸣鸣列车", [110, 235, 120, 25]), ("1049米", [120, 262, 60, 20]),
             ("心誓5×1", [520, 668, 200, 22]), ("UID 123456789", [0, 700, 90, 18]))
 
 
@@ -445,9 +451,10 @@ class ClassifyTests(unittest.TestCase):
     """What may move: the HUD and nothing else; narration only as one ambient line (rows as OCR read them)."""
 
     def test_the_hud_alone_and_its_own_text_move(self):
-        self.assertEqual(hud_with(), ("hud", ""))
+        self.assertEqual(hud_with()[0], "other")  # no positive full-frame evidence: no step
         self.assertEqual(hud_with(*HUD_TEXT), ("hud", ""))
-        self.assertEqual(hud_with(("口", [640, 610, 20, 20]), ("一飞", [240, 500, 800, 95], 0.52)), ("hud", ""))
+        self.assertEqual(hud_with(*HUD_TEXT, ("口", [640, 610, 20, 20]), ("一飞", [240, 500, 800, 95], 0.52)),
+                         ("hud", ""))
 
     def test_the_two_saved_ambient_remarks_are_narration(self):
         self.assertEqual(hud_with(*WIND, *HUD_TEXT), ("narration", ""))
@@ -652,7 +659,7 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(walk.call_args.kwargs["start_radius"], 9.0)
 
 
-TRACKER = ("登上鸣鸣列车", "#米")
+TRACKER = ("登上鸣鸣列车", move.TRACKER_DISTANCE)
 
 
 class ReviewRound2Tests(unittest.TestCase):
@@ -672,16 +679,24 @@ class ReviewRound2Tests(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(hud_with(*rows, *HUD_TEXT)[0], "other")
 
-    def test_1_the_huds_own_text_as_ocr_misreads_it_still_moves(self):
-        misreads = (("奇迹之旅活动人厅奇想日历无限之心", [700, 60, 360, 22]), ("共吗", [705, 60, 40, 22]),
-                    ("LID123456789", [0, 700, 90, 18]), ("23Gms", [80, 700, 40, 18]), ("心誓5や♡", [520, 668, 120, 22]),
+    def test_1_only_the_observed_forms_of_the_huds_own_text_move(self):
+        observed = (("LID123456789", [0, 700, 90, 18]), ("D123456789", [0, 700, 90, 18]), ("46m", [80, 700, 30, 18]),
+                    ("45mm", [80, 700, 30, 18]), ("心誓5や♡", [520, 668, 120, 22]), ("33333×1", [600, 668, 80, 22]),
                     ("2A1", [966, 535, 30, 20], 0.79), ("ittit", [1017, 95, 30, 14], 0.69))
-        self.assertEqual(hud_with(*misreads, *HUD_TEXT), ("hud", ""))
+        for row in observed:
+            with self.subTest(row[0]):
+                self.assertEqual(hud_with(*HUD_TEXT, row), ("hud", ""))
+        unobserved = (("活动人厅", [833, 62, 72, 22]), ("共吗", [708, 62, 38, 22]), ("23Gms", [80, 700, 40, 18]),
+                      ("UID1172973A1", [0, 700, 90, 18]), ("商城", [900, 62, 38, 22]),  # 商城 out of its place
+                      ("126", [320, 40, 30, 16]), ("1234", [600, 668, 60, 22]))
+        for row in unobserved:
+            with self.subTest(row[0]):
+                self.assertEqual(hud_with(*HUD_TEXT, row)[0], "other")
 
     def test_1_the_first_frame_must_be_a_clean_hud(self):
         for name, kinds, regions in (("quest start in the tracker", ["hud"], lambda n: ("任务开始",)),
                                      ("two rows in the tracker", ["hud"], lambda n: ("登上鸣鸣列车", "新的委托")),
-                                     ("narration", ["narration"], lambda n: TRACKER)):
+                                     ):
             with self.subTest(name):
                 walk, io = walker(World((0, 0)), kinds=kinds)
                 io.regions = regions
@@ -689,10 +704,18 @@ class ReviewRound2Tests(unittest.TestCase):
                 self.assertEqual((result.outcome, io.steps), ("refused", []))
                 self.assertEqual(io.saved[0][2].number, 1)
 
-    def test_1_a_tracker_change_stops_but_ocrs_misreads_do_not(self):
+    def test_1_a_tracker_change_stops_but_its_distance_may_go_unread(self):
         walk, io = walker(World((0, 0), yaw=0.0))
-        io.regions = lambda n: TRACKER if n == 1 else ("登上呜呜列车", "#米") if n == 2 else ("登上鸣鸣列车",)
+        io.regions = lambda n: TRACKER if n != 2 else ("登上鸣鸣列车",)
         self.assertTrue(walk.walk([Goal(0, -12)], (0, 0), 60).ok)
+        for changed in (("登上鸣鸣列车", "任务开始"), ("离开鸣鸣列车", move.TRACKER_DISTANCE),
+                        ("登上鸣鸣列车", move.TRACKER_DISTANCE, move.TRACKER_DISTANCE)):
+            with self.subTest(changed=changed):
+                walk, io = walker(World((0, 0)))
+                io.regions = lambda n, changed=changed: TRACKER if n == 1 else changed
+                result = walk.walk([Goal(0, -20)], (0, 0), 60)
+                self.assertEqual((result.outcome, len(io.steps), io.observed), ("screen", 1, 2))
+                self.assertEqual(io.saved[0][2].number, 2)
         walk, io = walker(World((0, 0)))
         io.regions = lambda n: TRACKER if n == 1 else ("登上鸣鸣列车", "任务开始")
         result = walk.walk([Goal(0, -20)], (0, 0), 60)
@@ -754,11 +777,15 @@ class ReviewRound2Tests(unittest.TestCase):
                         patch("host.android.actions.read_screen", return_value=Screen("unknown", reason="认不出")):
                     obs = move.RuntimeIo(rt).observe()
                 self.assertEqual(obs.kind, kind)
+        hud_rows = Ocr([Row(*row) for row in HUD_TEXT])
         with patch("host.device_input", return_value=SimpleNamespace(touch_of=lambda f: TouchSnapshot("none", 1, 1))), \
                 patch("host.android.actions.read_screen", return_value=Screen("hud", {"duck": [30, 18, 54, 54]})):
             rt = SimpleNamespace(stopped=False, _fresh_device_frame=lambda: dark, _frame_still_valid=lambda f: True,
-                                 _recognizer_on=lambda f: (lambda node, override=None: Ocr([])))
-            self.assertEqual(move.RuntimeIo(rt).observe().kind, "hud")
+                                 _recognizer_on=lambda f: (lambda node, override=None: hud_rows))
+            obs = move.RuntimeIo(rt).observe()
+            self.assertEqual((obs.kind, obs.regions), ("hud", TRACKER))
+            rt._recognizer_on = lambda f: (lambda node, override=None: Ocr([]))  # a full-frame OCR miss
+            self.assertEqual(move.RuntimeIo(rt).observe().kind, "other")
 
     def test_13_a_held_contact_frame_never_declares_arrival(self):
         walk, io = walker(World((5, 5)), kinds=[("other", "画面（截图时设备上有按住的触点，或读不出触摸状态）")])
@@ -842,6 +869,147 @@ class ReviewRound2Tests(unittest.TestCase):
         self.assertEqual(io.saved[0][2].number, 2)
 
 
+class ReviewRound3Tests(unittest.TestCase):
+    """Movement review round 3: each finding's scenario, replayed."""
+
+    # 1: exact forms and places only; glyphs on the raw text; a positive full-frame pass
+    def test_1_codexs_region_cases_stop(self):
+        cases = {
+            "换人 where 换装 is": (("换人", [1203, 62, 38, 22]),),
+            "Lv. 40 in the UID corner": (("Lv. 40", [80, 700, 60, 18], 0.95),),
+            "combat numbers on the 心誓 bar": (("1234", [600, 668, 60, 22]),),
+            "combat numbers by the icon badges": (("999", [330, 40, 30, 16]),),
+            "a marker after the quest name": (("登上鸣鸣列车▼", [110, 235, 140, 25]),),
+        }
+        for name, rows in cases.items():
+            with self.subTest(name):
+                rest = [row for row in HUD_TEXT if not (name.startswith("a marker") and row[0] == "登上鸣鸣列车")]
+                self.assertEqual(hud_with(*rows, *rest)[0], "other")
+        self.assertEqual(hud_with()[0], "other")  # a full-frame OCR miss authorises nothing
+        self.assertEqual(hud_with(*HUD_TEXT[3:])[0], "other")  # only 3 of 9 labels read in place
+
+    def test_1_a_first_frame_quest_without_its_distance_never_authorises_a_step(self):
+        walk, io = walker(World((0, 0)))
+        io.regions = lambda n: ("交谈",)
+        result = walk.walk([Goal(0, -6)], (0, 0), 60)
+        self.assertEqual((result.outcome, io.steps), ("refused", []))
+        self.assertLessEqual(io.clock.t - 100, move.STARTUP_WAIT_S + 1.0)
+
+    # 2: the line joined before the deny check
+    def test_2_a_tap_prompt_split_across_boxes_stops(self):
+        rows = (("暖暖", [609, 506, 59, 31]), ("现在点", [520, 557, 96, 30]), ("击屏幕", [614, 557, 96, 30]))
+        self.assertEqual(hud_with(*rows, *HUD_TEXT)[0], "other")
+
+    # 3: the chevron before the narration exception; a remark at the start is waited through
+    def test_3_a_narration_frame_without_the_chevron_stops_on_that_frame(self):
+        walk, io = walker(World((0, 0)), kinds=["hud", "narration", "hud"])
+        original = io.observe
+
+        def observe():
+            io.present = io.observed != 1  # frame 2 (the narration frame) lacks the chevron
+            return original()
+        io.observe = observe
+        result = walk.walk([Goal(0, -20)], (0, 0), 60)
+        self.assertEqual((result.outcome, len(io.steps), io.observed), ("screen", 1, 2))
+        self.assertEqual(io.saved[0][2].number, 2)
+
+    def test_3_an_ambient_remark_at_the_start_is_waited_for_not_refused(self):
+        walk, io = walker(World((0, 0), yaw=0.0), kinds=["narration", "narration", "hud"])
+        result = walk.walk([Goal(0, -6)], (0, 0), 60)
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(io.steps[0]["frame"].number, 3)
+        walk, io = walker(World((0, 0)), kinds=["narration"] * 50)
+        result = walk.walk([Goal(0, -6)], (0, 0), 60)
+        self.assertEqual((result.outcome, io.steps), ("refused", []))
+
+    def test_3_a_startup_remark_without_the_chevron_refuses(self):
+        walk, io = walker(World((0, 0)), kinds=["narration"])
+        io.present = False
+        result = walk.walk([Goal(0, -6)], (0, 0), 60)
+        self.assertEqual((result.outcome, io.observed, io.steps), ("refused", 1, []))
+
+    # 4: the expiry counts from before the pixels were requested
+    def test_4_a_slow_query_after_the_capture_ages_the_frame_from_its_request(self):
+        world = World((0, 0), yaw=0.0)
+        walk, io = walker(world)
+        original = io.observe
+
+        def observe():
+            obs = original()
+            if obs.frame.number == 1:
+                io.clock.t += 2.0  # the post-capture focus query took 2 s: captured stamps late, at does not
+                obs.captured = io.clock()
+            return obs
+        io.observe = observe
+        result = walk.walk([Goal(0, -6)], (0, 0), 60)
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(io.steps[0]["frame"].number, 2)
+        self.assertTrue(all(n <= io.started[step["frame"].number] + move.MAX_DECISION_AGE_S + 1e-9
+                            for n, step in zip(io.not_afters, io.steps)))
+
+    # 5: a gesture that starts late cannot end past the deadline; waits are wall-clock bounded
+    def test_5_not_after_leaves_room_for_the_hold_before_the_deadline(self):
+        walk, io = walker(World((0, 0), yaw=0.0))
+        walk.walk([Goal(0, -30)], (0, 0), 4.0)
+        deadline = 100 + 4.0
+        for not_after, step in zip(io.not_afters, io.steps):
+            self.assertLessEqual(not_after + step["seconds"] + move.LIFT_MARGIN_S, deadline + 1e-9)
+
+    def test_5_the_bell_cannot_end_past_the_deadline(self):
+        walk, io = walker(World((0, 0), yaw=90.0), allow_bell=True)
+        result = walk.walk([Goal(0.5, 0, 1.2, action="bell")], (0, 0), 6.5)
+        self.assertTrue(result.ok, result.message)
+        self.assertLessEqual(io.not_afters[-1] + FakeIo.BELL_S + move.LIFT_MARGIN_S, 100 + 6.5 + 1e-9)
+
+    def test_5_runtime_io_pause_is_bounded_wall_time_not_runtime_pause(self):
+        import time as real_time
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        rt = SimpleNamespace(stopped=False, pause=Mock(side_effect=AssertionError("Runtime.pause may block")))
+        with patch("host.android_user_stop", return_value=False):
+            started = real_time.monotonic()
+            self.assertTrue(move.RuntimeIo(rt).pause(0.1))
+            self.assertLess(real_time.monotonic() - started, 0.5)
+        rt.stopped = True
+        with patch("host.android_user_stop", return_value=False):
+            self.assertFalse(move.RuntimeIo(rt).pause(5))
+
+    # 7: no-input rechecks bounded by the anchor and the preceding fix
+    def test_7_false_peaks_either_side_of_the_anchor_cannot_add_up(self):
+        world = World((0, 0), yaw=0.0)
+        far = Fix(0, -10.84, 0.78, 0.0, 1.0, True)
+        reader = FakeReader(world, bad={3: Fix(0, -4.04, 0.78, None, 0.0, True), 4: far, 5: far})
+        walk, io = walker(world, reader=reader)
+        result = walk.walk([Goal(0, -11.5, 1.0)], (0, 0), 60)
+        self.assertEqual((result.outcome, len(io.steps)), ("lost", 1))
+
+    # 8: a bell as the first gesture takes the start guard
+    def test_8_a_first_bell_outside_the_start_radius_sends_nothing(self):
+        world = World((8.5, 0))
+        clock = Clock()
+        reader = FakeReader(world, slow={1}, clock=clock, bad={2: Fix(11, 0, 0.8, 0.0, 1.0, True)})
+        walk, io = walker(world, clock=clock, reader=reader, allow_bell=True)
+        result = walk.walk([Goal(0, 0, 12, action="bell")], (8.5, 0), 60, start_radius=9)
+        self.assertEqual((result.outcome, io.bells), ("refused", []))
+
+    # 11: the jump is re-evaluated after the step is shortened
+    def test_11_a_shortened_step_that_cannot_reach_drops_its_jump(self):
+        walk, io = walker(World((0, 0), yaw=0.0), allow_jump=True)
+        walk.walk([Goal(0, -6, 1.0, jump=True)], (0, 0), 1.5)  # 1.5 - 0.3 capture - 0.5 margin = 0.7 s: ~2.5 u
+        self.assertEqual([(round(step["seconds"], 2), step["jump_at"]) for step in io.steps], [(0.7, None)])
+        walk, io = walker(World((0, 0), yaw=0.0), allow_jump=True)
+        walk.walk([Goal(0, -6, 1.0, jump=True)], (0, 0), 60)
+        self.assertEqual(io.steps[0]["jump_at"], move.JUMP_AT_S)  # unshortened, it still jumps
+
+    # 12: the probe's fix prints no OCR text
+    def test_12_the_probe_prints_tracker_rows_opaquely(self):
+        sys.path.insert(0, str(ROOT / "scripts" / "android"))
+        import probe
+        out = probe._opaque("登上鸣鸣列车")
+        self.assertEqual(set(out), {"length", "sha1"})
+        self.assertNotIn("登", json.dumps(out, ensure_ascii=False))
+
+
 def _frame(name):
     import cv2
     import numpy as np
@@ -912,7 +1080,7 @@ class RealFrameTests(unittest.TestCase):
             io.frames.append(frame)
             at = clock()
             clock.t += 0.3
-            return Observation(frame, "hud", at)
+            return Observation(frame, "hud", at, regions=TRACKER)
         io.observe = observe
         io.step = lambda frame, angle, seconds, jump_at, not_after=None: (io.steps.append((angle, seconds)),
                                                                            clock.__setattr__("t", clock.t + seconds
@@ -1038,8 +1206,8 @@ class DevEntryTests(unittest.TestCase):
             self.assertFalse(walk_probe.run(rt, {"map": "miraland", "hint": [1, 2], "target": [3, 4]}))
             rt.log.assert_not_called()
             line = json.loads(next(Path(folder).rglob("walk.jsonl")).read_text(encoding="utf-8").splitlines()[-1])
-            self.assertEqual((line["kind"], line["stopped"], line["attempted"], line["confirmed"]),
-                             ("result", True, 1, 1))
+            self.assertEqual((line["kind"], line["outcome"], line["attempted"], line["confirmed"]),
+                             ("result", "stopped", 1, 1))
 
     def test_a_stop_published_during_the_result_write_reports_nothing(self):
         from types import SimpleNamespace
@@ -1062,6 +1230,63 @@ class DevEntryTests(unittest.TestCase):
                 patch("host.android_user_stop", side_effect=lambda *a, **k: stop["now"]):
             self.assertFalse(walk_probe.run(rt, {"map": "miraland", "hint": [1, 2], "target": [3, 4]}))
         rt.log.assert_not_called()
+
+    def _probe_run(self, *, record_hook=None, log_hook=None, deadline_in=None, stop=lambda: False):
+        """walk_probe.run with an arrived walk; returns (result, rt, the walk.jsonl lines)."""
+        import time as real_time
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        from host.android import walk_probe
+        arrived = move.WalkResult("arrived", "已到达目标位置。", (3, 4), [{"confirmed": True}])
+
+        def fake_walk(walker, *args, **kwargs):
+            walker.deadline = None if deadline_in is None else real_time.monotonic() + deadline_in
+            return arrived
+        rt = SimpleNamespace(log=Mock(side_effect=log_hook), stopped=False,
+                             context=SimpleNamespace(run_task=Mock()))
+        original = walk_probe.DiagnosticIo.record
+
+        def record(io, kind, data, frame):
+            path = original(io, kind, data, frame)
+            if record_hook and kind == "result":
+                record_hook()
+            return path
+        with tempfile.TemporaryDirectory() as folder, patch("app_paths.DATA_ROOT", Path(folder)), \
+                patch("host.game_backend", return_value="android"), patch("host.android.minimap.MinimapReader"), \
+                patch.object(move.Walker, "walk", fake_walk), patch.object(walk_probe.DiagnosticIo, "record", record), \
+                patch("host.android_user_stop", side_effect=lambda *a, **k: stop()):
+            result = walk_probe.run(rt, {"map": "miraland", "hint": [1, 2], "target": [3, 4]})
+            lines = [json.loads(line) for line in next(Path(folder).rglob("walk.jsonl")).read_text(
+                encoding="utf-8").splitlines()]
+        return result, rt, lines
+
+    def test_6_a_stop_inside_the_message_file_write_shows_nothing(self):
+        flag = {"stop": False}
+        result, rt, lines = self._probe_run(log_hook=lambda *a, **k: flag.update(stop=True), stop=lambda: flag["stop"])
+        self.assertFalse(result)
+        rt.context.run_task.assert_not_called()  # the arrival was never displayed
+        self.assertEqual((lines[-1]["outcome"], lines[-1]["corrects"]), ("stopped", "arrived"))
+
+    def test_6_a_deadline_passed_inside_the_result_write_is_no_arrival_anywhere(self):
+        import time as real_time
+
+        def slow():
+            end = real_time.monotonic() + 0.1
+            while real_time.monotonic() < end:
+                pass
+        result, rt, lines = self._probe_run(record_hook=slow, deadline_in=0.05)
+        self.assertFalse(result)
+        self.assertEqual((lines[-1]["outcome"], lines[-1]["corrects"]), ("timeout", "arrived"))
+        rt.context.run_task.assert_called_once()
+        self.assertNotIn("已到达", str(rt.context.run_task.call_args))  # the timeout text is shown instead
+        self.assertIn("超时", str(rt.context.run_task.call_args))
+
+    def test_6_an_arrival_with_both_rechecks_passing_is_shown_once(self):
+        result, rt, lines = self._probe_run(deadline_in=60)
+        self.assertTrue(result)
+        self.assertEqual(lines[-1]["outcome"], "arrived")
+        rt.context.run_task.assert_called_once()
+        self.assertEqual(rt.log.call_args.kwargs, {"detail": True})  # the file copy, not a second display
 
     def test_bad_runner_options_are_reported_in_chinese(self):
         sys.path.insert(0, str(ROOT / "scripts"))

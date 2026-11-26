@@ -96,14 +96,36 @@ def run(rt, options: dict) -> bool:
                         "leash": params.leash, "radius": params.radius}, None)
     walker = Walker(io, MinimapReader(params.map), leash=(*params.hint, params.leash))
     result = walker.walk([Goal(*params.target, params.radius)], params.hint, params.timeout)
-    # The loop's own stop check (the tasker or the stop request) and its deadline, again after the result write and
-    # right before the report: after a stop nothing is reported, not even arrival; past the deadline no arrival.
-    io.record("result", {"outcome": result.outcome, "message": result.message, "position": result.position,
-                         "attempted": result.attempted, "confirmed": result.confirmed, "stopped": io.stopped()}, None)
-    ok, message = result.ok, result.message
-    if ok and walker.deadline is not None and time.monotonic() > walker.deadline:
-        ok, message = False, "移动超时（写完记录时已经超过了限时），不算到达。"
-    if io.stopped():
-        return False
-    rt.log(f"走路探针：{message}（发出 {result.attempted} 步，完成 {result.confirmed} 步）")
-    return ok and not io.stopped()
+
+    def outcome():  # the loop's own stop check and its deadline, asked again after every blocking write
+        if io.stopped():
+            return "stopped", "已停止。"
+        if result.ok and walker.deadline is not None and time.monotonic() > walker.deadline:
+            return "timeout", "移动超时（写完记录时已经超过了限时），不算到达。"
+        return result.outcome, result.message
+
+    def terminal(decided, corrects=None):
+        io.record("result", {"outcome": decided[0], "message": decided[1], "position": result.position,
+                             "attempted": result.attempted, "confirmed": result.confirmed,
+                             **({"corrects": corrects} if corrects else {})}, None)
+
+    decided = outcome()
+    terminal(decided)
+    for _write in range(2):  # after the result write, then after the message file's copy of the report
+        now = outcome()
+        if now != decided:  # walk.jsonl's last record always says what is returned and shown
+            terminal(now, corrects=decided[0])
+            decided = now
+        if decided[0] == "stopped":
+            return False
+        text = f"走路探针：{decided[1]}（发出 {result.attempted} 步，完成 {result.confirmed} 步）"
+        if _write == 0:
+            rt.log(text, detail=True)  # the message file's copy (blocking I/O), not shown yet
+    _show(rt, text)  # shown only now: both rechecks passed immediately before it
+    return decided[0] == "arrived" and not io.stopped()
+
+
+def _show(rt, text):
+    """Display an already logged report (Runtime.log's display step, without writing the message file again)."""
+    from task_control import message_override
+    rt.context.run_task("MaaNikki_Daily_Message", message_override({"Node.Action.Starting": text}))

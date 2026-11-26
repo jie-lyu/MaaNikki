@@ -26,7 +26,8 @@ the only touch this module sends; the bell press, off by default, is the one oth
    right, 90 down; the camera looks "up" the screen, 270). The joystick is always at full deflection; the distance is
    set by the duration from the measured model expected_distance(T) = SPEED_U_S * (T - DEAD_S), clamped to
    [MIN_STEP_S, MAX_STEP_S] and to the time left before the deadline. The camera is never turned. A decision is sent
-   with its frame's expiry (captured + MAX_DECISION_AGE_S, gesture ``not_after``): Runtime refuses it right before
+   with its frame's expiry (capture requested + MAX_DECISION_AGE_S, and early enough that its hold ends before the
+   deadline: gesture ``not_after``): Runtime refuses it right before
    contact-down once expired (DecisionExpired) and the walk captures again and replans; the bell follows the same rule
    and starts only when its whole press fits before the deadline.
 4. Settle: after a lift the minimap keeps easing for 0.6-0.9 s. A frame captured right after a step therefore shows
@@ -38,9 +39,9 @@ the only touch this module sends; the bell press, off by default, is the one oth
    (navigation.geometry), which a lagging fix cannot hide. Arrival at a precise goal is judged on a settled frame.
 5. Stop conditions: STALL_STEPS consecutive steps with almost no displacement (blocked), no progress toward the goal
    in GOAL_STALL_STEPS steps, the deadline (it bounds every step's duration and every wait, and is checked before
-   every gesture and point action and after the last write before reporting arrival), leaving the leash, an unreadable camera yaw twice in a row, a stop (the gesture
-   returned False, or the run stopped, also right before reporting arrival): each returns at once, with no further
-   input; failures save the frame.
+   every gesture and point action and after the last write before reporting arrival), leaving the leash, an
+   unreadable camera yaw twice in a row, a stop (the gesture returned False, or the run stopped, also right before
+   reporting arrival): each returns at once, with no further input; failures save the frame.
 
 Step records (Io.record) are written only after the gesture's lift was confirmed (or when the walk ends), never
 between a decision and its gesture.
@@ -84,11 +85,14 @@ WIDE_SEARCH = 75  # the one wider retry, around the last good fix
 PLAUSIBLE_FACTOR = 1.3  # the farthest measured step was ~1.1x the model
 PLAUSIBLE_SLACK_U = 3.0  # the previous step's lag plus the match spread
 REFIX_SHIFT_U = LAG_U + 0.5  # without input in between, a new fix moves at most the lag plus the match spread
-# From the end of a frame's capture to its gesture: classification (read_screen, full-frame OCR) and the fix take
-# ~0.2 s offline and are expected well under this on the device; older, the screen may have changed unseen.
-MAX_DECISION_AGE_S = 1.0
+# From before a frame's capture was requested (Observation.at: earlier than the screencap's submission) to its
+# gesture's contact-down: the capture (~0.25 s on the device), classification (read_screen, full-frame OCR) and the
+# fix (~0.2 s offline) fit well inside; older, the screen may have changed unseen. Each step logs its decision age.
+MAX_DECISION_AGE_S = 1.2
 STALE_DECISIONS = 3  # consecutive decisions that aged out: the walk stops
 DEADLINE_MARGIN_S = 0.5  # a step ends at least this long before the deadline (lift confirmation, the next capture)
+LIFT_MARGIN_S = 0.2  # a gesture must start early enough that its hold plus this ends before the deadline (not_after)
+STARTUP_WAIT_S = 5.0  # how long the start waits for a clean HUD frame (an allowed remark going, the distance read)
 
 # ---- stops ----
 STALL_STEPS = 3
@@ -220,6 +224,8 @@ class Walker:
         self._last_step = None  # (origin fix, seconds, bearing) of the last step
         self._pending = []  # (kind, record, frame) to write once no decision is waiting for its gesture
         self._anchor = None  # the first fix after the last input: no-input rechecks stay within REFIX_SHIFT_U of it
+        self._gestured = False  # any gesture (step or bell) sent yet
+        self._start = (None, None)  # (first goal, start radius) for the guard before the first gesture
         self._regions = None  # the first frame's compared HUD regions (Verdict.regions)
 
     # -- entry --
@@ -255,6 +261,7 @@ class Walker:
         self.deadline = self.clock() + timeout
         obs = self._first_look()
         obs, fix = self._first_fix(obs, hint)
+        self._start = (goals[0], start_radius)
         self._check_start(obs, fix, goals[0], start_radius)
         index = 0
         stalls, best, since_best, heading_misses, stale = 0, math.inf, 0, 0, 0
@@ -310,16 +317,17 @@ class Walker:
             if goal.jump and self.allow_jump and expected_distance(seconds) >= remaining - goal.radius \
                     and seconds > JUMP_AT_S + 0.2:
                 jump_at = JUMP_AT_S
-            if not self.steps:  # the fix that authorises the first gesture, whichever frame it came from
+            if not self._gestured:  # the fix that authorises the first gesture, whichever frame it came from
                 self._check_start(obs, fix, goals[0], start_radius)
             # The deadline bounds the step itself: it ends DEADLINE_MARGIN_S before it, or is not made.
             self._check_deadline(obs)
             seconds = min(seconds, self.deadline - self.clock() - DEADLINE_MARGIN_S)
             if seconds < MIN_STEP_S:
                 self._fail("timeout", "移动超时（剩下的时间不够走一步），没有到达目标位置，已停止", obs)
-            if jump_at is not None and not seconds > JUMP_AT_S + 0.2:
-                jump_at = None
-            age = self.clock() - obs.captured
+            if jump_at is not None and not (expected_distance(seconds) >= remaining - goal.radius
+                                            and seconds > JUMP_AT_S + 0.2):
+                jump_at = None  # the shortened step no longer reaches the jump point
+            age = self.clock() - obs.at
             if age > MAX_DECISION_AGE_S:
                 stale = self._stale(stale, age, obs)
                 obs, fix = self._refix(self._look(), fix)
@@ -330,14 +338,14 @@ class Walker:
                       "jump_at": jump_at, "expected": round(expected_distance(seconds), 2),
                       "decision_age": round(age, 3), "confirmed": False}
             try:  # the frame's expiry travels to the last check before contact-down (Runtime._dispatch_touch)
-                sent = self.io.step(obs.frame, angle, seconds, jump_at, not_after=obs.captured + MAX_DECISION_AGE_S)
+                sent = self.io.step(obs.frame, angle, seconds, jump_at, not_after=self._not_after(obs, seconds))
             except DecisionExpired:
-                stale = self._stale(stale, self.clock() - obs.captured, obs)
+                stale = self._stale(stale, self.clock() - obs.at, obs)
                 obs, fix = self._refix(self._look(), fix)
                 continue
             stale = 0
             self._lift_at = self.clock()
-            self._anchor = None
+            self._anchor, self._gestured = None, True
             record["confirmed"] = bool(sent)
             self.steps.append(record)
             self._pending.append(("step", record, obs.frame))
@@ -373,9 +381,16 @@ class Walker:
         return WalkResult("arrived", "已到达目标位置。", position=here)
 
     def _check_start(self, obs, fix, first, start_radius):
-        if start_radius is not None and _distance((fix.x, fix.y), (first.x, first.y)) > start_radius:
+        if start_radius is not None and first is not None \
+                and _distance((fix.x, fix.y), (first.x, first.y)) > start_radius:
             self._fail("refused", "起点离路线的第一个点太远（超出路线规定的起点范围），没有开始移动", obs,
                        details={"fix": fix.log(), "start_radius": start_radius})
+
+    def _not_after(self, obs, hold) -> float:
+        """The latest contact-down for a gesture of ``hold`` seconds decided on ``obs``: within the frame's age limit
+        (from before its capture was requested) and early enough that the hold ends LIFT_MARGIN_S before the
+        deadline."""
+        return min(obs.at + MAX_DECISION_AGE_S, self.deadline - hold - LIFT_MARGIN_S)
 
     def _stale(self, stale, age, obs) -> int:
         stale += 1
@@ -405,38 +420,50 @@ class Walker:
             self._check_deadline(obs)
 
     def _first_look(self) -> Observation:
-        """The walk's first frame must be the open-world HUD and nothing else (no narration either): else nothing is
-        sent. Its quest tracker is what later frames must keep showing."""
-        for attempt in range(BLANK_RETRIES + 1):
+        """The walk's first frame: the open-world HUD and nothing else, with the minimap chevron and the quest tracker
+        showing one quest name and its distance; that name is what later frames must keep showing. While an allowed
+        ambient remark is on screen, or the tracker's distance is not read yet, the walk waits (STARTUP_WAIT_S,
+        within the deadline) for such a frame; anything else, or no clean frame in time, refuses with nothing sent."""
+        since, blanks, logged = self.clock(), 0, False
+        while True:
             self._check_stop()
             obs = self.io.observe()
             if obs is None:
                 raise Halt(WalkResult("stopped", STOPPED))
-            if obs.kind != "blank":
-                break
-            if attempt < BLANK_RETRIES:
-                self._pause(POLL_S)
-        if obs.kind != "hud":
-            self._fail("refused", f"开始时画面不是干净的大世界（{obs.reason or '有旁白或没拿到截图'}），没有开始移动", obs)
-        names = self._tracker_names(obs)
-        if len(names) > 1 or any(word in name for name in names for word in NARRATION_DENY):
-            self._fail("refused", "开始时任务栏的位置有多余的文字，不是干净的大世界，没有开始移动", obs)
-        self._regions = names[0] if names else ""
-        return obs
+            if obs.kind == "blank":
+                blanks += 1
+                if blanks > BLANK_RETRIES:
+                    self._fail("refused", "连续两次没有拿到可用的截图，没有开始移动", obs)
+                self._pause(POLL_S, obs)
+                continue
+            if obs.kind not in ("hud", "narration"):
+                self._fail("refused", f"开始时画面不是干净的大世界（{obs.reason or '认不出的画面'}），没有开始移动", obs)
+            if not self.reader.present(obs.frame):
+                self._fail("refused", "没有在默认位置认出小地图（界面布局可能改过，或被挡住了），没有开始移动", obs)
+            names, distances = self._tracker_parts(obs)
+            if len(names) > 1 or distances > 1 or any(word in name for name in names for word in NARRATION_DENY):
+                self._fail("refused", "开始时任务栏的位置有多余的文字，不是干净的大世界，没有开始移动", obs)
+            if obs.kind == "hud" and len(names) == 1 and distances == 1:
+                self._regions = names[0]
+                return obs
+            if obs.kind == "narration" and not logged:
+                logged = True
+                self.io.log("开始时画面上有一行环境旁白，等它消失再走。")
+            if self.clock() - since >= STARTUP_WAIT_S:
+                self._fail("refused", "开始时一直没有等到干净的大世界画面（任务栏没有显示任务名和距离，或旁白没有消失），"
+                                      "没有开始移动", obs)
+            self._pause(POLL_S, obs)
 
     @staticmethod
-    def _tracker_names(obs):
-        return [text for text in obs.regions if not TRACKER_DISTANCE.fullmatch(text)]
+    def _tracker_parts(obs):
+        names = [entry for entry in obs.regions if entry != TRACKER_DISTANCE]
+        return names, len(obs.regions) - len(names)
 
     def _tracker_kept(self, obs) -> bool:
-        """The quest tracker still shows what the first frame showed: the same one quest name (OCR's misreads
-        aside, TRACKER_SIMILAR), no word of NARRATION_DENY, nothing else but its distance."""
-        from difflib import SequenceMatcher
-        names = self._tracker_names(obs)
-        if not self._regions:
-            return not names
-        return len(names) == 1 and not any(word in names[0] for word in NARRATION_DENY) and \
-            SequenceMatcher(None, names[0], self._regions).ratio() >= TRACKER_SIMILAR
+        """The quest tracker still shows the first frame's quest name exactly (after tracker_name's 呜/鸣 and
+        punctuation), at most its distance besides, nothing else."""
+        names, distances = self._tracker_parts(obs)
+        return names == [self._regions] and distances <= 1
 
     def _look(self) -> Observation:
         """A frame that is the open-world HUD and nothing else, or one with allowed narration waited through; any
@@ -447,6 +474,8 @@ class Walker:
             obs = self.io.observe()
             if obs is None:
                 raise Halt(WalkResult("stopped", STOPPED))
+            if obs.kind in ("hud", "narration") and not self.reader.present(obs.frame):  # before any exception
+                self._fail("screen", "小地图上的位置标记不见了（可能有东西挡住了大世界），已停止所有输入", obs)
             if obs.kind in ("hud", "narration") and self._regions is not None and not self._tracker_kept(obs):
                 self._fail("screen", "大世界界面上的任务栏文字变了（可能出现了新的提示或任务），已停止所有输入", obs)
             if obs.kind == "hud":
@@ -502,8 +531,12 @@ class Walker:
         return self._accept(obs, fix)
 
     def _good(self, fix, origin, seconds, anchor) -> bool:
-        return fix.reliable and _distance((fix.x, fix.y), origin) <= plausible_distance(seconds) and (
-            anchor is None or _distance((fix.x, fix.y), anchor) <= REFIX_SHIFT_U)
+        """Trusted, plausible for the last step, and without input since the anchor: within REFIX_SHIFT_U of both the
+        anchor and the preceding accepted fix (two false peaks on either side of the anchor cannot add up)."""
+        here = (fix.x, fix.y)
+        return fix.reliable and _distance(here, origin) <= plausible_distance(seconds) and (
+            anchor is None or (_distance(here, anchor) <= REFIX_SHIFT_U
+                               and _distance(here, self.position) <= REFIX_SHIFT_U))
 
     def _track(self, obs, origin, seconds, world):
         """Fix ``obs`` after a step of ``seconds`` along ``world`` from ``origin``, and within REFIX_SHIFT_U of the
@@ -560,15 +593,17 @@ class Walker:
             press = float(getattr(self.io, "BELL_S", 4.0))
             if self.deadline - self.clock() < press + DEADLINE_MARGIN_S:  # the whole press must fit
                 self._fail("timeout", "移动超时（剩下的时间不够按完铃），已停止", obs)
-            if self.clock() - obs.captured > MAX_DECISION_AGE_S:  # the same age rule as a step: decide again
+            if not self._gestured:  # a bell as the first gesture takes the route's start guard too
+                self._check_start(obs, fix, *self._start)
+            if self.clock() - obs.at > MAX_DECISION_AGE_S:  # the same age rule as a step: decide again
                 return (*self._refix(self._look(), fix), False)
             self._check_stop()
             try:
-                sent = self.io.bell(obs.frame, not_after=obs.captured + MAX_DECISION_AGE_S)
+                sent = self.io.bell(obs.frame, not_after=self._not_after(obs, press))
             except DecisionExpired:
                 return (*self._refix(self._look(), fix), False)
             self._lift_at = self.clock()
-            self._anchor = None
+            self._anchor, self._gestured = None, True
             self._pending.append(("bell", {"fix": fix.log(), "confirmed": bool(sent)}, obs.frame))
             self._flush()
             if not sent:
@@ -611,7 +646,9 @@ SCREEN_TEXT = "MaaNikki_Android_ScreenText"  # full-frame OCR (android_move.json
 # jump button as 2A1 at 0.79), real text at 0.9-1.0.
 TEXT_SCORE = 0.6
 ASCII_SCORE = 0.8
-OVERLAY_GLYPHS = "▼▽▶▷►▲△◀◁◆◇★☆→←↑↓…"  # a tap or continue marker, an arrow: never part of the plain HUD
+# A tap or continue marker, an arrow: never part of the plain HUD. Checked on the raw OCR text, before anything is
+# normalised. (◆ is not one: the quest tracker's marker icon reads as ◆ before its distance, 「◆1048米」.)
+OVERLAY_GLYPHS = "▼▽▶▷►▲△◀◁★☆→←↑↓…"
 
 
 def _cjk(text: str) -> int:
@@ -622,60 +659,64 @@ def _alnum(text: str) -> int:
     return sum(ch.isascii() and ch.isalnum() for ch in text)
 
 
+def _glyph(text: str) -> bool:
+    return any(ch in OVERLAY_GLYPHS for ch in text)
+
+
 def counts_as_text(text: str) -> bool:
     """A row worth judging: an overlay glyph, two CJK characters, or three CJK and ASCII letters/digits together
     (``Lv. 40``); single characters (口, G, K on icons; 2A, 41 on textures) are icon or texture noise."""
-    return any(ch in OVERLAY_GLYPHS for ch in text) or _cjk(text) >= 2 or _cjk(text) + _alnum(text) >= 3
+    return _glyph(text) or _cjk(text) >= 2 or _cjk(text) + _alnum(text) >= 3
 
 
-def _label_row(text: str) -> bool:
-    """A piece of the label row as OCR reads it: a contiguous run of the fixed labels (商城 … 换装, spaces aside);
-    one misread character only in runs of six or more (活动人厅) or in one whole label (共吗), so a new word made of
-    label characters (新任务) never passes."""
-    from host.android import pages
-    row, run = re.sub(r"\s", "", text), "".join(pages.HUD_LABELS)
-    if not row or any(ch in OVERLAY_GLYPHS for ch in row):
-        return False
-    if row in run:
-        return True
-    if any(len(row) == len(label) and sum(a != b for a, b in zip(row, label)) <= 1 for label in pages.HUD_LABELS):
-        return True
-    return len(row) >= 6 and any(sum(a != b for a, b in zip(row, run[i:i + len(row)])) <= 1
-                                 for i in range(len(run) - len(row) + 1))
+# The label row's labels and their x centres on the 1280x720 frame (single-label OCR boxes over the saved frames:
+# 商城 656.5, 共鸣 727, 任务 1078, 设计图 1152, 换装 1222; the middle four, always read as one row, at the same spacing).
+LABEL_CENTRES = (("商城", 656.5), ("共鸣", 727.0), ("奇迹之旅", 797.0), ("活动大厅", 868.0), ("奇想日历", 938.0),
+                 ("无限之心", 1008.0), ("任务", 1078.0), ("设计图", 1152.0), ("换装", 1222.0))
+LABEL_HALF_CHAR_PX = 9  # half a label character's width: a run spans its labels' centres +- this x their length
+LABEL_EDGE_PX = 40  # box edges vs. that span (saved rows: within -33..+30 px)
+MIN_LABELS = 7  # labels the full-frame pass must read in place (saved frames: 7-9 of 9, 466 of 492 all 9)
 
 
-def _hearts(text: str) -> bool:  # 心誓5 ×1 and its hearts, as read (心誓5❤, 33333×1, 心誓5ややや, 心誓5～～, 心誓5♡)
-    return not re.sub(r"[心誓\d×xXoO❤♥♡やゃ～~.\s]", "", text)
+def label_run(text: str, box) -> int:
+    """How many labels ``text`` is when it is exactly a contiguous run of the fixed labels (spaces aside) whose box
+    lies where those labels are; 0 otherwise (a misread label or a new word is no part of the label row)."""
+    row = re.sub(r"\s", "", text)
+    for i in range(len(LABEL_CENTRES)):
+        for j in range(i, len(LABEL_CENTRES)):
+            if "".join(label for label, _x in LABEL_CENTRES[i:j + 1]) == row:
+                first, last = LABEL_CENTRES[i], LABEL_CENTRES[j]
+                lo, hi = first[1] - len(first[0]) * LABEL_HALF_CHAR_PX, last[1] + len(last[0]) * LABEL_HALF_CHAR_PX
+                if abs(box[0] - lo) <= LABEL_EDGE_PX and abs(box[0] + box[2] - hi) <= LABEL_EDGE_PX:
+                    return j - i + 1
+    return 0
 
 
-def _uid_or_ping(text: str) -> bool:
-    """The masked UID and the ping as OCR reads them (UID 123456789, LID123456789, D123456789, 46ms, 23Gms, bms):
-    ASCII letters, digits and separators only, short; any CJK character or glyph there is something else."""
-    return bool(re.fullmatch(r"[A-Za-z0-9\s\-:.]{1,20}", text))
+# The other HUD text regions' exact observed forms (every form read there on the saved frames, threshold 0.5):
+# 心誓5 / 心誓5×1 and its hearts (❤ ♡ や ゃ ～, or 3s with an occasional 0 or 8: 33333×1, 心誓530333, 38333);
+# the masked UID (UID 123456789, UID-123456789, LID123456789, D123456789, cut short) and the ping (46ms, 46m, 45mm).
+HEARTS_FORM = re.compile(r"(?:心?誓5?)?[308❤♡やゃ～]*(?:[×x]1?)?")
+UID_FORM = re.compile(r"(?:UID|LID|D)[\s\-]?\d{3,9}|\d{1,4}m{1,2}s?")
+TRACKER_DISTANCE_FORM = re.compile(r"◆?\d{1,5}米?")  # 1049米, ◆1048米, 1046 (without 米)
 
 
-def _badge(text: str) -> bool:  # the counters on the top-left icons (26, 6, 19)
-    return bool(re.fullmatch(r"\s*\d{1,3}\s*", text))
+def tracker_name(text: str) -> str:
+    """A quest name row as compared between frames: its CJK characters and letters/digits (the leading · and spaces
+    dropped), with OCR's one observed flip 呜 → 鸣."""
+    return "".join(ch for ch in text if _cjk(ch) or (ch.isascii() and ch.isalnum())).replace("呜", "鸣")
 
 
-def tracker_text(text: str) -> str:
-    """A quest-tracker row as compared between frames: its CJK characters and letters, every number as #."""
-    return re.sub(r"\d+", "#", "".join(ch for ch in text if _cjk(ch) or (ch.isascii() and ch.isalnum())))
+TRACKER_DISTANCE = "#"  # how a distance row appears in Verdict.regions
 
 
-TRACKER_DISTANCE = re.compile(r"#米?")  # the distance row under the quest name (1049米; sometimes read without 米)
-TRACKER_SIMILAR = 0.6  # OCR flips 呜/鸣 between frames: 登上鸣鸣列车 vs 登上呜呜列车 is 0.67
-
-
-# The HUD's own text regions (box centres; x0, y0, x1, y1), from full-frame OCR over the 492 saved open-world frames,
-# each with what it may show there: a fixed pattern, or (the quest tracker, whose quest name varies) what it showed on
-# the walk's first frame (Walker._check_tracker on Verdict.regions). Text anywhere else is judged as overlay text.
+# The HUD's own text regions (box centres; x0, y0, x1, y1), from full-frame OCR over the saved open-world frames, each
+# with what it may show there; text anywhere else (the icon badges' corner included: nothing was ever read there) is
+# judged as overlay text.
 HUD_REGIONS = (
-    ("labels", (540, 0, 1280, 100), _label_row),
-    ("badges", (260, 0, 540, 100), _badge),
-    ("tracker", (0, 180, 340, 300), None),
-    ("hearts", (420, 630, 780, 720), _hearts),
-    ("uid", (0, 660, 260, 720), _uid_or_ping),
+    ("labels", (540, 0, 1280, 100)),
+    ("tracker", (0, 180, 340, 300)),
+    ("hearts", (420, 630, 780, 720)),
+    ("uid", (0, 660, 260, 720)),
 )
 # Ambient narration on the saved frames (「暖暖」 over 「起风了——大喵小心，别被吹跑啦。」, m2-goto1; 「大喵」 over
 # 「暖暖，星之铃似乎在闪烁呢！摇动它试试吧？」, phase0/hud-1280x720.png): a known companion's label centred around
@@ -699,7 +740,7 @@ NARRATION_DENY = ("点击", "点按", "继续", "跳过", "任务", "对话", "�
 class Verdict:
     kind: str  # "hud", "narration" or "other"
     reason: str = ""  # for "other": a fixed Chinese text (never OCR text)
-    regions: tuple = ()  # the quest tracker's rows, normalised (tracker_text), top to bottom
+    regions: tuple = ()  # the quest tracker's rows top to bottom: tracker_name() for a name, TRACKER_DISTANCE
 
 
 def _inside(box, region) -> bool:
@@ -709,26 +750,40 @@ def _inside(box, region) -> bool:
 
 
 def read_rows(result):
-    """``(outside, regions)`` from a full-frame OCR result: the rows worth judging outside the HUD's own text (or
-    breaking their region's pattern) as [(text, box)], and the compared regions' normalised text."""
+    """``(outside, regions, labels)`` from a full-frame OCR result: the rows worth judging that are not the HUD's own
+    text in its exact form and place, as [(text, box)] (any row with an overlay glyph among them, judged on its raw
+    text); the quest tracker's rows (Verdict.regions); and how many labels of the label row were read in place."""
     from host.android import actions, pages
-    outside, tracker = [], []
+    outside, tracker, labels = [], [], 0
     if result is not None and actions._hit(result):
         for row in pages._rows(result):
             if row is None:
                 continue
             text, box = str(getattr(row, "text", "") or ""), getattr(row, "box", None)
             score = float(getattr(row, "score", 0) or 0)
-            floor = TEXT_SCORE if _cjk(text) or any(ch in OVERLAY_GLYPHS for ch in text) else ASCII_SCORE
-            if box is None or score < floor or not counts_as_text(text):
+            if box is None:
                 continue
             box = [int(v) for v in box]
-            region = next(((name, check) for name, area, check in HUD_REGIONS if _inside(box, area)), None)
-            if region is None or (region[1] is not None and not region[1](text)):
+            if _glyph(text):  # the raw text, before anything else
+                if score >= TEXT_SCORE:
+                    outside.append((text, box))
+                continue
+            if score < (TEXT_SCORE if _cjk(text) else ASCII_SCORE) or not counts_as_text(text):
+                continue
+            region = next((name for name, area in HUD_REGIONS if _inside(box, area)), None)
+            squashed = re.sub(r"\s", "", text)
+            if region == "labels" and label_run(text, box):
+                labels += label_run(text, box)
+            elif region == "hearts" and HEARTS_FORM.fullmatch(squashed):
+                pass
+            elif region == "uid" and UID_FORM.fullmatch(text.strip()):
+                pass
+            elif region == "tracker":
+                distance = TRACKER_DISTANCE_FORM.fullmatch(squashed)
+                tracker.append((box[1], box[0], TRACKER_DISTANCE if distance else tracker_name(text)))
+            else:
                 outside.append((text, box))
-            elif region[1] is None:
-                tracker.append((box[1], box[0], text))
-    return outside, tuple(tracker_text(text) for _y, _x, text in sorted(tracker))
+    return outside, tuple(entry for _y, _x, entry in sorted(tracker)), labels
 
 
 def narration_verdict(rows) -> str:
@@ -736,12 +791,13 @@ def narration_verdict(rows) -> str:
     Chinese text, no OCR text)."""
     if not all(_inside(box, SUBTITLE_BAND) for _text, box in rows):
         return "大世界以外的文字（可能是提示、横幅、任务或交互按钮）"
-    if any(ch in OVERLAY_GLYPHS for text, _box in rows for ch in text):
+    if any(_glyph(text) for text, _box in rows):
         return "画面上有继续或点击的标记"
-    if any(word in text for text, _box in rows for word in NARRATION_DENY):
-        return "画面下方像是要点击的提示、对话、任务或指引的文字"
     labels = [(text, box) for text, box in rows if _inside(box, LABEL_ZONE) and box[3] <= 45]
     line = sorted(((box[0], box[1] + box[3] / 2, text, box) for text, box in rows if (text, box) not in labels))
+    joined = "".join(re.sub(r"\s", "", text) for _x, _y, text, _b in line)  # the line as one text: 现在点 + 击屏幕
+    if any(word in text for text in (joined, *(text for text, _box in labels)) for word in NARRATION_DENY):
+        return "画面下方像是要点击的提示、对话、任务或指引的文字"
     if len(labels) != 1 or labels[0][0].strip() not in AMBIENT_SPEAKERS:
         return "画面下方的文字没有已知的旁白说话人（可能是对话）"
     if not line:
@@ -754,7 +810,7 @@ def narration_verdict(rows) -> str:
     centre = sum(y for _x, y, _t, _b in line) / len(line)
     if not LINE_Y[0] <= centre < LINE_Y[1] or labels[0][1][1] + labels[0][1][3] / 2 >= centre:
         return "画面下方的文字不在环境旁白的位置"
-    if sum(len(re.sub(r"\s", "", text)) for _x, _y, text, _b in line) > LINE_MAX_CHARS:
+    if len(joined) > LINE_MAX_CHARS:
         return "画面下方的文字太长，不像一句环境旁白"
     return ""
 
@@ -772,7 +828,9 @@ def classify(screen, recognize) -> Verdict:
     result = recognize(SCREEN_TEXT)
     if result is None:
         return Verdict("other", "画面（画面文字的检查没能完成）")
-    outside, regions = read_rows(result)
+    outside, regions, labels = read_rows(result)
+    if labels < MIN_LABELS:  # positive evidence from this pass itself, not only read_screen's label check
+        return Verdict("other", "画面（全画面文字里没有在原位读到大世界的快捷栏）", regions)
     if not outside:
         return Verdict("hud", "", regions)
     why = narration_verdict(outside)
@@ -823,7 +881,16 @@ class RuntimeIo:
         return bool(gesture.bell_step(self.rt, frame, self.BELL_POINT, self.BELL_S, not_after=not_after))
 
     def pause(self, seconds) -> bool:
-        return bool(self.rt.pause(seconds))
+        """Wait ``seconds`` of wall time (the walker passes at most the time left before its deadline), checking the
+        stop signals; no input is sent and none decided. Not Runtime.pause: its focus gate may block past the
+        deadline, and the next capture waits for focus anyway."""
+        end = self.clock() + max(0.0, seconds)
+        while not self.stopped():
+            left = end - self.clock()
+            if left <= 0:
+                return True
+            time.sleep(min(0.05, left))
+        return False
 
     def save(self, stage, reason, frame, details=None):
         reference = self.rt.diagnostic(stage, reason, image=frame, details=details)
