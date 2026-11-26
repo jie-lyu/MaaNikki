@@ -157,6 +157,10 @@ class RunnerTests(unittest.TestCase):
 
             post_screencap = post_connection
 
+            def post_shell(self, command, timeout):
+                calls.setdefault("shell", []).append((command, children[-1].calls.count("wait") if children else 0))
+                return self.post_connection()
+
         class Resource:
             def post_bundle(self, path):
                 return types.SimpleNamespace(wait=lambda: types.SimpleNamespace(succeeded=True))
@@ -332,6 +336,37 @@ class RunnerTests(unittest.TestCase):
                 self.assertTrue(runner.stop_tasker(tasker, blocked, record, child, Mock()))
             self.assertTrue(record["touch_at_stop"].startswith("request not written"))
             self.assertEqual((record["stop_path"], tasker.post_stops, child.killed), ("agent terminated", 0, True))
+
+    def test_a_reserved_touch_drains_the_controller_queue_before_teardown(self):
+        # Gesture review round 3 finding 4: a lift queued behind a slow DOWN must run before the controller goes.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            marker = data / "config" / "android-input" / "touch.json"
+
+            def leave_marker():  # the agent ended with a touch reserved
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("{}")
+            modules, calls, children, Child = self.fake_framework(on_disconnect=leave_marker)
+            results, records = self.run_fakes(tmp, modules, Child)
+            self.assertEqual(records[0]["controller_drain"], "drained")
+            self.assertEqual([command for command, _waits in calls["shell"]], ["true"])
+            self.assertGreaterEqual(calls["shell"][0][1], 1)  # after the agent was reaped
+            self.assertTrue(marker.exists())  # left for the recovery
+            # Without a reserved touch nothing is posted; a job that never completes is bounded and recorded.
+            record = {}
+            controller = Mock()
+            runner.drain_controller(controller, Path(tmp) / "elsewhere", record)
+            controller.post_shell.assert_not_called()
+            self.assertEqual(record, {})
+            import threading
+            stuck = threading.Event()
+            controller.post_shell.return_value.wait.side_effect = lambda: stuck.wait(5)
+            started = time.monotonic()
+            runner.drain_controller(controller, data, record, seconds=0.2)
+            stuck.set()
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertTrue(record["controller_drain"].startswith("failed"))
 
     def test_a_task_that_keeps_running_after_the_agent_is_killed_is_waited_for_without_post_stop(self):
         import tempfile

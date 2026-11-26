@@ -52,8 +52,8 @@ CLEANUP_S = 1.0
 # The device confirmation after a gesture reads until this long after the gesture's last call (Runtime): with
 # CLEANUP_S, a stop is answered in about 2.5 s plus one read's capped timeout, inside the stopper's 5 s.
 CONFIRM_S = 1.5
-# A step submitted this little after its limit (timer and scheduler jitter of the poll's sleep) is still on time:
-# without it a gesture exactly at its cap would overrun on every real clock.
+# A lift submitted this little after its limit (timer and scheduler jitter of the poll's sleep) is still on time:
+# without it a gesture exactly at its cap would overrun on every real clock. A down or move gets no slack.
 TIMER_SLACK_S = 0.005
 CONTACTS = (0, 1)
 MAX_STEPS = 32
@@ -227,27 +227,30 @@ def perform(controller, gesture: Gesture, abort, keep_queue=None) -> str:
     late_end = cap_end + OVERRUN_S
     held = {}  # contact -> the job of an up posted for it and not yet reported done (None: no up posted)
     pending = []  # (job, limit) of a down or move posted and not yet seen done: carried into the cleanup
-    result, late, lifted = FAILED, False, False
+    result, late, lifted, failed = FAILED, False, False, False
     try:
         result = _send_steps(controller, gesture, abort, held, pending, start, cap_end, late_end)
     finally:
         try:
-            lifted, late = lift(controller, held, pending)
+            lifted, late, failed = lift(controller, held, pending)
         finally:
             if held and keep_queue is not None:
                 keep_queue()
     if result == OVERRUN or late or time.monotonic() > late_end:
         return OVERRUN  # checked after the last call too: a lift that completed late is no confirmed gesture
-    return result if lifted else FAILED
+    if failed or not lifted:
+        return FAILED  # a job seen failed during the cleanup is never a clean stop
+    return result
 
 
 def _send_steps(controller, gesture, abort, held, pending, start, cap_end, late_end) -> str:
     for index, step in enumerate(gesture.steps):
         due = start + step.at
         lifting = step.kind == "up"
-        # Every step is submitted by its own limit (never past the cap, TIMER_SLACK_S aside); a down or move must
-        # also complete by then, a lift within the cap's grace (an already-posted lift may still be in flight).
-        submit_by = min(due + OVERRUN_S, cap_end) + TIMER_SLACK_S
+        # Every step is submitted by its own limit, never past the cap: a hard limit for a down or move, which must
+        # also complete by then; TIMER_SLACK_S for a lift only. A lift whose post returned by then may complete
+        # within the cap's grace (it may still be in flight).
+        submit_by = min(due + OVERRUN_S, cap_end) + (TIMER_SLACK_S if lifting else 0.0)
         complete_by = late_end if lifting else submit_by
         # The first down follows the dispatch's own last checks at once (a stop seen here, before anything was
         # sent, would leave nothing for the device to confirm).
@@ -265,6 +268,8 @@ def _send_steps(controller, gesture, abort, held, pending, start, cap_end, late_
             job = held[step.contact] = controller.post_touch_up(step.contact)
         if not lifting:
             pending.append((job, complete_by))
+        if time.monotonic() > submit_by:  # the post itself returned late: not known to be on the controller in time
+            return OVERRUN
         stopped = _await(job, complete_by, abort)
         if stopped:
             return stopped
@@ -296,7 +301,8 @@ def _wait_until(due, limit, abort):
         if now > limit:
             return OVERRUN
         if abort is not None and abort():
-            return ABORTED
+            # The stop check itself may have been slow: a stop seen past the limit is an overrun, not an early stop.
+            return OVERRUN if time.monotonic() > limit else ABORTED
         if time.monotonic() >= due:
             return None
         time.sleep(min(POLL_S, max(0.0, due - now)))
@@ -317,12 +323,12 @@ def _await(job, limit, abort):
         if state == "failed":
             return FAILED
         if abort():
-            return ABORTED
+            return OVERRUN if time.monotonic() > limit else ABORTED  # a slow stop check: as in _wait_until
         time.sleep(JOB_POLL_S)
 
 
 def lift(controller, held, pending=()):
-    """Lift every contact in ``held`` (contact -> its pending up job, or None) and return (lifted, late).
+    """Lift every contact in ``held`` (contact -> its pending up job, or None) and return (lifted, late, failed).
 
     First an up is posted for every contact without one (contact 1 first, so contact 0's up comes last), before
     any status read: a stalled status read cannot delay them. Posting does not wait for jobs still pending (a down
@@ -332,7 +338,9 @@ def lift(controller, held, pending=()):
     for that contact only, so every other lift is still attempted, and the first exception is raised at the end.
     ``lifted`` is True when every contact's up was reported done (``held`` keeps the others). ``pending`` holds the
     (job, limit) of a down or move still pending when the gesture stopped; ``late`` is True unless each was seen
-    finished by its limit (a jump down that completes after the cap is an overrun, not an early stop).
+    finished by its limit (a jump down that completes after the cap is an overrun, not an early stop). ``failed``
+    is True when any job was seen failed or rejected here (a pending down or move, or an up before its retry): the
+    gesture is then FAILED, never a clean stop.
 
     Why the device confirmation covers both contacts (Runtime._dispatch_touch: an injected UP after the frame's
     baseline and the last confirmed lift, then a reading with nothing held). Android reports a contact's lift as
@@ -362,7 +370,7 @@ def lift(controller, held, pending=()):
     for contact in sorted(held, reverse=True):
         if held[contact] is None:
             post(contact)
-    waiting, late, given_up = list(pending), False, set()
+    waiting, late, failed, given_up = list(pending), False, False, set()
     while True:
         for contact in sorted(held, reverse=True):
             if contact in given_up:
@@ -374,6 +382,7 @@ def lift(controller, held, pending=()):
             if state == "done":
                 del held[contact]
             elif state == "failed":
+                failed = True
                 if tries.get(contact, 0) < 2:
                     post(contact)  # failed, rejected, or its status unreadable: once more
                 else:
@@ -388,6 +397,7 @@ def lift(controller, held, pending=()):
                 late = True  # not seen finished by its limit
                 waiting.remove(item)
             elif state != "pending":
+                failed = failed or state == "failed"  # a known controller failure is kept, never a clean stop
                 waiting.remove(item)
         if (set(held) <= given_up and not waiting) or time.monotonic() >= deadline:
             break
@@ -395,7 +405,7 @@ def lift(controller, held, pending=()):
     late = late or bool(waiting)
     if raised is not None:
         raise raised
-    return not held, late
+    return not held, late, failed
 
 
 def confirmation_clock():

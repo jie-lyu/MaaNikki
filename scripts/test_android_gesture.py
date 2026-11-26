@@ -924,6 +924,70 @@ class ReviewRound2Tests(GestureTestCase):
         self.assert_nothing_sent()
 
 
+class ReviewRound3Tests(GestureTestCase):
+    """Codex round 3 findings 1, 3, 5 and 6 (2 is the client's, tested in Rust; 4 the runner's)."""
+
+    def test_1_a_camera_drag_on_a_frame_older_than_the_latest_capture_is_refused(self):
+        rt = self.runtime()
+        self.fresh_frame()  # a newer capture, same focus and input count (it might show a dialog over the HUD)
+        with android_run(), self.assertRaises(host.UnsupportedInput):
+            g.camera_drag(rt, self.frame, (640, 300), (840, 300), .4)
+        rt.context.run_action_direct.assert_not_called()
+        self.assert_nothing_sent()
+
+    def test_3_a_camera_drag_is_confirmed_by_the_wall_clock_deadline(self):
+        rt = self.runtime()
+        self.read_latency = 5.0  # the first shell read would take five seconds
+        with android_run():
+            self.assertTrue(g.camera_drag(rt, self.frame, (640, 300), (840, 300), .4))
+        self.assertTrue(self.read_timeouts and all(t is not None and t <= g.CONFIRM_S for t in self.read_timeouts))
+        self.assertLessEqual(self.clock.now, g.CONFIRM_S + 1e-9)  # answered well inside the stopper's 5 s
+        self.assertEqual(self.outcomes()[-1], ("Swipe", "confirmed"))
+
+    def test_5_the_cap_is_never_exceeded_or_confirmed(self):
+        cases = ("stop check returns true at 1.65 s", "jump down after a slow stop check", "final up post returns late")
+        for name in cases:
+            with self.subTest(name=name):
+                self.setUp()
+                rt = self.runtime()
+                gesture = g.joystick(270, 1, 1.5)
+                real, slow = self.state.stop_requested, []
+                if name == cases[0]:
+                    def stop_check():  # a slow stop-file check that finds the stop, returning at 1.65 s
+                        if self.clock.now >= 1.49 and not slow:
+                            slow.append(True)
+                            self.clock.now = 1.65
+                            return True
+                        return real()
+                    self.state.stop_requested = stop_check
+                elif name == cases[1]:
+                    gesture = g.joystick(270, 1, 1.5, jump_at_s=1.4)
+
+                    def stop_check():  # returns (no stop) at 1.503 s, just before the jump DOWN
+                        if self.clock.now >= 1.39 and not slow:
+                            slow.append(True)
+                            self.clock.now = 1.503
+                        return real()
+                    self.state.stop_requested = stop_check
+                else:
+                    self.controller.block = {4: .17}  # the final UP's post call returns at 1.67 s
+                with android_run(), self.assertRaises(host.InputUnconfirmed):
+                    rt.gesture(gesture, source_frame=self.frame)
+                late = [(t, kind, args) for t, kind, args, _m, _l in self.controller.calls if kind != "up" and t > 1.5]
+                self.assertEqual(late, [])  # no DOWN or MOVE past the cap, without slack
+                self.assert_halted_with_marker(OVERRAN)
+
+    def test_6_a_failed_job_seen_during_cleanup_is_never_a_clean_stop(self):
+        rt = self.runtime()
+        self.controller.delay = {4: .05}  # the jump DOWN is still pending at the stop ...
+        self.controller.fail = lambda kind, args: kind == "down" and args[-1] == 1  # ... and then reports failure
+        self.clock.at(.41, lambda: stop_requested(self.state))
+        with android_run(), self.assertRaises(host.InputUnconfirmed):
+            g.joystick_step(rt, self.frame, 270, 1, 1.0, jump_at_s=.4)
+        self.assert_halted_with_marker("unconfirmed")
+        self.assertEqual(self.reads, [])  # FAILED: not confirmed by the device as an early stop
+
+
 DESKTOP_CHECK = r"""
 import json, os, sys
 from pathlib import Path

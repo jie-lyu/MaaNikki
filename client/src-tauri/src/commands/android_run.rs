@@ -45,6 +45,8 @@ pub const NOT_CONNECTED: &str = "安卓模拟器没有连接，请重新连接�
 pub const NO_RESOURCE: &str = "资源还没有加载，请等资源加载完成后再开始。";
 pub const DESKTOP_RUN_ACTIVE: &str = "这个实例还有别的任务在运行，请先停止。";
 pub const DIRECT_CLICK_REFUSED: &str = "安卓模拟器上不提供直接点击：触摸只由 agent 在核对画面并记录之后发送。";
+pub const SCREENCAP_HELD: &str =
+    "安卓模拟器正在运行任务，这时不另外截图（截图只由 agent 在没有按住的触点时发出），请用最近一次的截图。";
 pub const NOTHING_POSTED: &str = "安卓任务一个也没能提交（模拟器可能已经断开），这一轮已结束；请检查连接后重新开始。";
 pub const QUITTING: &str = "MaaNikki 正在退出，不再开始安卓任务。";
 pub const DEVICE_BUSY: &str =
@@ -368,6 +370,15 @@ pub fn refuse_while_busy(state: &MaaState, instance_id: &str, op: Op) -> Result<
         None => Ok(()),
         Some(phase) => Err(busy_refusal(op, matches!(phase, Phase::Finishing { .. }))),
     }
+}
+
+/// 截图：这个实例有安卓运行（启动中、运行中或收尾）时为 true，这时谁都不往它的控制器发截图（截图订阅、单次截图
+/// 命令），只给最近一次缓存的图。agent 的截图和手势用同一把输入锁，保证按住触点时不截图；客户端发的截图绕过这把锁。
+/// 在拿实例锁之前调用（锁的顺序：先槽，后实例）。
+pub fn screencap_held(state: &MaaState, instance_id: &str) -> bool {
+    let slot = &state.android_run;
+    let mut inner = lock(&slot.inner);
+    slot.busy_for(&mut inner, instance_id).is_some()
 }
 
 /// 直接点击：安卓运行期间拒绝，而且 Adb 实例一律拒绝（直接点击绕过了 agent 核对画面和记录的触摸路径）。

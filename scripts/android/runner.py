@@ -353,6 +353,8 @@ def _run(args) -> int:
                 record["disconnect"] = "timed out or failed"
             record["agent_exit"] = reap(child)
             agent_log.close()
+            # The agent is gone (nothing more is posted); the controller is dropped when this returns.
+            drain_controller(controller, data_root, record)
             if record["agent_exit"] == "unreaped":
                 record["status"] = "error"
                 record["error"] = "agent 子进程没能结束（终止和强制结束都没有确认）"
@@ -379,6 +381,25 @@ def _run(args) -> int:
 RELEASE_ADVICE = ("设备没有报告触点已经全部抬起（或者标记记的不是现在连着的这台设备（序列号和启动号）、标记读不出来），重启 ADB 或看画面都证明不了"
                   "那个触点已经抬起，所以运行器停下，需要人来决定：先报告协调者或维护者；确认可以继续时，用 --clear-unconfirmed "
                   "加上上面的指纹重跑。")
+
+
+DRAIN_SECONDS = 10.0
+
+
+def drain_controller(controller, data_root: Path, record: dict, seconds: float | None = None) -> None:
+    """Before the controller is dropped: when a touch is still reserved (touch.json present: a gesture's lift may
+    still be queued behind a slow DOWN, which MaaTouch keeps held, as the agent's DOWN has no auto-up), wait at most
+    ``seconds`` for one harmless job (a shell ``true``, no touch) posted after everything else: the controller runs
+    jobs in order, so the queued UP has run once it completes. Destroying the controller earlier lets its worker
+    exit after the running DOWN without the UP. The marker itself stays for the recovery to decide."""
+    if not (input_dir(data_root) / "touch.json").exists():
+        return
+    try:
+        drained = within(DRAIN_SECONDS if seconds is None else seconds, "排空控制器队列",
+                         lambda: controller.post_shell("true", 2000).wait().succeeded)
+        record["controller_drain"] = "drained" if drained else "not confirmed"
+    except Exception as error:  # noqa: BLE001 - recorded; the teardown goes on
+        record["controller_drain"] = f"failed: {error}"
 
 
 def _adb_shell(adb: str, serial: str, command: list[str], seconds: float = 10) -> str | None:

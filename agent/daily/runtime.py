@@ -522,7 +522,8 @@ class Runtime:
         the gesture: it lifted early, and once that lift is confirmed this returns False), FAILED or OVERRUN (both
         unconfirmed). A gesture (and a ``movement`` swipe, camera_drag) needs a source frame captured after every
         earlier input and counts as a gesture; any input needs one captured after the latest gesture
-        (DeviceInputState.inputs); a gesture also needs the latest completed capture (DeviceInputState.captures).
+        (DeviceInputState.inputs); a gesture or movement swipe also needs the latest completed capture
+        (DeviceInputState.captures), and its device confirmation ends by a wall-clock deadline.
         Every touch is confirmed by an UP newer than its frame's baseline and the last UP that confirmed a touch."""
         from task_control import ForegroundChanged
         if send is not None:
@@ -545,10 +546,10 @@ class Runtime:
                 from host import UnsupportedInput
                 raise UnsupportedInput(f"安卓模拟器上的「{action}」依据的截图是在上一次输入之前截的，画面可能已经变了，"
                                        "没有发送；手势前后都要重新截图再判断。")
-            # A gesture delayed behind another capture (any Runtime) decides again on the newer pixels.
-            if send is not None and state.superseded(source_frame):
+            # A gesture or camera drag delayed behind another capture (any Runtime) decides again on the newer pixels.
+            if fresh and state.superseded(source_frame):
                 from host import UnsupportedInput
-                raise UnsupportedInput("安卓模拟器上的手势依据的截图之后又截过新图，画面可能已经变了，没有发送；"
+                raise UnsupportedInput(f"安卓模拟器上的「{action}」依据的截图之后又截过新图，画面可能已经变了，没有发送；"
                                        "要在最新的截图上重新判断。")
             target = self._sessionless_target()
             # The device reading kept with the source frame (no device I/O between the decision and the send): the
@@ -613,7 +614,7 @@ class Runtime:
                         # is gone (measured 2026-11-26): only the device showing this touch's UP, after the
                         # baseline, with nothing held confirms it.
                         timing = None
-                        if send is not None:
+                        if fresh:  # a gesture or camera drag: confirmed by a wall-clock deadline (stop window)
                             from host.android.gesture import confirmation_clock
                             timing = confirmation_clock()
                         after = self._device_touch_released(target, before.latest, timing)
