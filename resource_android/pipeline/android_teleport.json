@@ -5,6 +5,13 @@
     "expected": ".+",
     "action": "DoNothing"
   },
+  "MaaNikki_Android_MapCardDropdown": {
+    "recognition": "TemplateMatch",
+    "template": "android/map_card_dropdown.png",
+    "roi": [1180, 78, 60, 46],
+    "threshold": 0.85,
+    "action": "DoNothing"
+  },
   "MaaNikki_Android_MapCardText": {
     "recognition": "OCR",
     "roi": [992, 116, 248, 96],

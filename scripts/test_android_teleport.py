@@ -3,12 +3,13 @@ python scripts/test_android_teleport.py
 
 Runs on any OS without an emulator. The map localisation, the blank-terrain check and the drag planning run on a crop of
 a real max-zoom map frame (scripts/fixtures/android/map_terrain_max.jpg, from .build/android/map-survey 05b); the flows
-run against scripted screens reacting to the taps and swipes the real pages helpers send; the nodes and OCR run through
-the real MaaFramework (both resource layers) on frames composed from UID-free crops of the survey frames.
+run against scripted screens reacting to the taps and swipes the real flow sends; the nodes and OCR run through the
+real MaaFramework (both resource layers) on frames composed from UID-free crops of the survey frames.
 scripts/android/teleport_frames.py repeats the recognition and decisions on the full saved frames (local only).
 """
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import os
@@ -25,10 +26,9 @@ os.environ.setdefault("MAAFW_BINARY_PATH", str(ROOT / "maafw"))  # Windows CI's 
 sys.path.insert(0, str(ROOT / "agent"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
-from host.android import actions, crystal_route, pages, teleport  # noqa: E402
+from host.android import actions, crystal_route, move, pages, teleport  # noqa: E402
 from host.android.actions import Screen  # noqa: E402
 from host.android.teleport import Card, Pose, Stop  # noqa: E402
 
@@ -65,13 +65,7 @@ def compose(fixtures, names, background=(78, 58, 66)):
     return frame
 '''
 exec(COMPOSE)
-
-
-def world():
-    return teleport.WorldMap(resource=ROOT / "resource")
-
-
-WORLD = world()
+WORLD = teleport.WorldMap(resource=ROOT / "resource")
 
 
 def hit(box, text=""):
@@ -103,23 +97,20 @@ class LookTests(unittest.TestCase):
         self.assertEqual([round(v) for v in pose.to_screen(MAIN["x"], MAIN["y"])], [724, 332])
         # the icon the survey tapped at (724,322): its centre (725,321), 1.8 px from where it should be
         self.assertLess(np.hypot(*(np.subtract(teleport.pillar_expected(pose, MAIN["x"], MAIN["y"]), (725, 321)))), 3)
-        # the default zoom's scale on a max-zoom frame: no trusted pose
-        self.assertFalse(WORLD.locate(frame, 0.676).trusted)
-        # a frame with no terrain: no trusted pose
-        self.assertFalse(WORLD.locate(np.full((720, 1280, 3), 90, np.uint8)).trusted)
+        self.assertFalse(WORLD.locate(frame, 0.676).trusted)  # the default zoom's scale on a max-zoom frame
+        self.assertFalse(WORLD.locate(np.full((720, 1280, 3), 90, np.uint8)).trusted)  # no terrain
 
     def test_blank_terrain_and_the_drag(self):
         frame = compose(FIXTURES, FRAMES["xinghai max"])
         pose = WORLD.locate(frame)
         residual = WORLD.residual(frame, pose)
         self.assertTrue(teleport.blank_at(residual, (350, 400)))  # open sea
-        for point in ((725, 321), (850, 511 - 5), (230, 400), (1000, 300)):  # pillar, label, outside the zone
+        for point in ((725, 321), (850, 506), (230, 400), (1000, 300)):  # pillar, label, outside the zone
             self.assertFalse(teleport.blank_at(residual, point), point)
         plan = teleport.plan_drag(residual, pose.to_screen(HUB["x"], HUB["y"]))
         self.assertEqual(plan, ((320, 320), (880, 282)))
         self.assertTrue(all(teleport.blank_at(residual, p) for p in plan))
         self.assertIsNone(teleport.plan_drag(np.full((720, 1280), 255, np.float32), (100, 300)))
-        # a drag never asks more than DRAG_MAX per axis
         begin, end = teleport.plan_drag(np.zeros((720, 1280), np.float32), (-2000, 300))
         self.assertLessEqual(end[0] - begin[0], teleport.DRAG_MAX[0])
 
@@ -128,17 +119,31 @@ class LookTests(unittest.TestCase):
             with self.subTest(frame=name):
                 self.assertEqual(teleport.zoom_state(compose(FIXTURES, FRAMES[name])), level)
 
-    def test_the_card_is_read_positively_both_ways(self):
+    def test_the_card_needs_a_whole_known_message(self):
+        # Review round 1, finding 1: only the whole observed message (whitespace/punctuation aside) or the whole
+        # counter set is a state; contradictory, partial or unfamiliar text is unknown.
         self.assertEqual(card_of("今日尚未进行召唤摇铃", "快前往流转之枢吧").kind, "not_rung")
+        self.assertEqual(card_of("今日尚未进行 召唤摇铃。", "快前往流转之枢吧！").kind, "not_rung")
         rung = card_of("1/3", "12/30", "40/100")
         self.assertEqual((rung.kind, rung.crystals), ("rung", 12))
-        self.assertEqual(card_of("今日已进行召唤摇铃").kind, "rung")
-        self.assertEqual(card_of("12 / 30", "0/3").crystals, 12)
-        for texts in ((), ("7/8", "6/31"), ("12/30",), ("12/30", "1/3", "新的提示文字"), ("718", "12/30"),
-                      ("40/30", "1/3"), ("今日尚未进行召唤摇铃", "今日已进行召唤摇铃"), ("您",)):
+        self.assertEqual(card_of("12 / 30", "0/3", "100/100").crystals, 12)
+        for texts in ((), ("昨日尚未摇铃，今日已进行召唤摇铃",), ("尚未解锁摇铃",), ("今日尚未进行召唤摇铃",),
+                      ("今日尚未进行召唤摇铃", "快前往流转之枢吧", "1/3"), ("快前往流转之枢吧", "今日尚未进行召唤摇铃"),
+                      ("今日已进行召唤摇铃",), ("7/8", "6/31"), ("12/30", "1/3"), ("1/3", "12/30", "40/100", "您"),
+                      ("1/3", "718", "40/100"), ("1/3", "40/30", "40/100"), ("1/3", "12/30", "12/30")):
             with self.subTest(texts=texts):
                 self.assertEqual(card_of(*texts).kind, "unknown")
         self.assertEqual(teleport.card_state(lambda node, override=None: None).kind, "unknown")
+
+    def test_the_region_card_is_read_positively(self):
+        def recognize(name, dropdown=True):
+            return lambda node, override=None: {teleport.CARD_DROPDOWN: hit([1199, 90, 25, 22]) if dropdown else MISS,
+                                                teleport.REGION_NAME: hit([1070, 84, 50, 27], name)}.get(node, MISS)
+        with patch("app_paths.RESOURCE_ROOT", ROOT):
+            self.assertEqual(teleport.region_card(recognize("星海")), "星海")
+            self.assertEqual(teleport.region_card(recognize("纪念山地")), "纪念山地")
+            for case in (recognize("详情"), recognize("传送"), recognize("星海", dropdown=False), recognize("")):
+                self.assertIsNone(teleport.region_card(case))
 
     def test_panel_names_and_buttons(self):
         self.assertEqual(teleport.point_name("星梦群屿 · 主岛"), "星梦群屿·主岛")
@@ -146,8 +151,9 @@ class LookTests(unittest.TestCase):
         good = teleport.Panel("星梦群屿·主岛", ("传送", "详情"), (), [1000, 637, 70, 40], [766, 639, 74, 39])
         self.assertTrue(teleport.panel_ok(good, "星梦群屿·主岛"))
         self.assertFalse(teleport.panel_ok(good, "无界枢纽"))
-        for change in ({"buttons": ("传送", "立即前往", "详情")}, {"buttons": ("传送",)}, {"words": ("立即前往",)},
-                       {"teleport": None}, {"detail": None}, {"detail": [990, 637, 20, 40]}):
+        for change in ({"buttons": ("传送", "立即前往", "详情")}, {"buttons": ("OK", "传送", "详情")},
+                       {"buttons": ("传送",)}, {"words": ("立即前往",)}, {"teleport": None}, {"detail": None},
+                       {"detail": [990, 637, 20, 40]}):
             with self.subTest(change=change):
                 self.assertFalse(teleport.panel_ok(teleport.Panel(**{**good.__dict__, **change}), "星梦群屿·主岛"))
 
@@ -155,19 +161,40 @@ class LookTests(unittest.TestCase):
         self.assertTrue(teleport.province_header([888, 100, 57, 32]))
         self.assertFalse(teleport.province_header([841, 161, 93, 32]))  # a region row (纪念山地)
 
+    def test_a_clean_hud_frame_to_touch(self):
+        reader = SimpleNamespace(present=lambda frame: frame != "no minimap")
+
+        def obs(kind="hud", regions=("登上鸣鸣列车",), frame="f", blocks=(("labels", 600, 1270, 75),)):
+            return move.Observation(frame, kind, 0.0, "提示" if kind != "hud" else "", regions=regions, blocks=blocks)
+        first = obs()
+        self.assertIsNone(teleport.hud_unclean(first, reader))
+        self.assertIsNone(teleport.hud_unclean(obs(regions=("登上鸣鸣列车", "#")), reader))  # with its distance
+        self.assertIsNone(teleport.hud_unclean(obs(regions=("登上鸣鸣列车", "#")), reader, first))
+        for case, against in ((obs("other"), None), (obs("narration"), None), (obs(frame="no minimap"), None),
+                              (obs(regions=()), None), (obs(regions=("登上鸣鸣列车", "点击继续")), None),
+                              (obs(regions=("前往目标",)), None), (obs(regions=("登上鸣鸣列车", "#", "#")), None),
+                              (obs(regions=("别的任务",)), first),
+                              (obs(blocks=(("labels", 600, 1270, 75), ("hearts", 520, 700, 680))), first)):
+            with self.subTest(case=case.regions, kind=case.kind, against=against is not None):
+                self.assertIsNotNone(teleport.hud_unclean(case, reader, against))
+
 
 # ---- the scripted map ----
 
 BACK = [37, 22, 40, 40]
 TITLE_BOX = [1070, 84, 50, 27]
+DROPDOWN_BOX = [1199, 90, 25, 22]
 COLLAPSE_BOX = [1205, 105, 27, 21]
 STARSEA_BOX = [888, 100, 57, 32]
 ZOOM_BOX = [356, 659, 18, 18]
 CLOSE_BOX = [1067, 466, 51, 51]
 TELEPORT_BOX = [1000, 637, 70, 40]
 DETAIL_BOX = [766, 639, 74, 39]
+BUTTON_BOXES = {"详情": DETAIL_BOX, "传送": TELEPORT_BOX, "立即前往": [1000, 637, 140, 40], "OK": [500, 640, 40, 30],
+                "追踪": [1000, 637, 70, 40]}
+NOT_RUNG = ("今日尚未进行召唤摇铃", "快前往流转之枢吧")
 HUD = Screen("hud", {"duck": [30, 18, 54, 54]})
-MAP = Screen("page", {"back": BACK}, title="地图")
+PROMPT_HUD = Screen("hud", {"duck": [30, 18, 54, 54]}, reason="prompt")  # the stub classifier reads a prompt on it
 LOADING = Screen("unknown", reason="认不出当前画面")
 
 
@@ -186,18 +213,30 @@ class FakeWorld:
         return np.zeros((720, 1280), np.float32) if self.blank else np.full((720, 1280), 255, np.float32)
 
 
-class Game:
-    """The map screens of one teleport, reacting to the taps and swipes the real pages helpers send."""
+def stub_classify(screen, recognize):
+    if screen.reason == "prompt":
+        return move.Verdict("other", "大世界以外的文字（可能是提示、横幅、任务或交互按钮）")
+    return move.Verdict("hud", "", ("登上鸣鸣列车",))
 
-    def __init__(self, *, where="hud", region="星海", zoom="below", view=(1230.5, 987.4), collapsed=False,
-                 panel_title=None, buttons=("详情", "传送"), card=("今日尚未进行召唤摇铃",),
-                 after_teleport=("loading", "loading", "hud"), menu_has_chevron=True, pillar_shift=(0, 0)):
+
+class Game:
+    """The map screens of one teleport, reacting to the taps and swipes the real flow sends."""
+
+    def __init__(self, *, where="hud", region="星海", zoom="below", view=(1230.5, 987.4), collapses_needed=1,
+                 panel_title=None, buttons=("详情", "传送"), card=NOT_RUNG, title="地图",
+                 after_teleport=("loading", "loading", "hud"), menu_has_chevron=True, pillar_shift=(0, 0),
+                 region_text=None, back_word=False):
         self.where, self.region, self.zoom, self.view = where, region, zoom, view
-        self.collapsed, self.panel_title, self.buttons, self.card = collapsed, panel_title, buttons, card
+        self.collapses_needed, self.collapses = collapses_needed, 0
+        self.panel_title, self.buttons, self.card, self.title = panel_title, buttons, card, title
         self.after_teleport, self.menu_has_chevron = list(after_teleport), menu_has_chevron
-        self.pillar_shift = pillar_shift
-        self.taps, self.queue = [], []
-        self.target = MAIN
+        self.pillar_shift, self.region_text, self.back_word = pillar_shift, region_text, back_word
+        self.taps, self.queue, self.calls = [], [], []
+        self.shown_title = None
+
+    @property
+    def collapsed(self):
+        return self.collapses >= self.collapses_needed
 
     def pillar_box(self, checkpoint):
         pose = Pose(self.view[0], self.view[1], .98, .7)
@@ -208,10 +247,14 @@ class Game:
     def recognize_for(self, where):
         def recognize(node, override=None):
             if node == actions.BACK_ARROW:
-                return hit(BACK)
+                return hit(BACK) if where in ("map", "menu", "panel") else MISS
+            if node == teleport.MAP_WORDS and where == "map" and self.back_word:
+                return rows(("立即前往", [60, 70, 90, 30]))  # inside the back arrow's margin
             if where in ("map", "panel"):
+                if node == teleport.CARD_DROPDOWN:
+                    return hit(DROPDOWN_BOX)
                 if node == teleport.REGION_NAME:
-                    return hit(TITLE_BOX, self.region)
+                    return hit(TITLE_BOX, self.region_text or self.region)
                 if node == teleport.CARD_TEXT and self.region == "星海":
                     return rows(*[(t, [1024, 136 + 28 * i, 177, 22]) for i, t in enumerate(self.card)])
             if where == "map":
@@ -230,35 +273,41 @@ class Game:
                 if node == teleport.MENU_STARSEA and self.collapsed:
                     return hit(STARSEA_BOX, "星海")
                 if node == teleport.MENU_COLLAPSE and not self.collapsed and self.menu_has_chevron:
-                    return hit(COLLAPSE_BOX)
+                    return hit([COLLAPSE_BOX[0], COLLAPSE_BOX[1] + 90 * self.collapses, 27, 21])
             if where == "panel":
                 if node == teleport.PANEL_CLOSE:
                     return hit(CLOSE_BOX)
                 if node == teleport.PANEL_TITLE:
                     return rows((self.shown_title, [177, 481, 177, 28]))
                 if node == teleport.PANEL_BUTTONS:
-                    boxes = {"详情": DETAIL_BOX, "传送": TELEPORT_BOX, "立即前往": [1000, 637, 140, 40]}
-                    return rows(*[(b, boxes.get(b, [500, 640, 60, 30])) for b in self.buttons])
+                    return rows(*[(b, BUTTON_BOXES[b]) for b in self.buttons])
                 if node == teleport.TELEPORT and "传送" in self.buttons:
                     return hit(TELEPORT_BOX, "传送")
                 if node == teleport.MAP_WORDS and "立即前往" in self.buttons:
-                    return rows(("立即前往", [1000, 637, 140, 40]))
+                    return rows(("立即前往", BUTTON_BOXES["立即前往"]))
+            if where == "loading text" and node == move.SCREEN_TEXT:
+                return rows(("温馨提示文字", [400, 650, 300, 30]))
             return MISS
         return recognize
 
     def screen_now(self, rt):
         where = self.queue.pop(0) if self.queue else self.where
+        if where == "panel lingering":
+            where, self.shown_title = "panel", MAIN["name"]
+        if where == "wrong panel":
+            where, self.shown_title = "panel", "星梦群屿·海滩"
         frame = Frame(view=self.view, zoom=None if where == "panel" else self.zoom, where=where)
-        if where == "hud":
-            return HUD, frame, lambda node, override=None: MISS
-        if where == "loading":
-            return LOADING, frame, lambda node, override=None: MISS
+        if where in ("hud", "prompt"):
+            return (PROMPT_HUD if where == "prompt" else HUD), frame, lambda node, override=None: MISS
+        if where in ("loading", "loading text"):
+            return LOADING, frame, self.recognize_for(where)
         if where == "other":
             return Screen("unknown", reason="画面上有弹窗"), frame, \
                 lambda node, override=None: hit([900, 100, 40, 40]) if node == actions.MODAL_CLOSE else MISS
-        return MAP, frame, self.recognize_for(where)
+        return Screen("page", {"back": BACK}, title=self.title), frame, self.recognize_for(where)
 
-    def action(self, name, target=None, begin=None, end=None, duration=None, source_frame=None):
+    def action(self, name, target=None, begin=None, end=None, duration=None, source_frame=None, _movement=False):
+        self.calls.append({"name": name, "movement": _movement, "source": source_frame})
         if name == "Swipe":
             self.taps.append(("swipe", tuple(begin), tuple(end)))
             s = teleport.MAX_ZOOM_SCALE
@@ -271,9 +320,9 @@ class Game:
         elif target == TITLE_BOX:
             self.taps.append("card title")
             self.where = "menu"
-        elif target == COLLAPSE_BOX:
+        elif self.where == "menu" and target[0] == COLLAPSE_BOX[0]:
             self.taps.append("collapse")
-            self.collapsed = True
+            self.collapses += 1
         elif target == STARSEA_BOX:
             self.taps.append("starsea")
             self.where, self.region = "map", "星海"
@@ -300,41 +349,55 @@ class Game:
         return True
 
 
-class CleanIo:
-    """move.RuntimeIo stand-in: every observation a clean HUD."""
+class HudIo:
+    """move.RuntimeIo stand-in: each observation a HUD frame of ``kinds`` (then clean HUD frames), stamped with the
+    (patched) clock; ``regions``: the tracker each shows."""
 
-    def __init__(self, rt=None, kinds=None):
-        self.kinds = list(kinds or [])
+    def __init__(self, kinds=(), regions=None):
+        self.kinds, self.regions = list(kinds), list(regions or [])
+        self.frames = []
 
     def observe(self):
-        from host.android.move import Observation
+        import time
         kind = self.kinds.pop(0) if self.kinds else "hud"
-        return Observation(Frame(view=None, zoom=None, where="hud"), kind, 0.0, "旁白" if kind != "hud" else "")
+        region = self.regions.pop(0) if self.regions else ("登上鸣鸣列车",)
+        frame = Frame(view=None, zoom=None, where="hud", index=len(self.frames))
+        self.frames.append(frame)
+        return move.Observation(frame, kind, time.monotonic(), "提示" if kind != "hud" else "", regions=region,
+                                blocks=(("labels", 600, 1270, 75),))
+
+
+READER = SimpleNamespace(present=lambda frame: True)
 
 
 def scripted_rt(game):
     rt = SimpleNamespace(stopped=False, logs=[], _frame_still_valid=Mock(return_value=True),
-                         pause=Mock(return_value=True), diagnostic=Mock(), TOUCH_KEY_ATTEMPTS=3, action=game.action)
+                         pause=Mock(return_value=True), diagnostic=Mock(), TOUCH_KEY_ATTEMPTS=3, action=game.action,
+                         _recognizer_on=lambda frame: (lambda node, override=None: MISS))
     rt.log = lambda text, detail=False: rt.logs.append(text)
     return rt
 
 
-def patched(game):
-    import contextlib
+def patched(game, step=.25):
     stack = contextlib.ExitStack()
     stack.enter_context(patch.object(pages, "screen_now", side_effect=game.screen_now))
     stack.enter_context(patch.object(teleport, "zoom_state", side_effect=lambda frame: frame.zoom))
     stack.enter_context(patch.object(teleport, "zoom_right",
                                      side_effect=lambda frame: {"max": 333, "below": 248}.get(frame.zoom)))
-    stack.enter_context(patch("host.android.move.RuntimeIo", CleanIo))
-    stack.enter_context(patch("time.monotonic", side_effect=itertools.count(0, .25).__next__))
+    stack.enter_context(patch("host.android.move.classify", side_effect=stub_classify))
+    stack.enter_context(patch("app_paths.RESOURCE_ROOT", ROOT))
+    stack.enter_context(patch("time.monotonic", side_effect=itertools.count(0, step).__next__))
     return stack
 
 
-def transport(game, checkpoint=MAIN, world_=None):
+def teleporter(rt, world_=None, io=None, reader=READER):
+    return teleport.Teleport(rt, world_ or FakeWorld(), io=io or HudIo(), reader=reader)
+
+
+def transport(game, checkpoint=MAIN, world_=None, io=None, reader=READER, step=.25):
     rt = scripted_rt(game)
-    with patched(game):
-        tp = teleport.Teleport(rt, world_ or FakeWorld())
+    with patched(game, step):
+        tp = teleporter(rt, world_, io, reader)
         try:
             return tp.transport(checkpoint), rt, None
         except (Stop, pages.FrameMismatch, pages.GuardRefusal) as error:
@@ -352,12 +415,45 @@ class TeleportFlowTests(unittest.TestCase):
         self.assertEqual(game.taps[3:], ["pillar main", "teleport"])
         self.assertIn("已传送到「星梦群屿·主岛」。", rt.logs)
 
+    def test_every_map_input_is_sent_with_the_freshness_rule_from_the_confirming_frame(self):
+        # Review round 1, finding 8: the gesture freshness rule (latest capture, after every input) on each input.
+        game = Game()
+        transport(game)
+        self.assertEqual(len(game.calls), 5)
+        self.assertTrue(all(call["movement"] for call in game.calls))
+
+    def test_an_aged_confirmation_is_decided_again_and_never_sent(self):
+        game = Game(where="map", zoom="max", view=(1394.5, 1010.4))
+        _result, _rt, error = transport(game, step=2.0)  # every confirmation older than MAX_DECISION_AGE_S
+        self.assertIsInstance(error, Stop)
+        self.assertEqual(game.calls, [])
+
     def test_from_another_region_through_the_menu_collapsing_the_province_first(self):
         game = Game(region="纪念山地")
         result, _rt, error = transport(game)
         self.assertIsNone(error)
         self.assertEqual(game.taps[:5], ["minimap", "card title", "collapse", "starsea", "zoom"])
         self.assertEqual(game.taps[-2:], ["pillar main", "teleport"])
+
+    def test_the_list_is_read_again_after_the_last_collapse(self):
+        # Review round 1, finding 11: the third collapse reveals 星海, which is then tapped.
+        game = Game(region="纪念山地", collapses_needed=teleport.MAX_COLLAPSES)
+        _result, _rt, error = transport(game)
+        self.assertIsNone(error)
+        self.assertEqual(game.taps.count("collapse"), teleport.MAX_COLLAPSES)
+        self.assertIn("starsea", game.taps)
+        game = Game(region="纪念山地", collapses_needed=teleport.MAX_COLLAPSES + 1)
+        _result, _rt, error = transport(game)
+        self.assertIsInstance(error, Stop)
+        self.assertTrue(error.frames)
+        self.assertNotIn("starsea", game.taps)
+
+    def test_a_region_title_that_is_no_region_is_not_tapped(self):
+        # Review round 1, finding 6: 详情 read where the card's title should be.
+        game = Game(region="纪念山地", region_text="详情")
+        _result, _rt, error = transport(game)
+        self.assertIsInstance(error, Stop)
+        self.assertEqual(game.taps, ["minimap"])
 
     def test_the_hub_is_dragged_in_from_off_screen(self):
         game = Game(zoom="max", view=(1394.5, 1010.4))  # survey 05b: the hub ~1160 px left of the screen
@@ -370,22 +466,24 @@ class TeleportFlowTests(unittest.TestCase):
             for x, y in (begin, end):
                 self.assertTrue(teleport.in_zone((x, y), teleport.DRAG_ZONE))
 
-    def test_another_title_closes_the_panel_and_stops_without_teleporting(self):
-        game = Game(panel_title="星梦群屿·海滩")
-        result, rt, error = transport(game)
+    def test_a_drag_is_never_decided_on_another_page(self):
+        # Review round 1, finding 7: the exact title (地图册 is not 地图), no fabricated screen.
+        game = Game(where="map", zoom="max", title="地图册")
+        _result, _rt, error = transport(game)
         self.assertIsInstance(error, Stop)
-        self.assertEqual(game.taps[-2:], ["pillar main", "close"])
-        self.assertNotIn("teleport", game.taps)
-        self.assertIn("已经关闭详情，没有传送", str(error))
+        self.assertEqual(game.taps, [])
 
-    def test_another_button_closes_the_panel_and_never_taps_it(self):
-        for buttons in (("详情", "传送", "立即前往"), ("详情", "追踪"), ("立即前往",)):
-            with self.subTest(buttons=buttons):
-                game = Game(buttons=buttons)
-                _result, _rt, error = transport(game)
+    def test_a_rejected_panel_stops_at_once_with_nothing_tapped(self):
+        # Review round 1, finding 4: no close tap; every text in the button band accounted for.
+        for case in ({"panel_title": "星梦群屿·海滩"}, {"buttons": ("详情", "传送", "立即前往")},
+                     {"buttons": ("详情", "追踪")}, {"buttons": ("立即前往",)}, {"buttons": ("详情", "传送", "OK")}):
+            with self.subTest(case=case):
+                game = Game(zoom="max", view=(1394.5, 1010.4), **case)
+                _result, rt, error = transport(game)
                 self.assertIsInstance(error, Stop)
-                self.assertEqual(game.taps[-1], "close")
-                self.assertNotIn("teleport", game.taps)
+                self.assertEqual(game.taps[-1], "pillar main")
+                self.assertTrue(error.frames)
+                self.assertIn("没有点任何按钮", str(error))
 
     def test_the_teleport_tap_is_never_repeated(self):
         game = Game(after_teleport=["map"] * 200)
@@ -394,12 +492,27 @@ class TeleportFlowTests(unittest.TestCase):
         self.assertEqual(game.taps.count("teleport"), 1)
         self.assertEqual(game.taps[-1], "teleport")
 
-    def test_an_unexpected_screen_after_teleport_stops_with_its_frame(self):
-        game = Game(after_teleport=["loading", "other", "hud"])
+    def test_arrival_accepts_loading_and_the_destinations_own_panel(self):
+        game = Game(after_teleport=["panel lingering", "loading", "loading", "hud"])
+        result, _rt, error = transport(game)
+        self.assertIsNone(error)
+        self.assertEqual(result, (MAIN["x"], MAIN["y"]))
+
+    def test_arrival_stops_at_the_first_recognised_unexpected_screen(self):
+        # Review round 1, finding 5: a wrong panel, a HUD with a prompt, a popup.
+        for sequence in (["loading", "wrong panel", "hud"], ["loading", "prompt", "hud"], ["loading", "other", "hud"]):
+            with self.subTest(sequence=sequence):
+                game = Game(after_teleport=sequence)
+                _result, _rt, error = transport(game)
+                self.assertIsInstance(error, Stop)
+                self.assertEqual(error.frames[0].where, {"wrong panel": "panel"}.get(sequence[1], sequence[1]))
+                self.assertEqual(game.taps[-1], "teleport")
+
+    def test_an_unknown_frame_with_text_is_given_a_bounded_wait(self):
+        game = Game(after_teleport=["loading text"] * 400)
         _result, _rt, error = transport(game)
         self.assertIsInstance(error, Stop)
-        self.assertEqual(error.frames[0].where, "other")
-        self.assertEqual(game.taps[-1], "teleport")
+        self.assertIn(f"{teleport.UNKNOWN_WAIT} 秒", str(error))
 
     def test_no_blank_terrain_means_no_drag(self):
         game = Game(zoom="max")
@@ -419,41 +532,57 @@ class TeleportFlowTests(unittest.TestCase):
         self.assertIsInstance(error, Stop)
         self.assertNotIn("pillar main", game.taps)
 
-    def test_an_unclean_hud_after_arrival_stops(self):
-        game = Game(zoom="max", view=(1394.5, 1010.4))
-        rt = scripted_rt(game)
-        with patched(game), patch("host.android.move.RuntimeIo", lambda rt_: CleanIo(kinds=["other"] * 400)):
-            with self.assertRaises(Stop):
-                teleport.Teleport(rt, FakeWorld()).transport(MAIN)
-        self.assertEqual(game.taps[-1], "teleport")
+    def test_the_minimap_is_tapped_only_from_clean_hud_frames(self):
+        # Review round 1, finding 3: the walker's clean-HUD checks on both tap frames, the minimap in place.
+        for io, reader in ((HudIo(kinds=["other"]), READER), (HudIo(kinds=["hud", "other"]), READER),
+                           (HudIo(regions=[("登上鸣鸣列车",), ("别的任务",)]), READER),
+                           (HudIo(regions=[("登上鸣鸣列车", "点击继续")]), READER),
+                           (HudIo(), SimpleNamespace(present=lambda frame: False))):
+            with self.subTest(kinds=io.kinds, regions=io.regions):
+                game = Game()
+                _result, _rt, error = transport(game, io=io, reader=reader)
+                self.assertIsInstance(error, Stop)
+                self.assertEqual(game.taps, [])
+        game = Game()
+        result, _rt, error = transport(game, io=HudIo(kinds=["narration", "narration"]))
+        self.assertIsNone(error)  # an ambient remark is waited through
+        self.assertEqual(game.taps[0], "minimap")
 
     def test_the_card_needs_two_agreeing_frames_and_stops_when_unreadable(self):
-        for card, kind in ((("今日尚未进行召唤摇铃",), "not_rung"), (("1/3", "5/30", "9/100"), "rung")):
+        for card, kind in ((NOT_RUNG, "not_rung"), (("1/3", "5/30", "9/100"), "rung")):
             with self.subTest(card=card):
                 game = Game(where="map", card=card)
                 rt = scripted_rt(game)
                 with patched(game):
-                    self.assertEqual(teleport.Teleport(rt, FakeWorld()).card().kind, kind)
+                    self.assertEqual(teleporter(rt).card().kind, kind)
         game = Game(where="map", card=("12/30",))
         rt = scripted_rt(game)
         with patched(game), self.assertRaises(Stop):
-            teleport.Teleport(rt, FakeWorld()).card()
+            teleporter(rt).card()
         self.assertEqual(game.taps, [])
 
-    def test_leaving_the_map(self):
+    def test_leaving_the_map_ends_on_a_confirmed_hud(self):
         game = Game(where="map")
         rt = scripted_rt(game)
         with patched(game):
-            self.assertTrue(teleport.Teleport(rt, FakeWorld()).leave())
+            self.assertIsNotNone(teleporter(rt).leave())
         self.assertEqual(game.taps, ["back"])
+
+    def test_the_exit_is_guarded_by_map_words(self):
+        # Review round 1, finding 6: a map word inside the back arrow's margin refuses the exit tap.
+        game = Game(where="map", back_word=True)
+        rt = scripted_rt(game)
+        with patched(game), self.assertRaises(pages.GuardRefusal):
+            teleporter(rt).leave()
+        self.assertEqual(game.taps, [])
 
 
 # ---- the route entry ----
 
 class FakeMap:
-    def __init__(self, cards, transports=None):
+    def __init__(self, cards, *, leave=True, transports_ok=True):
         self.cards, self.calls, self.card_frame = list(cards), [], "card frame"
-        self.transports = transports
+        self._leave, self.transports_ok = leave, transports_ok
 
     def open_map(self):
         self.calls.append("open")
@@ -474,45 +603,72 @@ class FakeMap:
         self.calls.append(f"transport {record['name']}")
         return float(record["x"]), float(record["y"])
 
+    def await_hud(self, what, seconds, destination=None):
+        self.calls.append("await")
+        return "hud look"
+
     def leave(self):
         self.calls.append("leave")
-        return True
+        if isinstance(self._leave, Exception):
+            raise self._leave
+        return "hud look" if self._leave else None
 
 
-def route_run(cards, *, outcome="arrived", ring=True):
+def route_run(cards, *, outcome="arrived", ring=True, record=None, leave=True, user_stop=False):
     rt = SimpleNamespace(stopped=False, logs=[], _frame_still_valid=Mock(return_value=True),
                          pause=Mock(return_value=True), diagnostic=Mock(), TOUCH_KEY_ATTEMPTS=3)
     rt.log = lambda text, detail=False: rt.logs.append(text)
-    run = crystal_route.Run(rt, reader=Mock(), world=FakeWorld(), io=CleanIo())
-    run.map = FakeMap(cards)
+    record = record or crystal_route.BellRecord(tempfile.mkdtemp())
+    run = crystal_route.Run(rt, reader=READER, world=FakeWorld(), io=HudIo(), record=record)
+    run.map = FakeMap(cards, leave=leave)
     rings = []
+
+    def fake_ring(self, hub):
+        rings.append(hub["name"])
+        from account_state import game_day
+        record.mark(game_day(), "pressed")
+        return ring
     walk = SimpleNamespace(outcome=outcome, ok=outcome == "arrived", message="已到达目标位置。", attempted=3, confirmed=3)
-    with patch.object(pages, "screen_now", return_value=(HUD, Frame(where="hud"), lambda n, o=None: MISS)), \
-            patch.object(crystal_route.Run, "ring", side_effect=lambda hub: rings.append(hub["name"]) or ring), \
+    with patch.object(crystal_route.Run, "ring", fake_ring), \
             patch.object(crystal_route.Run, "walk", return_value=walk), \
             patch("host.game_backend", return_value="android"), \
-            patch("host.android_user_stop", return_value=False), \
+            patch("host.android_user_stop", return_value=user_stop), \
             patch.object(crystal_route, "Run", side_effect=lambda rt_: run):
         result = crystal_route.run(rt, {"kind": "android_crystal_route"})
     return result, rt, run.map.calls, rings
 
 
+RUNG4 = Card("rung", 4, ((3, 0), (30, 4), (100, 0)))
+RUNG9 = Card("rung", 9, ((3, 1), (30, 9), (100, 3)))
+
+
 class RouteTests(unittest.TestCase):
     def test_not_rung_hub_bell_then_the_route(self):
-        result, rt, calls, rings = route_run([Card("not_rung"), Card("rung", 4, ((3, 0), (30, 4))),
-                                              Card("rung", 9, ((3, 1), (30, 9)))])
+        result, rt, calls, rings = route_run([Card("not_rung"), RUNG4, RUNG9])
         self.assertTrue(result, rt.logs)
         self.assertEqual(rings, ["无界枢纽"])
-        self.assertEqual(calls, ["open", "region", "card", "transport 无界枢纽", "open", "region", "card",
+        self.assertEqual(calls, ["open", "region", "card", "transport 无界枢纽", "await", "open", "region", "card",
                                  "transport 星梦群屿·主岛", "open", "region", "card", "leave"])
         self.assertIn(crystal_route.NOTICE, rt.logs)
         self.assertIn("星光结晶：路线前 4/30，路线后 9/30（本趟 +5）。", rt.logs)
 
     def test_already_rung_skips_the_hub_and_the_bell(self):
-        result, _rt, calls, rings = route_run([Card("rung", 4, ((3, 0), (30, 4))), Card("rung", 4, ((3, 0), (30, 4)))])
+        result, _rt, calls, rings = route_run([RUNG4, RUNG4])
         self.assertTrue(result)
         self.assertEqual(rings, [])
         self.assertNotIn("transport 无界枢纽", calls)
+
+    def test_an_attempt_recorded_today_is_never_pressed_again(self):
+        # Review round 1, finding 2: a second run (restart) the same game day with the card still not rung.
+        record = crystal_route.BellRecord(tempfile.mkdtemp())
+        _result, _rt, _calls, rings = route_run([Card("not_rung"), Card("not_rung")], record=record)
+        self.assertEqual(rings, ["无界枢纽"])
+        result, rt, calls, rings = route_run([Card("not_rung")], record=record)
+        self.assertFalse(result)
+        self.assertEqual(rings, [])
+        self.assertEqual(calls, ["open", "region", "card"])
+        self.assertIn(crystal_route.MANUAL, rt.logs[-1])
+        self.assertEqual(rt.diagnostic.call_args.kwargs["image"], "card frame")
 
     def test_an_unreadable_card_stops_before_any_teleport_or_bell(self):
         result, rt, calls, rings = route_run([Stop("读不出地图卡片", ["frame"])])
@@ -529,10 +685,28 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(rt.diagnostic.call_args.kwargs["image"], "card frame")
 
     def test_after_a_walk_that_stopped_on_another_screen_nothing_more_is_sent(self):
-        result, rt, calls, _rings = route_run([Card("rung", 4, ((3, 0), (30, 4)))], outcome="screen")
+        result, rt, calls, _rings = route_run([RUNG4], outcome="screen")
         self.assertFalse(result)
         self.assertEqual(calls[-1], "transport 星梦群屿·主岛")
         self.assertIn("没有读到路线前后的星光结晶数量，收集情况没有看到。", rt.logs)
+
+    def test_success_needs_the_count_the_final_hud_and_no_stop(self):
+        # Review round 1, finding 9.
+        result, rt, _calls, _rings = route_run([RUNG4, Stop("读不出", ["final"])])
+        self.assertFalse(result)
+        self.assertEqual(rt.diagnostic.call_args.kwargs["image"], "final")
+        result, rt, _calls, _rings = route_run([RUNG4, Card("unknown")])
+        self.assertFalse(result)
+        self.assertEqual(rt.diagnostic.call_args.kwargs["image"], "card frame")
+        result, _rt, _calls, _rings = route_run([RUNG4, RUNG9], leave=False)
+        self.assertFalse(result)
+        result, rt, _calls, _rings = route_run([RUNG4, RUNG9], leave=Stop("没有回到大世界", ["exit"]))
+        self.assertFalse(result)
+        self.assertEqual(rt.diagnostic.call_args.kwargs["image"], "exit")
+        result, _rt, _calls, _rings = route_run([RUNG4, RUNG9], user_stop=True)
+        self.assertFalse(result)
+        result, _rt, _calls, _rings = route_run([RUNG4, RUNG9], outcome="blocked")
+        self.assertFalse(result)  # counts read, but the walk did not arrive
 
     def test_off_android_or_with_options_nothing_runs(self):
         rt = SimpleNamespace(stopped=False, log=Mock())
@@ -546,56 +720,103 @@ class RouteTests(unittest.TestCase):
     def test_the_notice_says_route_3_always(self):
         self.assertIn("固定走 3 号路线", crystal_route.NOTICE)
         self.assertIn("收集得很少或没有收集", crystal_route.NOTICE)
+        for words in ("阻止再按一次", "手动打开星海地图", "手动摇一次铃", "不会有任何损失"):
+            self.assertIn(words, crystal_route.BELL_NOTE)
+        _result, rt, _calls, _rings = route_run([RUNG4, RUNG9])
+        self.assertEqual(rt.logs[:2], [crystal_route.NOTICE, crystal_route.BELL_NOTE])
 
 
 class BellTests(unittest.TestCase):
-    """Run.ring: one press, on a clean HUD at the hub with the bell where it belongs, confirmed on a second frame."""
+    """Run.ring: one press, on clean HUD frames at the hub with the bell where it belongs, recorded first."""
 
-    def ring(self, kinds=(), *, at_hub=True, bell_box=(593, 590, 47, 47), expire=0, sent=True):
+    def ring(self, kinds=(), regions=None, *, at_hub=True, bell_box=(593, 590, 47, 47), outcomes=(True,),
+             record=None):
+        from host import UnsupportedInput
         from host.android import gesture
-        rt = SimpleNamespace(stopped=False, logs=[], pause=Mock(return_value=True), TOUCH_KEY_ATTEMPTS=3)
+        rt = SimpleNamespace(stopped=False, logs=[], pause=Mock(return_value=True), TOUCH_KEY_ATTEMPTS=3,
+                             _frame_still_valid=Mock(return_value=True))
         rt.log = lambda text, detail=False: rt.logs.append(text)
         rt._recognizer_on = lambda frame: (lambda node, override=None: hit(list(bell_box))
                                            if node == teleport.HUD_BELL and bell_box else MISS)
         reader = Mock()
         reader.present.return_value = True
         reader.fix.return_value = SimpleNamespace(x=HUB["x"] + (0 if at_hub else 30), y=HUB["y"], reliable=True)
-        run = crystal_route.Run(rt, reader=reader, world=FakeWorld(), io=CleanIo(kinds=kinds))
-        calls = []
+        record = record or crystal_route.BellRecord(tempfile.mkdtemp())
+        io = HudIo(kinds=kinds, regions=regions)
+        run = crystal_route.Run(rt, reader=reader, world=FakeWorld(), io=io, record=record)
+        calls, states, outcomes = [], [], list(outcomes)
+        from account_state import game_day
 
         def press(rt_, frame, point, seconds, not_after=None):
-            calls.append((point, seconds))
-            if len(calls) <= expire:
+            calls.append((point, seconds, frame.index))
+            states.append((record.attempt(game_day()) or {}).get("state"))  # what was recorded at contact-down
+            outcome = outcomes.pop(0)
+            if outcome == "expired":
                 raise gesture.DecisionExpired("aged out")
-            return sent
-        with patch.object(gesture, "bell_step", side_effect=press), patch("time.monotonic", return_value=0.0):
+            if outcome == "unsupported":
+                raise UnsupportedInput("superseded")
+            if outcome == "raise":
+                raise RuntimeError("unconfirmed")
+            return outcome
+        with patch.object(gesture, "bell_step", side_effect=press), \
+                patch("time.monotonic", side_effect=itertools.count(0, .1).__next__):
             try:
-                return run.ring(HUB), calls, None
-            except (Stop, pages.GuardRefusal) as error:
-                return None, calls, error
+                return run.ring(HUB), calls, None, states, (record.attempt(game_day()) or {}).get("state")
+            except (Stop, pages.GuardRefusal, UnsupportedInput, RuntimeError) as error:
+                return None, calls, error, states, (record.attempt(game_day()) or {}).get("state")
 
-    def test_one_press_on_the_confirmed_bell(self):
-        result, calls, error = self.ring()
+    def test_one_press_on_the_confirmed_bell_recorded_first(self):
+        result, calls, error, states, final = self.ring()
         self.assertIsNone(error)
         self.assertTrue(result)
-        self.assertEqual(calls, [([616, 613], 4.0)])
+        self.assertEqual(calls, [([616, 613], 4.0, 1)])  # the confirming (second, latest) frame
+        self.assertEqual((states, final), (["pressing"], "pressed"))
 
     def test_narration_is_waited_through(self):
-        result, calls, _error = self.ring(kinds=["narration", "narration"])
+        result, calls, _error, _states, _final = self.ring(kinds=["narration", "narration"])
         self.assertTrue(result)
         self.assertEqual(len(calls), 1)
 
-    def test_an_aged_decision_is_decided_again_not_repeated(self):
-        result, calls, _error = self.ring(expire=1)
+    def test_a_refusal_before_contact_down_is_rolled_back_and_decided_again(self):
+        result, calls, _error, states, final = self.ring(outcomes=("expired", True))
         self.assertTrue(result)
-        self.assertEqual(len(calls), 2)  # the first was refused before contact-down (DecisionExpired)
+        self.assertEqual((len(calls), states, final), (2, ["pressing", "pressing"], "pressed"))
+        _result, calls, error, _states, final = self.ring(outcomes=("unsupported",))
+        self.assertIsNotNone(error)
+        self.assertEqual((len(calls), final), (1, None))
+
+    def test_an_interrupted_or_unconfirmed_press_stays_recorded(self):
+        _result, _calls, _error, _states, final = self.ring(outcomes=(False,))
+        self.assertEqual(final, "interrupted")
+        _result, _calls, error, _states, final = self.ring(outcomes=("raise",))
+        self.assertIsInstance(error, RuntimeError)
+        self.assertEqual(final, "pressing")
+
+    def test_a_recorded_attempt_blocks_the_press(self):
+        from account_state import game_day
+        record = crystal_route.BellRecord(tempfile.mkdtemp())
+        record.mark(game_day(), "interrupted")
+        _result, calls, error, _states, _final = self.ring(record=record)
+        self.assertIsInstance(error, Stop)
+        self.assertEqual(calls, [])
+
+    def test_a_broken_record_blocks_the_press(self):
+        record = crystal_route.BellRecord(tempfile.mkdtemp())
+        record.path.parent.mkdir(parents=True)
+        record.path.write_text("{not json", encoding="utf-8")
+        with self.assertRaises(crystal_route.RecordError):
+            self.ring(record=record)
 
     def test_refusals(self):
-        for case in ({"kinds": ["other"]}, {"at_hub": False}, {"bell_box": None}, {"bell_box": (640, 590, 47, 47)}):
+        # Review round 1, finding 3: the walker's clean-HUD checks on both frames (a prompt, a quest directive in
+        # the tracker, a changed tracker on the confirming frame), at the hub, the bell in place.
+        for case in ({"kinds": ["other"]}, {"kinds": ["hud", "other"]}, {"regions": [("前往目标",)]},
+                     {"regions": [("登上鸣鸣列车",), ("别的任务",)]}, {"at_hub": False}, {"bell_box": None},
+                     {"bell_box": (640, 590, 47, 47)}):
             with self.subTest(case=case):
-                _result, calls, error = self.ring(**case)
+                _result, calls, error, _states, final = self.ring(**case)
                 self.assertIsInstance(error, Stop)
-                self.assertEqual(calls, [])
+                self.assertEqual((calls, final), ([], None))
 
 
 class EntryTests(unittest.TestCase):

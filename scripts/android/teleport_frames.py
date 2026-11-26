@@ -12,7 +12,8 @@ decide there, through the real nodes (both resource layers):
     from where its icon should be, the guards) or the drag that would bring it into TARGET_ZONE (both ends blank);
   - on 地图切换: the 星海 row (and whether it is a province header) or the collapse chevron, with the guards;
   - on a point panel: its title, buttons, map words, whether it passes for 星梦群屿·主岛, the 传送 tap and its guards;
-  - on the HUD frames (DIR/map-survey and DIR/survey/walk): the bell button and the walk's screen class.
+  - on the HUD frames (DIR/map-survey and DIR/survey/walk): the bell button, the walk's screen class and whether the
+    frame is clean enough to decide the minimap tap or the bell on (teleport.hud_unclean), with the tap's guards.
 """
 from __future__ import annotations
 
@@ -28,6 +29,13 @@ sys.path.insert(0, str(ROOT / "scripts" / "android"))
 
 CHECKPOINTS = {"无界枢纽": (834.327, 1019.073), "星梦群屿·主岛": (1433.676, 997.388)}
 DEFAULT_SCALE = 0.676  # the survey's registration of the default zoom (MAX_ZOOM_SCALE x 1.452)
+
+
+class _Reader:  # the clean-HUD check's minimap test (the chevron at the pivot; map-independent)
+    @staticmethod
+    def present(frame):
+        from host.android.minimap import chevron_at_pivot
+        return chevron_at_pivot(frame)
 
 
 class _Rt:
@@ -109,7 +117,13 @@ def judge(world, frame_path):
             bell = recognize(teleport.HUD_BELL)
             out["bell"] = touch_point(actions._box(bell)) if actions._hit(bell) else None
             out["bell_in_place"] = actions._hit(bell) and actions._near(touch_point(actions._box(bell)), BELL_POINT)
-            out["walk_class"] = move.classify(screen, recognize).kind
+            verdict = move.classify(screen, recognize)
+            out["walk_class"] = verdict.kind
+            obs = move.Observation(frame, verdict.kind, 0.0, verdict.reason, regions=verdict.regions,
+                                   blocks=verdict.blocks)
+            out["touch_clean"] = teleport.hud_unclean(obs, _Reader) or "clean"
+            out["minimap_tap_guard"] = pages._forbidden_near(recognize, list(actions.MINIMAP)) or \
+                teleport.word_near(recognize, list(actions.MINIMAP))
         return out
     return run
 

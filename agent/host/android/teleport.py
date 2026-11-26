@@ -9,11 +9,13 @@ exactly 详情 and 传送 -> 传送 tapped once (found by OCR) -> loading -> the
 coordinates returned (the walker's position hint).
 
 Rules (docs/android-support-plan.md, 阶段 E and decision 2): every touch is decided on a fresh focus-confirmed frame that
-shows the whole expected state and confirmed on a second fresh frame (pages.tap_on_page / swipe_on_page with
-retry=False), never within pages.FORBIDDEN_MARGIN of a forbidden label (MaaNikki_Android_Forbidden) or of a map word
-(MAP_WORDS: 前往 as in 立即前往, 追踪, 导航, 解锁, ...; full OCR boxes on both frames). 立即前往 is never tapped: a panel
-with any other button than 详情 and 传送, or another title, is closed by its ✕ and the task stops. The 传送 tap is never
-repeated; no BACK key is sent; any screen that is not the expected one stops the task with that frame saved (Stop).
+shows the whole expected state and confirmed on the next fresh frame (Teleport.send; on the HUD, hud_pair with the
+walker's clean-HUD checks), sent from that confirming frame only while it is the latest capture (the gesture
+freshness rule, ``_movement``) and younger than move.MAX_DECISION_AGE_S, never within pages.FORBIDDEN_MARGIN of a
+forbidden label (MaaNikki_Android_Forbidden) or of a map word (MAP_WORDS: 前往 as in 立即前往, 追踪, 导航, 解锁, ...;
+full OCR boxes on both frames). 立即前往 is never tapped: a panel with another title, or any text in its button band
+but exactly 详情 and 传送, stops the task at once with that frame, nothing tapped. The 传送 tap is never repeated; no
+BACK key is sent; any screen that is not the expected one stops the task with that frame saved (Stop).
 
 What the device frames show (1280x720, .build/android/map-survey, 2026-11-26, only opened, looked at and closed):
 - the map page: back arrow ~(57,43), title 「地图」; the region card ~x 985-1240, y 78-215 with the region's name
@@ -59,7 +61,8 @@ TELEPORT = "MaaNikki_Android_MapTeleport"
 PANEL_CLOSE = "MaaNikki_Android_MapPanelClose"
 MAP_WORDS = "MaaNikki_Android_MapWords"
 HUD_BELL = "MaaNikki_Android_HudBell"
-NODES = (REGION_NAME, CARD_TEXT, REGION_MENU, MENU_STARSEA, MENU_COLLAPSE, ZOOM_IN, PILLAR, PANEL_TITLE,
+CARD_DROPDOWN = "MaaNikki_Android_MapCardDropdown"
+NODES = (REGION_NAME, CARD_DROPDOWN, CARD_TEXT, REGION_MENU, MENU_STARSEA, MENU_COLLAPSE, ZOOM_IN, PILLAR, PANEL_TITLE,
          PANEL_BUTTONS, TELEPORT, PANEL_CLOSE, MAP_WORDS, HUD_BELL)
 
 # ---- the world map ----
@@ -96,8 +99,8 @@ PANEL_ZONE = (100, 466, 1100, 240)
 PANEL_BUTTON_NAMES = ("传送", "详情")
 DOTS = "·•・‧∙⋅."
 # ---- the card ----
-NOT_RUNG = re.compile(r"尚未.*摇铃")
-RUNG = re.compile(r"已.*摇铃")
+NOT_RUNG_MESSAGE = ("今日尚未进行召唤摇铃", "快前往流转之枢吧")  # survey 03-06: the card's two rows, top to bottom
+SURVEY_REGIONS = ("纪念山地",)  # region cards seen on the device whose region checkpoints.json does not list
 COUNTER = re.compile(r"^(\d{1,3})[/／](\d{1,3})$")
 TOTALS = (3, 30, 100)  # 星之魄, 星光结晶, 星光微尘 (the PC card's counters)
 CRYSTAL_TOTAL = 30
@@ -111,6 +114,9 @@ CARD_WAIT = 4
 ARRIVE_WAIT = 60
 MAP_LINGER = 10  # the map may stay up this long after 传送 before something else must show
 CLEAN_HUD_WAIT = 15
+UNKNOWN_WAIT = 20  # a frame with nothing recognised but text (not a known loading frame) may last this long
+HUD_SETTLE_S = 5.0  # a touch on the HUD waits this long for a clean frame (a remark going, the distance read)
+MAX_COLLAPSES = 3
 STEP = .4
 
 
@@ -294,28 +300,54 @@ def pillar_window(expected):
 def zoom_state(frame):
     """"max" when the zoom bar's orange segment ends at its right end, "below" when it ends further left, None when
     no orange segment is seen (the bar covered, e.g. by a panel)."""
+    right = zoom_right(frame)
+    if right is None:
+        return None
+    return "max" if right >= ZOOM_MAX_RIGHT else "below"
+
+
+def zoom_right(frame):
+    """The right end of the zoom bar's orange segment, or None when there is no such segment."""
     x, y, w, h = ZOOM_BAND
     hsv = cv2.cvtColor(frame[y:y + h, x:x + w], cv2.COLOR_BGR2HSV)
     orange = (hsv[..., 0] >= 10) & (hsv[..., 0] <= 25) & (hsv[..., 1] >= 120) & (hsv[..., 2] >= 150)
     columns = np.where(orange.mean(0) > .5)[0]
     if len(columns) < 30 or columns.max() - columns.min() > 130:
         return None
-    return "max" if columns.max() + x >= ZOOM_MAX_RIGHT else "below"
+    return int(columns.max()) + x
 
 
 def hit(recognize, node, override=None) -> bool:
     return actions._hit(recognize(node, override) if override else recognize(node))
 
 
-def region_name(recognize) -> str:
+def known_regions() -> frozenset:
+    """Region names a region card may show: every region of resource/navigation/checkpoints.json and the regions seen
+    on the device (SURVEY_REGIONS)."""
+    import json
+    from app_paths import RESOURCE_ROOT
+    data = json.loads((RESOURCE_ROOT / "resource" / "navigation" / "checkpoints.json").read_text(encoding="utf-8"))
+    return frozenset({record["region"] for points in data["maps"].values() for record in points} | set(SURVEY_REGIONS))
+
+
+def region_card(recognize) -> str | None:
+    """The region card's name, positively: the card's dropdown chevron in its place and its title reading exactly a
+    known region name (known_regions); None otherwise (e.g. a button's text read where the title should be)."""
+    if not hit(recognize, CARD_DROPDOWN):
+        return None
     result = recognize(REGION_NAME)
-    return squash(actions._text(result)) if actions._hit(result) else ""
+    name = squash(actions._text(result)) if actions._hit(result) else ""
+    return name if name in known_regions() else None
+
+
+def region_name(recognize) -> str:
+    return region_card(recognize) or ""
 
 
 def map_state(rt, screen, frame, recognize) -> str:
     """One frame: "invalid" (voided by a focus change), "hud", "menu" (地图切换 open), "panel" (a point panel: its ✕),
-    "map" (the map page with its zoom bar and nothing over it), "transition" (nothing at all recognised) or "other"
-    (anything else, the map page with something unknown over it included)."""
+    "map" (the page titled exactly 地图 with its zoom bar and nothing over it), "transition" (nothing at all
+    recognised) or "other" (anything else, the map page with something unknown over it included)."""
     if not rt._frame_still_valid(frame):
         return "invalid"
     if screen is not None and screen.kind == "hud":
@@ -331,45 +363,49 @@ def map_state(rt, screen, frame, recognize) -> str:
     return "other"
 
 
+def loading_frame(recognize) -> bool:
+    """A frame that can be the teleport's loading screen, positively as far as the frames go: nothing recognised
+    (checked by the caller) and full-frame OCR reading no text of two or more CJK characters. (No loading screen has
+    been saved yet: one with tips or other text is an unknown frame, given only UNKNOWN_WAIT.)"""
+    from host.android.move import SCREEN_TEXT
+    result = recognize(SCREEN_TEXT)
+    if result is None:
+        return False
+    return not any(_cjk(text) >= 2 for text, _box in _rows(result))
+
+
 @dataclass(frozen=True)
 class Card:
-    """The 星海 card: "not_rung" (今日尚未进行召唤摇铃 read), "rung" (no such line, and the counters of the PC card,
-    including 星光结晶's /30, or a line saying the bell was rung), or "unknown"; ``crystals``: 星光结晶 n of n/30."""
+    """The 星海 card: "not_rung" (exactly the observed daily message NOT_RUNG_MESSAGE), "rung" (exactly the PC card's
+    three counters n/3, n/30, n/100, nothing else) or "unknown"; ``crystals``: 星光结晶's n of n/30."""
     kind: str
     crystals: int | None = None
     counters: tuple = ()
 
 
+def message_text(text) -> str:
+    """A card row as compared with NOT_RUNG_MESSAGE: whitespace and punctuation dropped (CJK and letters/digits kept)."""
+    return "".join(ch for ch in str(text or "") if _cjk(ch) or (ch.isascii() and ch.isalnum()))
+
+
 def card_state(recognize) -> Card:
-    """The card's state, positively both ways: the not-rung line read, or a rung state read (never only "the
-    not-rung line was not read"). Single characters are icon noise (OCR read 「您」 on a counter icon)."""
+    """The card's state, positively both ways and from the card's whole message area: every row read there must
+    belong to one known state. "not_rung": exactly the two rows of NOT_RUNG_MESSAGE, top to bottom; "rung": exactly
+    three rows, the counters of 星之魄 (/3), 星光结晶 (/30) and 星光微尘 (/100) once each (the PC card; not seen on the
+    phone yet); any other text, a contradictory row, a misread counter or a row missing: "unknown"."""
     result = recognize(CARD_TEXT)
     if result is None:
         return Card("unknown")
-    not_rung = rung = bad = False
-    counters, others = {}, 0
-    for text, _box in _rows(result):
-        row = squash(text)
-        counter = COUNTER.fullmatch(row)
-        if counter:
-            have, total = int(counter.group(1)), int(counter.group(2))
-            if total in TOTALS and have <= total and total not in counters:
-                counters[total] = have
-            else:
-                bad = True
-        elif NOT_RUNG.search(row):
-            not_rung = True
-        elif RUNG.search(row):
-            rung = True
-        elif _cjk(row) >= 2 or len(row) >= 3:
-            others += 1  # e.g. 快前往流转之枢吧 under the not-rung line
-    crystals = counters.get(CRYSTAL_TOTAL)
-    kept = tuple(sorted(counters.items()))
-    if not_rung and not rung:
-        return Card("not_rung", crystals, kept)
-    if not not_rung and not bad and not others and (rung or (crystals is not None and len(counters) >= 2)):
-        return Card("rung", crystals, kept)
-    return Card("unknown", crystals, kept)
+    texts = [squash(text) for text, _box in sorted(_rows(result), key=lambda row: (row[1][1:2], row[1][:1]))
+             if squash(text)]
+    if [message_text(text) for text in texts] == list(NOT_RUNG_MESSAGE):
+        return Card("not_rung")
+    counters = [COUNTER.fullmatch(text) for text in texts]
+    if len(texts) == len(TOTALS) and all(counters):
+        values = {int(match.group(2)): int(match.group(1)) for match in counters}
+        if sorted(values) == sorted(TOTALS) and all(have <= total for total, have in values.items()):
+            return Card("rung", values[CRYSTAL_TOTAL], tuple(sorted(values.items())))
+    return Card("unknown")
 
 
 def word_near(recognize, box) -> str | None:
@@ -385,9 +421,10 @@ def word_near(recognize, box) -> str | None:
 
 
 def guard(recognize, box, frame):
-    """Raise GuardRefusal when a map word lies next to ``box`` on ``frame`` (the shared forbidden labels are checked
-    by the pages helpers)."""
-    word = word_near(recognize, box)
+    """Raise GuardRefusal when a shared forbidden label (MaaNikki_Android_Forbidden) or a map word lies within
+    pages.FORBIDDEN_MARGIN of ``box`` on ``frame`` (full OCR boxes, whole frame)."""
+    box = [int(v) for v in box]
+    word = pages._forbidden_near(recognize, box) or word_near(recognize, box)
     if word:
         raise pages.GuardRefusal(pages.GUARD_TAP, frame, word)
 
@@ -395,7 +432,7 @@ def guard(recognize, box, frame):
 @dataclass(frozen=True)
 class Panel:
     title: str
-    buttons: tuple  # the button texts read, sorted
+    buttons: tuple  # every text read in the button band, sorted
     words: tuple  # map words read inside the panel
     teleport: list | None  # the 传送 box
     detail: list | None  # the 详情 box
@@ -403,7 +440,7 @@ class Panel:
 
 def read_panel(recognize) -> Panel:
     title = point_name("".join(text for text, _box in _rows(recognize(PANEL_TITLE))))
-    rows = [(squash(text), box) for text, box in _rows(recognize(PANEL_BUTTONS)) if _cjk(squash(text)) >= 1]
+    rows = [(squash(text), box) for text, box in _rows(recognize(PANEL_BUTTONS)) if squash(text)]
     x, y, w, h = PANEL_ZONE
     words = tuple(sorted(squash(text) for text, box in _rows(recognize(MAP_WORDS))
                          if len(box) == 4 and x <= _centre(box)[0] <= x + w and y <= _centre(box)[1] <= y + h))
@@ -414,20 +451,75 @@ def read_panel(recognize) -> Panel:
 
 
 def panel_ok(panel: Panel, name: str) -> bool:
-    """The panel of ``name`` with exactly the buttons 详情 and 传送, no map word on it, 详情 clear of 传送's margin."""
+    """The panel of ``name`` with exactly the buttons 详情 and 传送 (every text read in the button band accounted for),
+    no map word on it, 详情 clear of 传送's margin."""
     return (panel.title == point_name(name) and panel.buttons == tuple(sorted(PANEL_BUTTON_NAMES))
             and not panel.words and panel.teleport is not None and panel.detail is not None
             and not pages._within_margin(panel.detail, panel.teleport))
 
 
+def province_header(box) -> bool:
+    """A province header's name (星海 [888,100,57,32]; 心愿原野 [886,97], 伊赞之土 [888,620]) rather than a region
+    row's (纪念山地 [841,161], 花愿镇 [842,252]): the headers' names start ~45 px further right, after their emblem."""
+    return 865 <= box[0] <= 915
+
+
+def tracker_parts(obs):
+    from host.android.move import TRACKER_DISTANCE
+    names = [entry for entry in obs.regions if entry != TRACKER_DISTANCE]
+    return names, len(obs.regions) - len(names)
+
+
+def hud_unclean(obs, reader, first=None):
+    """Why ``obs`` (move.RuntimeIo.observe) is not a clean HUD frame to touch, with the walker's checks: the HUD and
+    nothing else (move.classify "hud"), the minimap's player chevron at the default pivot (so the minimap is where its
+    tap point is), the quest tracker showing one quest name (no NARRATION_DENY word) and at most its distance (on the
+    saved 星海 frames the tracked quest lies on another map and no distance shows). ``first``: the deciding frame, for
+    a confirming frame: the same quest name and the permanent-HUD text blocks where the deciding frame had them
+    (move.same_blocks). None when clean."""
+    from host.android.move import NARRATION_DENY, same_blocks
+    if obs.kind != "hud":
+        return obs.reason or "不是干净的大世界"
+    if not reader.present(obs.frame):
+        return "没有在默认位置认出小地图"
+    names, distances = tracker_parts(obs)
+    if len(names) != 1 or any(word in names[0] for word in NARRATION_DENY):
+        return "任务栏的文字不是一个任务名"
+    if distances > 1:
+        return "任务栏的文字不是一个任务名"
+    if first is not None and (names != tracker_parts(first)[0] or not same_blocks(obs.blocks, first.blocks)):
+        return "大世界的界面文字和判断时不一样"
+    return None
+
+
+@dataclass
+class Look:
+    """One fresh frame: ``at`` the clock before its capture was requested (its age counts from there)."""
+    at: float
+    screen: object
+    frame: object
+    recognize: object
+    state: str
+
+
+def _same_fields(first, second) -> bool:
+    for name in ("target", "begin", "end"):
+        if (name in first) != (name in second):
+            return False
+        if name in first and not actions._near(first[name], second[name]):
+            return False
+    return first.get("duration") == second.get("duration")
+
+
 # ---- the flow ----
 
 class Teleport:
-    """The map flow on the agent's Runtime ``rt``. ``world``: a WorldMap (built on first use)."""
+    """The map flow on the agent's Runtime ``rt``. ``world``: a WorldMap, ``io``: a move.RuntimeIo, ``reader``: a
+    minimap.MinimapReader (each built on first use)."""
 
-    def __init__(self, rt, world=None):
+    def __init__(self, rt, world=None, *, io=None, reader=None):
         self.rt = rt
-        self._world = world
+        self._world, self._io, self._reader = world, io, reader
         self.card_frame = None  # the frame the last card reading was taken on
 
     @property
@@ -436,14 +528,35 @@ class Teleport:
             self._world = WorldMap()
         return self._world
 
+    @property
+    def io(self):
+        if self._io is None:
+            from host.android.move import RuntimeIo
+            self._io = RuntimeIo(self.rt)
+        return self._io
+
+    @property
+    def reader(self):
+        if self._reader is None:
+            from host.android.minimap import MinimapReader
+            self._reader = MinimapReader("starsea")
+        return self._reader
+
     # -- looking --
+
+    def capture(self) -> Look | None:
+        at = time.monotonic()
+        screen, frame, recognize = pages.screen_now(self.rt)
+        if frame is None:
+            return None
+        return Look(at, screen, frame, recognize, map_state(self.rt, screen, frame, recognize))
 
     def look(self):
         """``(state, screen, frame, recognize)`` on a fresh frame; state None when the run stopped."""
-        screen, frame, recognize = pages.screen_now(self.rt)
-        if frame is None:
+        found = self.capture()
+        if found is None:
             return None, None, None, None
-        return map_state(self.rt, screen, frame, recognize), screen, frame, recognize
+        return found.state, found.screen, found.frame, found.recognize
 
     def wait(self, what, done, allowed, seconds):
         """Fresh frames until ``done(state, frame, recognize)`` holds: returns ``(state, screen, frame,
@@ -467,8 +580,7 @@ class Teleport:
 
     def map_frame(self, what):
         """A fresh frame of the map page with nothing over it, else Stop with it."""
-        found = self.wait(what, lambda state, f, r: state == "map", (), 0)
-        return found
+        return self.wait(what, lambda state, f, r: state == "map", (), 0)
 
     def located(self, frame, what):
         pose = self.world.locate(frame)
@@ -476,57 +588,183 @@ class Teleport:
             raise Stop(f"{what}时认不出大地图显示的是哪里", [frame])
         return pose
 
+    # -- touches --
+
+    def send(self, what, decide, action="Click", delay=.5) -> bool:
+        """One tap (or swipe) on the map: ``decide(look)`` returns its fields (target, or begin/end/duration) when a
+        frame shows the whole expected state and None when it does not (a guard raises GuardRefusal itself). Decided
+        on a fresh frame, confirmed on the next (same fields within actions.CONFIRM_TOLERANCE), sent with that second
+        frame only while it is younger than move.MAX_DECISION_AGE_S (from its capture request) and still valid, with
+        the gesture freshness rule (``_movement``: Runtime._dispatch_touch refuses a frame captured before the last
+        input or superseded by a later capture). A frame that is not the state stops with it (no second attempt);
+        only a focus change or a confirmation that aged out decides again. False when the run stopped."""
+        from host.android.move import MAX_DECISION_AGE_S
+        from task_control import ForegroundChanged
+        last = None
+        for _attempt in range(self.rt.TOUCH_KEY_ATTEMPTS):
+            first = self.capture()
+            if first is None:
+                return False
+            if first.state == "invalid":
+                continue
+            fields = decide(first)
+            if fields is None:
+                raise Stop(f"要{what}时画面不是预期的样子，没有点", [first.frame])
+            second = self.capture()
+            if second is None:
+                return False
+            if second.state == "invalid" or not self.rt._frame_still_valid(first.frame):
+                continue
+            again = decide(second)
+            if again is None or not _same_fields(fields, again):
+                raise Stop(f"确认{what}时画面变了，没有点", [second.frame])
+            last = second
+            if time.monotonic() - second.at > MAX_DECISION_AGE_S:
+                continue  # the confirmation is too old to stand for the screen: decided again on new frames
+            if not (self.rt._frame_still_valid(first.frame) and self.rt._frame_still_valid(second.frame)):
+                continue
+            try:
+                sent = self.rt.action(action, **again, source_frame=second.frame, _movement=True)
+            except ForegroundChanged:
+                continue
+            return bool(sent) and bool(self.rt.pause(delay))
+        raise Stop(f"连续 {self.rt.TOUCH_KEY_ATTEMPTS} 次没能在新的截图上及时确认{what}",
+                   [last.frame] if last is not None else [])
+
+    def clean_hud(self, what, seconds=None):
+        """A clean HUD frame to decide a touch on (hud_unclean): an allowed ambient remark or a once-misread
+        permanent-HUD text is waited through without input up to HUD_SETTLE_S; anything else stops with that frame.
+        None when the run stopped."""
+        start, misread = time.monotonic(), False
+        while not self.rt.stopped:
+            obs = self.io.observe()
+            if obs is None:
+                return None
+            reason = hud_unclean(obs, self.reader)
+            if reason is None:
+                return obs
+            waiting = obs.kind == "narration" or (obs.kind == "misread" and not misread)
+            misread = misread or obs.kind == "misread"
+            if obs.kind != "blank" and not waiting:
+                raise Stop(f"要{what}时画面不是干净的大世界（{reason}），没有点", [obs.frame])
+            if time.monotonic() - start >= (HUD_SETTLE_S if seconds is None else seconds):
+                raise Stop(f"要{what}时一直没有等到干净的大世界画面（{reason}），没有点", [obs.frame])
+            if not self.rt.pause(STEP):
+                return None
+        return None
+
+    def hud_pair(self, what, locate):
+        """A touch on the HUD decided on a clean HUD frame and confirmed on the next one (hud_unclean against the
+        first): ``locate(obs)`` returns the target box (raising Stop or GuardRefusal itself). Returns ``(first,
+        second, target)``, the target as found on the second; Stop with the second frame when it is not clean or
+        the target moved. None when the run stopped."""
+        first = self.clean_hud(what)
+        if first is None:
+            return None
+        target = locate(first)
+        second = self.io.observe()
+        if second is None:
+            return None
+        reason = hud_unclean(second, self.reader, first)
+        if reason is not None:
+            raise Stop(f"确认{what}时画面变了（{reason}），没有点", [second.frame])
+        again = locate(second)
+        if not actions._near(again, target):
+            raise Stop(f"确认{what}时目标的位置变了，没有点", [second.frame])
+        return first, second, again
+
     # -- open, region, zoom --
 
     def open_map(self) -> bool:
-        """From the HUD: one strict tap on the minimap (the HUD on both tap frames), then the map page."""
+        """From a clean HUD (both tap frames, the minimap at its default place): one tap on the minimap, then the map."""
         from host.android import touch_point
-        point = touch_point(actions.MINIMAP)
-        if not pages.tap_on_layer(self.rt, "大世界", lambda screen, recognize: screen is not None
-                                  and screen.kind == "hud", point):
-            return False
-        return self.wait("打开大地图", lambda state, f, r: state in ("map", "menu"), ("hud", "transition"),
-                         OPEN_WAIT) is not None
+        from host.android.move import MAX_DECISION_AGE_S
+        from task_control import ForegroundChanged
+
+        def minimap(obs):
+            box = list(actions.MINIMAP)
+            guard(self.rt._recognizer_on(obs.frame), box, obs.frame)
+            return box
+        for _attempt in range(self.rt.TOUCH_KEY_ATTEMPTS):
+            pair = self.hud_pair("点小地图打开大地图", minimap)
+            if pair is None:
+                return False
+            first, second, box = pair
+            if time.monotonic() - second.at > MAX_DECISION_AGE_S:
+                continue
+            if not (self.rt._frame_still_valid(first.frame) and self.rt._frame_still_valid(second.frame)):
+                continue
+            try:
+                sent = self.rt.action("Click", target=touch_point(box), source_frame=second.frame, _movement=True)
+            except ForegroundChanged:
+                continue
+            if not (sent and self.rt.pause(.5)):
+                return False
+            return self.wait("打开大地图", lambda state, f, r: state in ("map", "menu"), ("hud", "transition"),
+                             OPEN_WAIT) is not None
+        raise Stop(f"连续 {self.rt.TOUCH_KEY_ATTEMPTS} 次没能在新的截图上及时确认要点的小地图", [])
+
+    def _menu_target(self, node):
+        """decide for a tap in 地图切换: the list open (its title read) on the page titled exactly 地图, the target
+        there (星海 as a province header; the collapse chevron only while 星海 is not in the list), guarded."""
+        def decide(look):
+            if look.state != "menu" or not pages.is_exactly(look.screen, MAP_TITLE):
+                return None
+            result = look.recognize(node)
+            if not actions._hit(result):
+                return None
+            box = actions._box(result)
+            if node == MENU_STARSEA and not province_header(box):
+                return None
+            if node == MENU_COLLAPSE and hit(look.recognize, MENU_STARSEA):
+                return None
+            guard(look.recognize, box, look.frame)
+            return {"target": box}
+        return decide
 
     def region(self, name: str = STARSEA) -> bool:
-        """The map showing ``name``: read on the card; otherwise 地图切换 opened by the card's title, the row tapped
-        (an expanded province collapsed first while the row is not in the list), and the card read again."""
+        """The map showing ``name``: read on the card (region_card); otherwise 地图切换 opened by the card's title (a
+        positively read region card of another region), the row tapped (expanded provinces collapsed first while
+        the row is not in the list, the list read once more after the last collapse), and the card read again."""
         found = self.wait("读取地图区域", lambda state, f, r: state in ("map", "menu"), (), 0)
         if found is None:
             return False
         state, _screen, frame, recognize = found
-        if state == "map" and region_name(recognize) == name:
+        if state == "map" and region_card(recognize) == name:
             return True
         if state == "map":
-            def card_title(frame_, recognize_):  # the map with nothing over it, showing another region
-                result = recognize_(REGION_NAME)
-                if actions._hit(result):
-                    guard(recognize_, actions._box(result), frame_)
-                return map_state(self.rt, _PAGE, frame_, recognize_) == "map" \
-                    and region_name(recognize_) not in ("", name)
-            if not pages.tap_on_page(self.rt, MAP_TITLE, REGION_NAME, accept=card_title, retry=False, exact=True):
+            def card_title(look):
+                if look.state != "map" or not pages.is_exactly(look.screen, MAP_TITLE):
+                    return None
+                current = region_card(look.recognize)
+                if current is None or current == name:
+                    return None
+                box = actions._box(look.recognize(REGION_NAME))
+                guard(look.recognize, box, look.frame)
+                return {"target": box}
+            if not self.send("点地图卡片的区域名", card_title):
                 return False
             if self.wait("打开地图切换", lambda state_, f, r: state_ == "menu", ("map", "transition"),
                          MENU_WAIT) is None:
                 return False
-        for _ in range(3):
+        for collapses in range(MAX_COLLAPSES + 1):
             found = self.wait("读取地图切换列表", lambda state_, f, r: state_ == "menu", (), 0)
             if found is None:
                 return False
             _state, _screen, frame, recognize = found
             row = recognize(MENU_STARSEA)
             if actions._hit(row) and name == STARSEA and province_header(actions._box(row)):
-                if not pages.tap_on_page(self.rt, MAP_TITLE, MENU_STARSEA, accept=self._menu_accept(MENU_STARSEA),
-                                         retry=False, exact=True):
+                if not self.send(f"点地图切换里的{name}", self._menu_target(MENU_STARSEA)):
                     return False
-                done = self.wait(f"切换到{name}", lambda state_, f, r: state_ == "map" and region_name(r) == name,
+                done = self.wait(f"切换到{name}", lambda s, f, r: s == "map" and region_card(r) == name,
                                  ("menu", "transition", "map"), SWITCH_WAIT)
                 return done is not None
+            if collapses == MAX_COLLAPSES:
+                break
             if not hit(recognize, MENU_COLLAPSE):
                 raise Stop(f"地图切换列表里找不到「{name}」，也没有可以折叠的省份，没有滑动列表", [frame])
             before = actions._box(recognize(MENU_COLLAPSE))
-            if not pages.tap_on_page(self.rt, MAP_TITLE, MENU_COLLAPSE, accept=self._menu_accept(MENU_COLLAPSE),
-                                     retry=False, exact=True):
+            if not self.send("折叠地图切换列表里的省份", self._menu_target(MENU_COLLAPSE)):
                 return False
 
             def changed(state_, frame_, recognize_):
@@ -538,22 +776,19 @@ class Teleport:
                 return not actions._hit(again) or not actions._near(actions._box(again), before)
             if self.wait("折叠地图切换列表里的省份", changed, ("menu", "transition"), MENU_WAIT) is None:
                 return False
-        raise Stop(f"折叠省份之后地图切换列表里仍然找不到「{name}」", [])
-
-    def _menu_accept(self, node):
-        """accept for a tap in 地图切换: the list open (its title read), the target there, no map word next to it."""
-        def accept(frame, recognize):
-            result = recognize(node)
-            if not actions._hit(result) or not hit(recognize, REGION_MENU):
-                return False
-            guard(recognize, actions._box(result), frame)
-            if node == MENU_STARSEA:
-                return province_header(actions._box(result))
-            return not hit(recognize, MENU_STARSEA)  # collapse only while the row is not in the list
-        return accept
+        raise Stop(f"折叠省份之后地图切换列表里仍然找不到「{name}」", [frame])
 
     def zoom(self) -> bool:
         """The maximum zoom: "+" tapped (at most twice) while the zoom bar shows less, each tap seen to take effect."""
+        def below(look):
+            if look.state != "map" or not pages.is_exactly(look.screen, MAP_TITLE) or zoom_state(look.frame) != "below":
+                return None
+            result = look.recognize(ZOOM_IN)
+            if not actions._hit(result):
+                return None
+            guard(look.recognize, actions._box(result), look.frame)
+            return {"target": actions._box(result)}
+        frame = None
         for taps in range(3):
             found = self.map_frame("放大地图")
             if found is None:
@@ -563,15 +798,9 @@ class Teleport:
                 return True
             if taps == 2:
                 break
-
-            def below(frame_, recognize_):
-                result = recognize_(ZOOM_IN)
-                if actions._hit(result):
-                    guard(recognize_, actions._box(result), frame_)
-                return map_state(self.rt, _PAGE, frame_, recognize_) == "map" and zoom_state(frame_) == "below"
-            if not pages.tap_on_page(self.rt, MAP_TITLE, ZOOM_IN, accept=below, retry=False, exact=True):
-                return False
             right = zoom_right(frame)
+            if not self.send("点地图的放大按钮", below):
+                return False
             if self.wait("放大地图", lambda state_, f, r: state_ == "map" and zoom_right(f) != right,
                          ("map", "transition"), ZOOM_WAIT) is None:
                 return False
@@ -579,25 +808,40 @@ class Teleport:
 
     # -- drag and select --
 
+    def _same_view(self, frame, pose) -> bool:
+        again = self.world.locate(frame)
+        return again.trusted and math.hypot(again.x - pose.x, again.y - pose.y) / pose.scale <= POSE_TOLERANCE
+
     def center(self, name, x, y):
         """Drag the map until the point at world (x, y) lies in TARGET_ZONE; returns the pose of the last frame."""
-        for _ in range(MAX_DRAGS + 1):
+        frame = None
+        for drags in range(MAX_DRAGS + 1):
             found = self.map_frame(f"把「{name}」拖进画面")
             if found is None:
                 return None
-            _state, _screen, frame, _recognize = found
+            frame = found[2]
             pose = self.located(frame, "拖动地图")
             here = pose.to_screen(x, y)
             if in_zone(here, TARGET_ZONE):
                 return pose
-            if _ == MAX_DRAGS:
+            if drags == MAX_DRAGS:
                 break
             plan = plan_drag(self.world.residual(frame, pose), here)
             if plan is None:
                 raise Stop("地图上找不到两端都是空白地形的拖动位置，没有拖动", [frame])
-            begin, end = plan
-            if not pages.swipe_on_page(self.rt, MAP_TITLE, begin, end, duration=DRAG_MS,
-                                       accept=self._drag_accept(pose, begin, end)):
+            begin, end = [list(point) for point in plan]
+
+            def drag(look, pose=pose, begin=begin, end=end):
+                if look.state != "map" or not pages.is_exactly(look.screen, MAP_TITLE) \
+                        or not self._same_view(look.frame, pose):
+                    return None
+                residual = self.world.residual(look.frame, self.world.locate(look.frame))
+                if not all(blank_at(residual, point) for point in (begin, end)):
+                    return None
+                for point in (begin, end):
+                    guard(look.recognize, [*point, 1, 1], look.frame)
+                return {"begin": begin, "end": end, "duration": DRAG_MS}
+            if not self.send("拖动地图", drag, action="Swipe"):
                 return None
             moved = self.wait("拖动地图", lambda state_, f, r: state_ == "map", ("map", "transition"), ZOOM_WAIT)
             if moved is None:
@@ -608,108 +852,84 @@ class Teleport:
                 raise Stop("拖动地图后地图移动的距离和预期不符", [moved[2]])
         raise Stop(f"拖动 {MAX_DRAGS} 次后「{name}」仍然不在画面中间", [frame])
 
-    def _drag_accept(self, pose, begin, end):
-        def accept(frame, recognize):
-            if map_state(self.rt, _PAGE, frame, recognize) != "map" or not self._same_view(frame, pose):
-                return False
-            residual = self.world.residual(frame, self.world.locate(frame))
-            for point in (begin, end):
-                if not blank_at(residual, point):
-                    return False
-                guard(recognize, [int(point[0]), int(point[1]), 1, 1], frame)
-            return True
-        return accept
-
-    def _same_view(self, frame, pose) -> bool:
-        again = self.world.locate(frame)
-        return again.trusted and math.hypot(again.x - pose.x, again.y - pose.y) / pose.scale <= POSE_TOLERANCE
-
     def select(self, name, x, y, pose) -> bool:
         """Tap the pillar of the point at world (x, y): on both tap frames the map with nothing over it at ``pose``,
-        the pillar found within PILLAR_TOLERANCE of where the point's icon should be, no map word next to it."""
+        the pillar found within PILLAR_TOLERANCE of where the point's icon should be, guarded."""
         expected = pillar_expected(pose, x, y)
         window = {"roi": pillar_window(expected)}
 
-        def accept(frame, recognize):
-            if map_state(self.rt, _PAGE, frame, recognize) != "map" or not self._same_view(frame, pose):
-                return False
-            result = recognize(PILLAR, window)
-            if not actions._hit(result):
-                return False
-            box = actions._box(result)
-            guard(recognize, box, frame)
-            return math.dist(_centre(box), expected) <= PILLAR_TOLERANCE
-        found = self.map_frame(f"点「{name}」")
-        if found is None:
-            return False
-        if not accept(found[2], found[3]):
-            raise Stop(f"在「{name}」应该在的位置没有认出传送点的图标", [found[2]])
-        if not pages.tap_on_page(self.rt, MAP_TITLE, PILLAR, override=window, accept=accept, retry=False, exact=True):
+        def pillar(look):
+            if look.state != "map" or not pages.is_exactly(look.screen, MAP_TITLE) \
+                    or not self._same_view(look.frame, pose):
+                return None
+            result = look.recognize(PILLAR, window)
+            if not actions._hit(result) or math.dist(_centre(actions._box(result)), expected) > PILLAR_TOLERANCE:
+                return None
+            guard(look.recognize, actions._box(result), look.frame)
+            return {"target": actions._box(result)}
+        if not self.send(f"点「{name}」的传送点图标", pillar):
             return False
         return self.wait(f"打开「{name}」的详情", lambda state, f, r: state == "panel", ("map", "transition"),
                          PANEL_WAIT) is not None
 
     def confirm(self, name) -> bool:
-        """On the point panel: exactly the panel of ``name`` (title, buttons 详情 and 传送, nothing else) on both tap
-        frames -> one tap on 传送 (by its OCR box); any other panel -> closed by its ✕, then Stop."""
+        """On the point panel: exactly the panel of ``name`` (title, the buttons 详情 and 传送 and nothing else read
+        in the button band, no map word) on both tap frames -> one tap on 传送 (by its OCR box). Any other panel:
+        saved and stopped at once, nothing tapped (not even its ✕)."""
         found = self.wait(f"读取「{name}」的详情", lambda state, f, r: state == "panel", (), 0)
         if found is None:
             return False
-        _state, _screen, frame, recognize = found
-        panel = read_panel(recognize)
-        if not panel_ok(panel, name):
-            reason = (f"点开的不是「{name}」的详情" if panel.title != point_name(name) else
-                      f"「{name}」的详情上有预期以外的按钮或文字")
-            self.close_panel()
-            raise Stop(f"{reason}，已经关闭详情，没有传送", [frame])
+        reject(found[3], found[2], name)
 
-        def accept(frame_, recognize_):
-            if map_state(self.rt, _PAGE, frame_, recognize_) != "panel":
-                return False
-            current = read_panel(recognize_)
-            if current.teleport is not None:
-                guard(recognize_, current.teleport, frame_)
-            return panel_ok(current, name)
-        if not pages.tap_on_page(self.rt, MAP_TITLE, TELEPORT, accept=accept, retry=False, exact=True):
+        def teleport(look):
+            if look.state != "panel" or not pages.is_exactly(look.screen, MAP_TITLE):
+                return None
+            panel = reject(look.recognize, look.frame, name)
+            guard(look.recognize, panel.teleport, look.frame)
+            return {"target": panel.teleport}
+        if not self.send(f"点「{name}」的传送", teleport):
             return False
         self.rt.log(f"已点「{name}」的传送。", detail=True)
         return True
 
-    def close_panel(self) -> bool:
-        def accept(frame, recognize):
-            result = recognize(PANEL_CLOSE)
-            if actions._hit(result):
-                guard(recognize, actions._box(result), frame)
-            return map_state(self.rt, _PAGE, frame, recognize) == "panel"
-        return pages.tap_on_page(self.rt, MAP_TITLE, PANEL_CLOSE, accept=accept, retry=False, exact=True)
-
     # -- arrival --
 
-    def arrive(self, name):
-        """After 传送: the loading frames (nothing recognised) waited through up to ARRIVE_WAIT, the map up to
-        MAP_LINGER; the HUD on two consecutive frames, then a clean HUD (move.classify: nothing over it) within
-        CLEAN_HUD_WAIT without any input. Returns that Observation; Stop on anything else."""
-        from host.android.move import RuntimeIo
-        start, huds = time.monotonic(), 0
+    def await_hud(self, what, seconds, destination=None):
+        """Wait, without input, for a clean HUD (move.classify "hud") after 传送 (``destination``: the point's name) or
+        after the bell. On the way: loading frames (nothing recognised, no text: loading_frame) up to ``seconds``;
+        frames with nothing recognised but text, up to UNKNOWN_WAIT; ambient narration and one misread HUD text;
+        after 传送, up to MAP_LINGER, the map and the destination's own panel. Anything else positively recognised
+        (a dialog, a popup, another page or panel, a HUD with a prompt or banner) stops with that frame at once, and
+        so does the time running out. Returns the Look of the clean HUD frame; None when the run stopped."""
+        from host.android.move import classify
+        start, unknown_since, misread = time.monotonic(), None, False
         while not self.rt.stopped:
-            state, _screen, frame, _recognize = self.look()
-            if state is None:
+            look = self.capture()
+            if look is None:
                 return None
             elapsed = time.monotonic() - start
-            if state == "hud":
-                huds += 1
-                if huds >= 2:
-                    break
-            elif state != "invalid":
-                huds = 0
-                if not (state == "transition" or (state in ("map", "panel") and elapsed <= MAP_LINGER)):
-                    raise Stop(f"传送到「{name}」时出现了不该出现的画面", [frame])
-            if elapsed >= ARRIVE_WAIT:
-                raise Stop(f"传送到「{name}」后 {ARRIVE_WAIT} 秒内没有回到大世界", [frame])
+            if look.state == "hud":
+                verdict = classify(look.screen, look.recognize)
+                if verdict.kind == "hud":
+                    return look
+                if verdict.kind == "misread" and not misread:
+                    misread = True
+                elif verdict.kind != "narration":
+                    raise Stop(f"{what}大世界上出现了{verdict.reason or '认不出的东西'}", [look.frame])
+            elif look.state in ("map", "panel") and destination is not None and elapsed <= MAP_LINGER:
+                if look.state == "panel" and not panel_ok(read_panel(look.recognize), destination):
+                    raise Stop(f"{what}出现了别的地点的详情", [look.frame])
+            elif look.state == "transition":
+                if not loading_frame(look.recognize):
+                    unknown_since = time.monotonic() if unknown_since is None else unknown_since
+                    if time.monotonic() - unknown_since >= UNKNOWN_WAIT:
+                        raise Stop(f"{what}出现了认不出的画面，等了 {UNKNOWN_WAIT} 秒没有变化", [look.frame])
+            elif look.state != "invalid":
+                raise Stop(f"{what}出现了不该出现的画面", [look.frame])
+            if elapsed >= seconds:
+                raise Stop(f"{what} {seconds} 秒内没有回到干净的大世界", [look.frame])
             self.rt.pause(STEP)
-        if self.rt.stopped:
-            return None
-        return clean_hud(self.rt, RuntimeIo(self.rt), f"传送到「{name}」后", CLEAN_HUD_WAIT)
+        return None
 
     # -- the whole teleport --
 
@@ -720,15 +940,14 @@ class Teleport:
         state = self.look()[0]
         if state is None:
             return None
-        if state == "hud":
-            if not self.open_map():
-                return None
+        if state == "hud" and not self.open_map():
+            return None
         if not (self.region(STARSEA) and self.zoom()):
             return None
         pose = self.center(name, x, y)
         if pose is None or not self.select(name, x, y, pose) or not self.confirm(name):
             return None
-        if self.arrive(name) is None:
+        if self.await_hud(f"传送到「{name}」时", ARRIVE_WAIT, destination=name) is None:
             return None
         self.rt.log(f"已传送到「{name}」。")
         return x, y
@@ -742,66 +961,46 @@ class Teleport:
             if found is None:
                 return None
             _state, _screen, frame, recognize = found
-            if region_name(recognize) != STARSEA:
+            self.card_frame = frame
+            if region_card(recognize) != STARSEA:
                 raise Stop("读取地图卡片时地图不是星海", [frame])
             card = card_state(recognize)
-            self.card_frame = frame
             if card.kind != "unknown" and last is not None and last.kind != "unknown" and card.kind != last.kind:
                 raise Stop("地图卡片上的摇铃状态前后读得不一样", [frame])
             if card.kind != "unknown" and card == last:
                 return card
             last = card
             if time.monotonic() - start >= CARD_WAIT:
-                raise Stop("读不出地图卡片上今天是否已经召唤摇铃（既不是未摇铃的提示，也不是认得的已摇铃状态）", [frame])
+                raise Stop("读不出地图卡片上今天是否已经召唤摇铃（不是认得的未摇铃提示，也不是认得的已摇铃状态）", [frame])
             self.rt.pause(STEP)
         return None
 
-    def leave(self) -> bool:
-        """The map page left by its back arrow (one tap, the map with nothing over it on both tap frames), and fresh
-        frames showing the HUD."""
-        def accept(frame, recognize):
-            return map_state(self.rt, _PAGE, frame, recognize) == "map"
-        if not pages.tap_on_page(self.rt, MAP_TITLE, actions.BACK_ARROW, accept=accept, retry=False, exact=True):
-            return False
+    def leave(self):
+        """The map page left by its back arrow (one tap: the map with nothing over it on both tap frames, the arrow
+        guarded by full OCR boxes), then the HUD on fresh frames. Returns the Look of the final HUD frame (clean or
+        with an allowed remark; anything else stops with that frame); None when the run stopped."""
+        def back(look):
+            if look.state != "map" or not pages.is_exactly(look.screen, MAP_TITLE):
+                return None
+            result = look.recognize(actions.BACK_ARROW)
+            if not actions._hit(result):
+                return None
+            guard(look.recognize, actions._box(result), look.frame)
+            return {"target": actions._box(result)}
+        if not self.send("点地图的返回箭头", back):
+            return None
         state, frame, after = pages.left_page(self.rt, MAP_TITLE)
         if state is None:
-            return False
+            return None
         if state != "left" or after.kind != "hud":
             raise Stop("点了地图的返回箭头之后没有回到大世界", [frame])
-        return True
+        return self.await_hud("离开地图后", CLEAN_HUD_WAIT)
 
 
-_PAGE = actions.Screen("page", title=MAP_TITLE)  # tap_on_page has already checked the page and its title
-
-
-def province_header(box) -> bool:
-    """A province header's name (星海 [888,100,57,32]; 心愿原野 [886,97], 伊赞之土 [888,620]) rather than a region
-    row's (纪念山地 [841,161], 花愿镇 [842,252]): the headers' names start ~45 px further right, after their emblem."""
-    return 865 <= box[0] <= 915
-
-
-def zoom_right(frame):
-    x, y, w, h = ZOOM_BAND
-    hsv = cv2.cvtColor(frame[y:y + h, x:x + w], cv2.COLOR_BGR2HSV)
-    orange = (hsv[..., 0] >= 10) & (hsv[..., 0] <= 25) & (hsv[..., 1] >= 120) & (hsv[..., 2] >= 150)
-    columns = np.where(orange.mean(0) > .5)[0]
-    return int(columns.max()) + x if len(columns) else None
-
-
-def clean_hud(rt, io, what, seconds):
-    """Wait, without input, for a frame that is the open-world HUD and nothing else (move.RuntimeIo.observe: "hud");
-    returns that Observation. Anything else is waited through up to ``seconds``, then Stop with the last frame. None
-    when the run stopped."""
-    start, last = time.monotonic(), None
-    while not rt.stopped:
-        obs = io.observe()
-        if obs is None:
-            return None
-        if obs.kind == "hud":
-            return obs
-        last = obs
-        if time.monotonic() - start >= seconds:
-            raise Stop(f"{what}大世界的画面一直不干净（{obs.reason or '有旁白或没拿到截图'}）",
-                       [last.frame] if last is not None else [])
-        rt.pause(STEP)
-    return None
+def reject(recognize, frame, name) -> Panel:
+    """The panel on ``frame`` when it is exactly the panel of ``name``; any other panel stops with that frame."""
+    panel = read_panel(recognize)
+    if panel_ok(panel, name):
+        return panel
+    raise Stop(f"点开的不是「{name}」的详情，没有点任何按钮" if panel.title != point_name(name) else
+               f"「{name}」的详情上有预期以外的按钮或文字，没有点任何按钮", [frame])
