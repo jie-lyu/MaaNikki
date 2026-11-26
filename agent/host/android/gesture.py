@@ -15,15 +15,18 @@ contact it put down is lifted in ``finally``, and the device must then show its 
 anything else happens.
 
 Limits, checked before anything is reserved or sent: at most GESTURE_MAX_S from the first down to the last up; the
-bell press, at most BELL_PRESS_MAX_S. While it runs no controller job is waited on blocking: each job's status is
-polled together with the local stop signals (the stop request on disk, a halt; no device read), so a stop, a failed
-call or an overrun is acted on within a poll even when a job does not complete. The stopper waits 5 s for the touch
-marker before it gives up and kills the agent; the lifts are posted at once and awaited at most CLEANUP_S. A call
-that completes past its time limit (OVERRUN_S after its scheduled time, never past the cap for a down or move;
-OVERRUN_S past the cap for a lift) makes the gesture an overrun: from then on only lifts are sent and the result is
-unconfirmed (input halted, marker kept). If the agent dies between down and up the contact stays down on the device
-(MaaTouch keeps it); the next run reads it from the device before its first touch and refuses (DeviceInputState, the
-runner's recovery).
+bell press, at most BELL_PRESS_MAX_S. While it runs no controller job is waited on blocking: one status read per
+poll, together with the local stop signals (the stop request on disk, a halt; no device read). On a stop, a failed
+or rejected call or an overrun, an up is posted at once for every contact whose down was posted, before any further
+status read, and the lifts are awaited at most CLEANUP_S; the device confirmation then reads until CONFIRM_S, so the
+stopper's 5 s wait for the touch marker is answered with margin. Every step is submitted by its own limit (OVERRUN_S
+after its scheduled time, never past the cap); a down or move must complete by then, a lift within OVERRUN_S past
+the cap; a down or move still pending at a stop must be seen finished by its limit. Otherwise the gesture is an
+overrun: from then on only lifts are sent and the result is unconfirmed (input halted, marker kept). A lift still
+queued at the end (a slow or wedged controller) keeps the tasker from being stopped, as stopping it would clear that
+lift from the controller's queue (DeviceInputState.lifts_outstanding). If the agent dies between down and up the
+contact stays down on the device (MaaTouch keeps it); the next run reads it from the device before its first touch
+and refuses (DeviceInputState, the runner's recovery).
 
 The Windows package does not ship host/android, and Runtime.gesture raises before importing this module on any
 other backend; camera_drag refuses off Android before it reaches Runtime.action.
@@ -46,6 +49,12 @@ OVERRUN_S = 0.3
 # How long the lifts sent after a stop, a failure or an overrun are awaited. With a stop seen within POLL_S and the
 # device read after it (Runtime.RELEASE_READS) this stays well inside the stopper's 5 s wait for the touch marker.
 CLEANUP_S = 1.0
+# The device confirmation after a gesture reads until this long after the gesture's last call (Runtime): with
+# CLEANUP_S, a stop is answered in about 2.5 s plus one read's capped timeout, inside the stopper's 5 s.
+CONFIRM_S = 1.5
+# A step submitted this little after its limit (timer and scheduler jitter of the poll's sleep) is still on time:
+# without it a gesture exactly at its cap would overrun on every real clock.
+TIMER_SLACK_S = 0.005
 CONTACTS = (0, 1)
 MAX_STEPS = 32
 POLL_S = 0.02  # how often a held gesture looks for a stop while it waits for its next step
@@ -204,36 +213,49 @@ def bell_press(point, duration_s) -> Gesture:
     return Gesture(BELL_PRESS, (Step(0.0, "down", 0, point), Step(float(duration_s), "up", 0)))
 
 
-def perform(controller, gesture: Gesture, abort) -> str:
+def perform(controller, gesture: Gesture, abort, keep_queue=None) -> str:
     """Send a checked gesture's steps on schedule through ``controller``. Returns DONE; ABORTED (``abort()`` became
-    true while a contact was held: it was lifted early); FAILED (a call reported failure, or a lift was not reported
-    done within CLEANUP_S); or OVERRUN (a call completed past its time limit, see OVERRUN_S, including the lifts).
-    Every contact whose down was posted and whose up was not reported done is lifted in ``finally``, also when a call
-    or a wait raises. No job is waited on blocking (see _wait). Nothing here captures, reads the device or decides."""
+    true while a contact was held: it was lifted early); FAILED (a call reported failure or was rejected, or a lift
+    was not reported done within CLEANUP_S); or OVERRUN (a step not submitted or completed by its limit, see
+    OVERRUN_S, a job still pending at the stop seen done only after its limit, or the gesture ending past the cap's
+    grace). Every contact whose down was posted and whose up was not reported done is lifted in ``finally``, also
+    when a call or a wait raises; ``keep_queue()`` is called when a lift is still outstanding at the end (nothing
+    may clear the controller's queue then, see DeviceInputState.lifts_outstanding). No job is waited on blocking:
+    one status read per poll (_status). Nothing here captures, reads the device or decides."""
     start = time.monotonic()
     cap_end = start + cap_for(gesture)
     late_end = cap_end + OVERRUN_S
     held = {}  # contact -> the job of an up posted for it and not yet reported done (None: no up posted)
-    result = FAILED
+    pending = []  # (job, limit) of a down or move posted and not yet seen done: carried into the cleanup
+    result, late, lifted = FAILED, False, False
     try:
-        result = _send_steps(controller, gesture, abort, held, start, cap_end, late_end)
+        result = _send_steps(controller, gesture, abort, held, pending, start, cap_end, late_end)
     finally:
-        lifted = lift(controller, held)
-    if result == OVERRUN or time.monotonic() > late_end:
-        return OVERRUN  # checked after the last call too: a final lift that completed late is no confirmed gesture
+        try:
+            lifted, late = lift(controller, held, pending)
+        finally:
+            if held and keep_queue is not None:
+                keep_queue()
+    if result == OVERRUN or late or time.monotonic() > late_end:
+        return OVERRUN  # checked after the last call too: a lift that completed late is no confirmed gesture
     return result if lifted else FAILED
 
 
-def _send_steps(controller, gesture, abort, held, start, cap_end, late_end) -> str:
+def _send_steps(controller, gesture, abort, held, pending, start, cap_end, late_end) -> str:
     for index, step in enumerate(gesture.steps):
         due = start + step.at
         lifting = step.kind == "up"
-        limit = late_end if lifting else min(due + OVERRUN_S, cap_end)
-        # Wait for the step's time. The first down follows the dispatch's own last checks at once (a stop seen
-        # here, before anything was sent, would leave nothing for the device to confirm).
-        stopped = _wait(lambda: time.monotonic() >= due, limit, abort if index else None, due=due)
+        # Every step is submitted by its own limit (never past the cap, TIMER_SLACK_S aside); a down or move must
+        # also complete by then, a lift within the cap's grace (an already-posted lift may still be in flight).
+        submit_by = min(due + OVERRUN_S, cap_end) + TIMER_SLACK_S
+        complete_by = late_end if lifting else submit_by
+        # The first down follows the dispatch's own last checks at once (a stop seen here, before anything was
+        # sent, would leave nothing for the device to confirm).
+        stopped = _wait_until(due, submit_by, abort if index else None)
         if stopped:
             return stopped
+        if time.monotonic() > submit_by:  # right before the post: the stop check above may itself have been slow
+            return OVERRUN
         if step.kind == "down":
             held[step.contact] = None  # before the call: a down that raised may still have reached the device
             job = controller.post_touch_down(*step.point, step.contact, 1)
@@ -241,55 +263,92 @@ def _send_steps(controller, gesture, abort, held, start, cap_end, late_end) -> s
             job = controller.post_touch_move(*step.point, step.contact, 1)
         else:
             job = held[step.contact] = controller.post_touch_up(step.contact)
-        stopped = _wait(lambda: job.done, limit, abort)
+        if not lifting:
+            pending.append((job, complete_by))
+        stopped = _await(job, complete_by, abort)
         if stopped:
             return stopped
-        if not job.succeeded:
-            return FAILED
         if lifting:
             del held[step.contact]
+        else:
+            pending.pop()
     return DONE
 
 
-def _wait(ready, limit, abort, *, due=None):
-    """Poll until ``ready()``: None then; OVERRUN once the clock is past ``limit`` (checked first, so a stop seen at
-    the same moment does not mask it); ABORTED once ``abort()`` (when given) is true. Waiting for a job (no ``due``),
-    a job already done is taken before a stop, polled every JOB_POLL_S; waiting for a step's time ``due``, a stop is
-    taken before the step is sent, polled every POLL_S."""
+def _status(job) -> str:
+    """One status read of a posted job: "done", "failed" or "pending". A job MaaFramework never queued (a rejected
+    post returns the invalid id 0) or no longer knows (status invalid) counts as failed: it will never run."""
+    if job is None or not getattr(job, "job_id", 0):
+        return "failed"
+    status = job.status
+    if status.succeeded:
+        return "done"
+    if status.pending or status.running:
+        return "pending"
+    return "failed"
+
+
+def _wait_until(due, limit, abort):
+    """Poll (POLL_S) until ``due``: None then; OVERRUN once past ``limit``; ABORTED once ``abort()`` (when given) is
+    true, checked before the step is sent."""
     while True:
         now = time.monotonic()
         if now > limit:
             return OVERRUN
-        if due is None and ready():
-            return None
         if abort is not None and abort():
             return ABORTED
-        if due is not None and ready():
+        if time.monotonic() >= due:
             return None
-        time.sleep(JOB_POLL_S if due is None else min(POLL_S, max(0.0, due - now)))
+        time.sleep(min(POLL_S, max(0.0, due - now)))
 
 
-def lift(controller, held) -> bool:
-    """Lift every contact in ``held`` (contact -> its pending up job, or None): an up is posted at once for each
-    contact without one or whose up failed (contact 1 first, so contact 0's up comes last), and the jobs are polled, never waited on
-    blocking, for at most CLEANUP_S; an up reported failed is posted once more. True when every contact's up was
-    reported done; ``held`` keeps the others. Posting does not wait for jobs still pending (a down whose job has not
-    completed): the controller runs posted jobs in order, so these ups follow it. An exception from one post does not
-    skip the others; the first one is raised after all were tried.
+def _await(job, limit, abort):
+    """Poll a posted job (one status read every JOB_POLL_S): None once it is done by ``limit``; FAILED; OVERRUN once
+    past ``limit``, also when the read that saw it done returned after it (it proves nothing in time, and the
+    overrun is checked before a stop, so a stop never masks it); ABORTED once ``abort()`` is true."""
+    while True:
+        if time.monotonic() > limit:
+            return OVERRUN
+        state = _status(job)
+        if time.monotonic() > limit:
+            return OVERRUN
+        if state == "done":
+            return None
+        if state == "failed":
+            return FAILED
+        if abort():
+            return ABORTED
+        time.sleep(JOB_POLL_S)
+
+
+def lift(controller, held, pending=()):
+    """Lift every contact in ``held`` (contact -> its pending up job, or None) and return (lifted, late).
+
+    First an up is posted for every contact without one (contact 1 first, so contact 0's up comes last), before
+    any status read: a stalled status read cannot delay them. Posting does not wait for jobs still pending (a down
+    whose job has not completed): the controller runs posted jobs in order, so these ups follow it. Then the jobs
+    are polled (one status read each per pass, never a blocking wait) until CLEANUP_S has passed: an up reported
+    failed, rejected (invalid id) or whose status read raised is posted once more; a status-read exception is kept
+    for that contact only, so every other lift is still attempted, and the first exception is raised at the end.
+    ``lifted`` is True when every contact's up was reported done (``held`` keeps the others). ``pending`` holds the
+    (job, limit) of a down or move still pending when the gesture stopped; ``late`` is True unless each was seen
+    finished by its limit (a jump down that completes after the cap is an overrun, not an early stop).
 
     Why the device confirmation covers both contacts (Runtime._dispatch_touch: an injected UP after the frame's
-    baseline and then a reading with nothing held). Android reports a contact's lift as ACTION_POINTER_UP while
-    another contact is still down, and as ACTION_UP only when the last contact leaves; only ACTION_UP is counted as
-    the lift (host.android.target.touch_snapshot). In every shape check_gesture accepts, contact 0 is down from the
-    first step to the last, so the enclosed jump's lift is a POINTER_UP and the first ACTION_UP after the baseline is
-    the gesture's own final lift; MaaTouch handles commands in the order they were posted, so every down and move of
-    the gesture was handled before it. Had contact 1 still been held, contact 0's lift would have been a POINTER_UP
-    (no ACTION_UP), and the reading would show the held contact. The cleanup keeps the same order (contact 1's up is
-    posted before contact 0's); if a retry reorders them, the last contact to leave still produces the only ACTION_UP
-    and the reading after it still shows nothing held, so no confirmation can come from a contact that is down."""
+    baseline and the last confirmed lift, then a reading with nothing held). Android reports a contact's lift as
+    ACTION_POINTER_UP while another contact is still down, and as ACTION_UP only when the last contact leaves; only
+    ACTION_UP is counted as the lift (host.android.target.touch_snapshot). In every shape check_gesture accepts,
+    contact 0 is down from the first step to the last, so the enclosed jump's lift is a POINTER_UP and the first
+    ACTION_UP after the baseline is the gesture's own final lift; MaaTouch handles commands in the order they were
+    posted, so every down and move of the gesture was handled before it. Had contact 1 still been held, contact 0's
+    lift would have been a POINTER_UP (no ACTION_UP), and the reading would show the held contact. The cleanup
+    keeps the same order (contact 1's up is posted before contact 0's); if a retry reorders them, the last contact
+    to leave still produces the only ACTION_UP and the reading after it still shows nothing held, so no
+    confirmation can come from a contact that is down. (A partly delivered gesture, a lost jump down for one, is
+    not detected this way: risk 113.)"""
     deadline = time.monotonic() + CLEANUP_S
     raised = None
-    tries = {}
+    tries = {contact: 1 for contact, job in held.items() if job is not None}  # a scripted up is the first try
 
     def post(contact):
         nonlocal raised
@@ -300,28 +359,51 @@ def lift(controller, held) -> bool:
             raised = raised or error
             held[contact] = None
 
-    for contact in sorted(held, reverse=True):  # a scripted up that failed is posted again here, in order
-        job = held[contact]
-        if job is None or job.done and not job.succeeded:
+    for contact in sorted(held, reverse=True):
+        if held[contact] is None:
             post(contact)
-    given_up = set()
+    waiting, late, given_up = list(pending), False, set()
     while True:
         for contact in sorted(held, reverse=True):
-            job = held[contact]
-            if contact in given_up or job is not None and not job.done:
+            if contact in given_up:
                 continue
-            if job is not None and job.succeeded:
+            try:
+                state = _status(held[contact])
+            except BaseException as error:  # noqa: BLE001 - this contact only; the others are still lifted
+                raised, state = raised or error, "failed"
+            if state == "done":
                 del held[contact]
-            elif tries.get(contact, 0) < 2:
-                post(contact)  # failed (or the scripted up failed, or posting raised): once more
-            else:
-                given_up.add(contact)
-        if not held or set(held) <= given_up or time.monotonic() >= deadline:
+            elif state == "failed":
+                if tries.get(contact, 0) < 2:
+                    post(contact)  # failed, rejected, or its status unreadable: once more
+                else:
+                    given_up.add(contact)
+        for item in list(waiting):
+            job, limit = item
+            try:
+                state = _status(job)
+            except BaseException as error:  # noqa: BLE001 - unknown: it may still be running
+                raised, state = raised or error, "pending"
+            if time.monotonic() > limit:
+                late = True  # not seen finished by its limit
+                waiting.remove(item)
+            elif state != "pending":
+                waiting.remove(item)
+        if (set(held) <= given_up and not waiting) or time.monotonic() >= deadline:
             break
         time.sleep(JOB_POLL_S)
+    late = late or bool(waiting)
     if raised is not None:
         raise raised
-    return not held
+    return not held, late
+
+
+def confirmation_clock():
+    """For Runtime's device confirmation after a gesture: (now, sleep, deadline) on this module's clock, the reads
+    to end by CONFIRM_S from now. With CLEANUP_S before it, a stop seen during a gesture is answered (marker
+    released or kept) well inside the stopper's 5 s, device reads and status RPCs included (each read's own
+    timeout is capped by the time left); a status RPC that itself stalls for seconds is risk 112."""
+    return (lambda: time.monotonic()), (lambda seconds: time.sleep(seconds)), time.monotonic() + CONFIRM_S
 
 
 def _refuse_off_android(frame):
@@ -339,10 +421,13 @@ def joystick_step(rt, frame, angle_deg, magnitude, duration_s, jump_at_s=None, l
 
 def camera_drag(rt, frame, begin, end, duration_s):
     """Turn the camera: a one-contact swipe from ``begin`` to ``end`` over ``duration_s`` (at most GESTURE_MAX_S),
-    the ordinary confirmed swipe (Runtime.action) decided on ``frame``. Android only, with a source frame: refused
-    before Runtime.action otherwise (a desktop swipe must never come from here)."""
+    the ordinary confirmed swipe (Runtime.action) decided on ``frame``, with the gesture freshness rule. Android
+    only, with a source frame: refused before Runtime.action otherwise (a desktop swipe must never come from
+    here)."""
     _refuse_off_android(frame)
     if type(duration_s) not in (int, float) or not math.isfinite(duration_s) or not 0 < duration_s <= GESTURE_MAX_S:
         _refuse(f"的镜头滑动时长 {duration_s} 秒不在 0–{GESTURE_MAX_S} 秒之内")
+    # _movement: the gesture freshness rule (Runtime._dispatch_touch): decided on a frame captured after the last
+    # input, and counted as a gesture, so no later input uses a frame from before the camera turned.
     return rt.action("Swipe", begin=list(begin), end=list(end), duration=max(1, round(duration_s * 1000)),
-                     source_frame=frame)
+                     source_frame=frame, _movement=True)

@@ -131,6 +131,13 @@ class DeviceInputState:
       every input sent so far, and any input only on a frame that counts the latest gesture: a frame captured before
       an input that may have changed the screen authorises nothing after it, and the touch reading kept with the
       frame (the lift baseline) postdates the previous input's lift.
+    - captures: Android screencaps completed (counted under the lock as each completes); a gesture is sent only on
+      the latest one, so a gesture delayed behind another Runtime's capture decides again on the newer pixels.
+    - last_lift: the injected UP that confirmed the latest touch (boot id, event time). A touch is confirmed only by
+      an UP newer than both its frame's baseline and this one, so two taps decided on one frame cannot share a lift.
+    - lifts_outstanding: a gesture ended with a lift posted but not reported done (a slow or wedged controller).
+      Then nothing may stop the tasker: MaaFramework's Tasker::post_stop clears the controller's queued jobs, the
+      queued UP included, while the running DOWN (posted without auto-up) still completes (Runtime._halt_unconfirmed).
     - lock: one touch at a time; reservation, halt, focus and marks are checked inside it right before dispatch.
       Android capture holds it from the touch reading until the frame is complete, so no frame is captured while
       a touch, a gesture's contact in particular, is down.
@@ -144,6 +151,9 @@ class DeviceInputState:
         self.epoch = 0
         self.inputs = 0
         self.last_gesture = 0  # ``inputs`` right after the latest gesture was sent
+        self.captures = 0
+        self.last_lift = None
+        self.lifts_outstanding = False
         self._marks = {}
         self._owner = None
 
@@ -263,18 +273,43 @@ class DeviceInputState:
         with self.lock:
             self.epoch += 1
 
-    def mark_if_unchanged(self, frame, generation, epoch, touch=None, inputs=None) -> bool:
+    def mark_if_unchanged(self, frame, generation, epoch, touch=None, inputs=None, capture=None) -> bool:
         """Record the frame's (focus generation, epoch), the device's touch reading taken right before it was
-        captured (``touch``: a TouchSnapshot, or None) and the input count read then (``inputs``; None: the count
-        now), if ``epoch`` is still current."""
+        captured (``touch``: a TouchSnapshot, or None), the input count read then (``inputs``; None: the count now)
+        and its capture number (``capture``, from completed_capture; None: counted as completed now), if ``epoch``
+        is still current."""
         import weakref
         with self.lock:
             if self.epoch != epoch:
                 return False
             self._marks = {key: value for key, value in self._marks.items() if value[0]() is not None}
             self._marks[id(frame)] = (weakref.ref(frame), (generation, epoch), touch,
-                                      self.inputs if inputs is None else inputs)
+                                      self.inputs if inputs is None else inputs,
+                                      self.completed_capture() if capture is None else capture)
             return True
+
+    def completed_capture(self) -> int:
+        """Count a completed Android screencap (inside the capture's locked section); its number."""
+        with self.lock:
+            self.captures += 1
+            return self.captures
+
+    def superseded(self, frame) -> bool:
+        """True when another screencap completed after ``frame`` (in any Runtime), or ``frame`` has no mark."""
+        entry = self._marks.get(id(frame)) if frame is not None else None
+        return entry is None or entry[0]() is not frame or entry[4] < self.captures
+
+    def lift_floor(self, boot_id):
+        """The event time of the UP that confirmed the latest touch on this guest (None: none, or another boot)."""
+        if self.last_lift is None:
+            return None
+        seen, when = self.last_lift
+        return None if seen is not None and boot_id is not None and seen != boot_id else when
+
+    def consumed_lift(self, snapshot):
+        """Record the UP that just confirmed a touch: a later touch needs a newer one."""
+        with self.lock:
+            self.last_lift = (snapshot.boot_id, snapshot.injected_up)
 
     def mark(self, frame, generation, touch=None):
         with self.lock:

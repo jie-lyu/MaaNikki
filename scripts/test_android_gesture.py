@@ -79,36 +79,63 @@ class Clock:
         self.hooks.append((when, action))
 
 
-class Job:
-    """A controller job on the fake clock: done once the clock reaches ``done_at``. A gesture never waits on one
-    blocking, so ``wait`` fails the test."""
+class Status:
+    """maa.define.Status as the gesture code reads it."""
 
-    def __init__(self, clock, done_at, ok):
-        self.clock, self.done_at, self.ok = clock, done_at, ok
+    def __init__(self, name):
+        self.name = name
+
+    done = property(lambda self: self.name in ("succeeded", "failed"))
+    succeeded = property(lambda self: self.name == "succeeded")
+    failed = property(lambda self: self.name == "failed")
+    pending = property(lambda self: self.name == "pending")
+    running = property(lambda self: self.name == "running")
+
+
+class Job:
+    """A controller job on the fake clock. ``status`` is a round trip to the controller (ScriptedController.status:
+    IPC latency, stalls, errors); job id 0 is MaaFramework's invalid id (a rejected post). A gesture never waits on
+    a job blocking, so ``wait`` fails the test."""
+
+    def __init__(self, controller, job_id, start=0.0, done_at=0.0, ok=True):
+        self.controller, self.job_id, self.start, self.done_at, self.ok = controller, job_id, start, done_at, ok
+        self.cleared = self.stopped_running = False
+
+    @property
+    def status(self):
+        return self.controller.status(self)
 
     @property
     def done(self):
-        return self.clock.now >= self.done_at - 1e-9
+        return self.status.done
 
     @property
     def succeeded(self):
-        return self.done and self.ok
+        return self.status.succeeded
 
     def wait(self):
         raise AssertionError("a gesture must not block on a controller job")
 
 
 class ScriptedController:
-    """Records every touch call with the fake time, whether the touch marker was on disk and the input log's last
-    line then. Jobs complete in order: ``delay[i]`` after the previous one (NEVER: a wedged job); ``block[i]`` blocks
-    inside call i (the clock runs, hooks fire); ``raise_at[i]`` raises from call i; ``fail(kind, args)`` makes a job
-    report failure; ``drop(kind, args)`` hides a call's event from the device (MaaTouch gone)."""
+    """MaaFramework's controller as far as the gesture relies on it (v5.16.1 ControllerAgent and AsyncRunner).
+
+    Jobs run one at a time in the order posted: job i starts when posted or when the previous one is done and takes
+    ``delay[i]`` (NEVER: wedged); ``block[i]`` blocks inside call i itself (the clock runs, hooks fire);
+    ``raise_at[i]`` raises from call i; ``fail(kind, args)`` makes a job report failure; ``reject(kind, args)``
+    returns the invalid id 0 (never queued). A status read takes ``status_latency`` (IPC), plus ``status_stall``
+    once, and raises when ``status_raise(job)``. ``post_stop`` (Tasker::post_stop) drops every job that has not
+    started (status invalid, never delivered); the running one completes (its status reads invalid meanwhile), and
+    while it runs a new post is rejected (id 0). The device sees a job's event ``lag`` after the job completed
+    (MaaTouch still has to handle it), in order; ``drop(kind, args)`` hides it (MaaTouch gone)."""
 
     def __init__(self, clock, state):
-        self.clock, self.state, self.calls, self.jobs, self.screencaps = clock, state, [], [], []
-        self.raise_at, self.block, self.delay = {}, {}, {}
-        self.fail = self.drop = lambda kind, args: False
-        self.busy_until = 0.0
+        self.clock, self.state, self.calls, self.jobs, self.screencaps, self.events = clock, state, [], [], [], []
+        self.raise_at, self.block, self.delay, self.tap_delays = {}, {}, {}, []
+        self.fail = self.drop = self.reject = lambda kind, args: False
+        self.status_raise = lambda job: False
+        self.status_latency, self.status_stall, self.lag = 0.001, 0.0, 0.01
+        self.busy_until, self.next_id, self.need_to_stop = 0.0, 1, False
         self.lock = threading.Lock()
 
     def _job(self, kind, args):
@@ -116,15 +143,49 @@ class ScriptedController:
         log = self.state.root / "logs" / "android-input.jsonl"
         last = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["outcome"] if log.exists() else None
         self.calls.append((round(self.clock.now, 3), kind, args, self.state.marker().is_file(), last))
+        self.events.append(("post", kind, args[-1], self.clock.now))
         if index in self.block:
             self.clock.sleep(self.block.pop(index))
         if index in self.raise_at:
             raise self.raise_at.pop(index)
-        done_at = self.busy_until = max(self.clock.now, self.busy_until) + self.delay.pop(index, 0.0)
-        job = Job(self.clock, done_at, not self.fail(kind, args))
+        if self.need_to_stop:
+            if self.clock.now < self.busy_until:
+                return Job(self, 0)  # ControllerAgent::check_stop: "stopping, ignore new post"
+            self.need_to_stop = False
+        if self.reject(kind, args):
+            return Job(self, 0)
+        start = max(self.clock.now, self.busy_until)
+        done_at = self.busy_until = start + self.delay.pop(index, 0.0)
+        job = Job(self, self.next_id, start, done_at, not self.fail(kind, args))
+        self.next_id += 1
         with self.lock:
-            self.jobs.append((kind, args, job, self.drop(kind, args)))
+            self.jobs.append((kind, args, job, self.drop(kind, args), done_at + self.lag))
         return job
+
+    def status(self, job):
+        self.events.append(("status", job.job_id, self.clock.now))
+        stall, self.status_stall = self.status_stall, 0.0
+        self.clock.sleep(self.status_latency + stall)
+        if self.status_raise(job):
+            raise RuntimeError("status RPC failed")
+        now = self.clock.now
+        if job.job_id == 0 or job.cleared:
+            return Status("invalid")
+        if now < job.start:
+            return Status("pending")
+        if now < job.done_at:
+            return Status("invalid" if job.stopped_running else "running")
+        return Status("succeeded" if job.ok else "failed")
+
+    def post_stop(self):
+        now, self.need_to_stop, running = self.clock.now, True, []
+        for _kind, _args, job, _dropped, _deliver in self.jobs:
+            if job.start > now:
+                job.cleared = True
+            elif job.done_at > now:
+                job.stopped_running = True
+                running.append(job.done_at)
+        self.busy_until = max(running, default=now)
 
     def post_touch_down(self, x, y, contact, pressure):
         return self._job("down", (x, y, contact))
@@ -136,10 +197,11 @@ class ScriptedController:
         return self._job("up", (contact,))
 
     def tap(self, *_args, **_kwargs):
-        """run_action_direct for a tap or swipe: one contact down and up, delivered at once."""
+        """run_action_direct for a tap or swipe: one contact down and up, delivered after ``tap_delays.pop(0)``."""
+        deliver = self.clock.now + (self.tap_delays.pop(0) if self.tap_delays else 0.0)
         with self.lock:
             for kind, args in (("down", (640, 360, 0)), ("up", (0,))):
-                self.jobs.append((kind, args, Job(self.clock, self.clock.now, True), False))
+                self.jobs.append((kind, args, Job(self, -1, self.clock.now, self.clock.now), False, deliver))
         return SimpleNamespace(success=True)
 
     def held(self):
@@ -150,9 +212,11 @@ class ScriptedController:
         held, latest, action_up = set(), 900, 900
         with self.lock:
             jobs = list(self.jobs)
-        for position, (kind, args, job, dropped) in enumerate(jobs):
-            if not job.done:
-                break  # jobs complete in order
+        for position, (kind, args, job, dropped, deliver_at) in enumerate(jobs):
+            if job.cleared:
+                continue
+            if deliver_at > self.clock.now + 1e-9:
+                break  # MaaTouch handles them in order
             if dropped or not job.ok:
                 continue
             when, contact = 1000 + 10 * position, args[-1]
@@ -205,19 +269,20 @@ class GestureTestCase(unittest.TestCase):
         clock = patch.object(g, "time", self.clock)
         clock.start()
         self.addCleanup(clock.stop)
-        sleep = patch("daily.runtime.wall_time.sleep")  # between lift reads
+        sleep = patch("daily.runtime.wall_time.sleep")  # between a tap's lift reads
         sleep.start()
         self.addCleanup(sleep.stop)
         self.controller = ScriptedController(self.clock, self.state)
-        self.reads = []
+        self.reads, self.read_timeouts, self.read_latency = [], [], 0.02
         self.frame = np.zeros((720, 1280, 3), np.uint8)
         self.state.mark(self.frame, 0, SETTLED)  # the decision's frame, captured with device focus confirmed
 
     def runtime(self, readings=None):
         from daily.runtime import Runtime
         rt = Runtime.__new__(Runtime)
-        rt.context = SimpleNamespace(run_action=Mock(), tasker=SimpleNamespace(stopping=False, post_stop=Mock()),
-                                     run_action_direct=Mock(side_effect=self.controller.tap))
+        rt.context = SimpleNamespace(run_action=Mock(), run_action_direct=Mock(side_effect=self.controller.tap),
+                                     tasker=SimpleNamespace(stopping=False,
+                                                            post_stop=Mock(side_effect=self.controller.post_stop)))
         rt.check_focus, rt.ensure_frame, rt.invalidate_frame = Mock(), Mock(return_value=True), Mock()
         rt._evidence = SimpleNamespace(observe=Mock(), remember_frame=Mock())
         rt.navigation_halted, rt._focus_generation = False, 0
@@ -229,8 +294,11 @@ class GestureTestCase(unittest.TestCase):
         rt.controller = self.controller
         snapshots = iter(readings) if readings is not None else None
 
-        def touch_snapshot():
+        def touch_snapshot(timeout_s=None):
             self.reads.append(len(self.controller.calls))  # how many touch calls had been made by this read
+            self.read_timeouts.append(timeout_s)
+            if timeout_s is not None:  # a gesture's confirmation: a shell read on the gesture clock, capped
+                self.clock.sleep(min(self.read_latency, timeout_s))
             return next(snapshots) if snapshots is not None else self.controller.snapshot()
         rt._device_target = SimpleNamespace(foreground=Mock(return_value=True), exists=Mock(return_value=True),
                                             serial="127.0.0.1:5555", touch_snapshot=Mock(side_effect=touch_snapshot))
@@ -241,7 +309,8 @@ class GestureTestCase(unittest.TestCase):
         return rt
 
     def fresh_frame(self):
-        """A frame captured now (focus confirmed), with the device's reading taken right before it."""
+        """A frame captured now (focus confirmed, the latest capture), with the device's reading taken right before
+        it."""
         frame = np.zeros((720, 1280, 3), np.uint8)
         self.state.mark(frame, 0, self.controller.snapshot())
         return frame
@@ -335,8 +404,8 @@ class CapTests(GestureTestCase):
         with android_run():
             self.assertTrue(rt.gesture(g.joystick(270, 1, 1.5), source_frame=self.frame))
             self.assertTrue(rt.gesture(g.bell_press((616, 612), 4.5), source_frame=self.fresh_frame()))
-        ups = [t for t, kind, args, _m, _l in self.controller.calls if kind == "up"]
-        self.assertEqual(ups, [1.5, 6.0])
+        times = [t for t, kind, args, _m, _l in self.controller.calls if args[-1] == 0 and kind != "move"]
+        self.assertEqual([round(up - down, 3) for down, up in zip(times[::2], times[1::2])], [1.5, 4.5])
         self.assertEqual((g.GESTURE_MAX_S, g.BELL_PRESS_MAX_S), (1.5, 4.5))
         self.assertEqual(self.outcomes(), [("Gesture", "sending"), ("Gesture", "confirmed")] * 2)
 
@@ -500,11 +569,11 @@ class RuleTests(GestureTestCase):
                 self.assert_halted_with_marker(OVERRAN)
 
     def test_a_lift_the_device_does_not_show_halts_and_keeps_the_marker(self):
-        rt = self.runtime(readings=[TouchSnapshot("injected", 1000, None)] * 6)
+        rt = self.runtime(readings=[TouchSnapshot("injected", 1000, None)] * 100)
         with android_run(), self.assertRaises(host.InputUnconfirmed):
             g.joystick_step(rt, self.frame, 270, 1, .5)
         self.assert_halted_with_marker("unconfirmed: device reports injected")
-        self.assertEqual(len(self.reads), rt.RELEASE_READS)
+        self.assertGreaterEqual(len(self.reads), 2)  # read until the confirmation deadline, not a fixed count
 
     def test_a_stop_request_during_the_hold_lifts_early_and_is_confirmed(self):
         rt = self.runtime()
@@ -551,23 +620,17 @@ class RuleTests(GestureTestCase):
                 rt = self.runtime()
                 self.controller.delay = {0: NEVER if name == "down's job wedged" else 1.0}
                 self.clock.at(.2, lambda: stop_requested(self.state))
-                with android_run():
-                    if name == "down's job wedged":
-                        with self.assertRaises(host.InputUnconfirmed):
-                            g.joystick_step(rt, self.frame, 270, 1, 1.5)
-                    else:
-                        self.assertFalse(g.joystick_step(rt, self.frame, 270, 1, 1.5))
+                with android_run(), self.assertRaises(host.InputUnconfirmed):
+                    g.joystick_step(rt, self.frame, 270, 1, 1.5)
                 # The UP was posted behind the pending DOWN within a poll of the stop; nothing else was sent.
                 self.assertEqual(self.controller.touches(), [("down", (212, 572, 0)), ("up", (0,))])
                 self.assertLess(self.controller.calls[-1][0], .2 + 2 * g.POLL_S)
-                if name == "down's job wedged":
-                    # Gave up after CLEANUP_S, well inside the stopper's 5 s: unconfirmed, marker kept.
-                    self.assertLess(self.clock.now, .2 + g.CLEANUP_S + 2 * g.POLL_S)
-                    self.assertEqual(self.reads, [])
-                    self.assert_halted_with_marker("unconfirmed")
-                else:
-                    self.assertFalse(self.state.marker().exists())
-                    self.assertEqual(self.outcomes()[-1], ("Gesture", "stopped early: confirmed"))
+                # Gave up after CLEANUP_S at most, well inside the stopper's 5 s. The DOWN completed (or not) after
+                # its own limit: an overrun, never an early stop (round 2 finding 4); the marker is kept.
+                self.assertLess(self.clock.now, .2 + g.CLEANUP_S + 2 * g.POLL_S)
+                self.assertEqual(self.reads, [])
+                self.assert_halted_with_marker(OVERRAN)
+                self.assertEqual(self.state.lifts_outstanding, name == "down's job wedged")
 
     def test_refused_on_stop_halt_held_contact_or_stale_frame(self):
         for name in ("stopping", "halted", "stop request", "held contact", "unreadable contact", "stale frame",
@@ -640,7 +703,7 @@ class CaptureTests(GestureTestCase):
         thread.start()
         return thread
 
-    def test_a_gesture_waits_for_a_capture_that_already_read_the_device(self):
+    def test_a_gesture_waiting_behind_a_capture_is_refused_and_decides_on_the_newer_frame(self):
         gesturing, capturing = self.runtime(), self.runtime()
         read, go, results = threading.Event(), threading.Event(), {}
 
@@ -662,17 +725,14 @@ class CaptureTests(GestureTestCase):
             go.set()
             capture.join(5)
             gesture.join(5)
-            self.assertIs(results["gesture"], True)
+            # Round 2 finding 7: a newer capture completed while the gesture waited, so its frame is no longer the
+            # latest: refused, nothing reserved or sent; it must decide again on the newer pixels.
+            self.assertIsInstance(results["gesture"], host.UnsupportedInput)
+            self.assert_nothing_sent()
             frame = results["frame"]
             self.assertIsInstance(frame, np.ndarray)
-            self.assertEqual(self.controller.screencaps, [(0, set(), False)])  # before the gesture, nothing held
-            calls = len(self.controller.calls)
-            # The frame was captured before the gesture: it authorises neither a gesture nor a tap.
-            for send in (lambda: g.joystick_step(capturing, frame, 0, 1, .5),
-                         lambda: capturing.action("Click", target=[640, 360], source_frame=frame)):
-                with self.assertRaises(host.UnsupportedInput):
-                    send()
-            self.assertEqual(len(self.controller.calls), calls)
+            self.assertEqual(self.controller.screencaps, [(0, set(), False)])
+            self.assertTrue(g.joystick_step(gesturing, frame, 0, 1, .5))  # the newer frame is the latest
 
     def test_a_capture_waits_until_the_gesture_is_lifted_and_confirmed(self):
         gesturing, capturing = self.runtime(), self.runtime()
@@ -695,6 +755,173 @@ class CaptureTests(GestureTestCase):
             frame = results["frame"]
             self.assertFalse(self.state.predates_input(frame, gesture=True))
             self.assertTrue(g.joystick_step(capturing, frame, 0, 1, .5))
+
+
+class ReviewRound2Tests(GestureTestCase):
+    """One scenario per Codex round 2 finding (1-7), on the controller model above."""
+
+    def test_1_a_halt_never_stops_the_tasker_while_a_lift_is_queued_behind_a_slow_down(self):
+        # The model first: MaaFramework's stop drops the queued UP and refuses a new one while the DOWN runs.
+        model = ScriptedController(self.clock, self.state)
+        model.delay = {0: 1.7}
+        model.post_touch_down(212, 572, 0, 1)
+        queued = model.post_touch_up(0)
+        model.post_stop()
+        self.assertEqual((model.status(queued).name, model.post_touch_up(0).job_id), ("invalid", 0))
+        self.clock.sleep(1.8)
+        self.assertEqual(model.held(), {0})  # what the round 2 probe saw: the contact stays held
+        # The gesture: DOWN takes 1.7 s, Stop at 0.2 s; cleanup posts the UP and gives up at 1.2 s.
+        self.setUp()
+        rt = self.runtime()
+        self.controller.delay = {0: 1.7}
+        self.clock.at(.2, lambda: stop_requested(self.state))
+        with android_run(), self.assertRaises(host.InputUnconfirmed):
+            g.joystick_step(rt, self.frame, 270, 1, 1.5)
+        self.assert_halted_with_marker(OVERRAN)
+        self.assertTrue(self.state.lifts_outstanding)
+        rt.context.tasker.post_stop.assert_not_called()  # the queued UP survives
+        self.clock.sleep(1.0)
+        self.assertEqual(self.controller.held(), set())  # the DOWN completed, then its UP
+
+    def test_2_lifts_go_out_before_any_status_read_and_the_stop_is_answered_inside_five_seconds(self):
+        rt = self.runtime()
+        self.controller.status_latency = 0.05  # a slow status RPC
+        self.controller.delay = {4: 0.5}  # the jump DOWN is still pending at the stop
+        self.clock.at(.45, lambda: stop_requested(self.state))
+        with android_run(), self.assertRaises(host.InputUnconfirmed):
+            g.joystick_step(rt, self.frame, 270, 1, 1.5, jump_at_s=.4)
+        events = self.controller.events
+        first = events.index(("post", "up", 1, events[[i for i, e in enumerate(events)
+                                                      if e[:3] == ("post", "up", 1)][0]][3]))
+        self.assertEqual([e[:3] for e in events[first:first + 2]], [("post", "up", 1), ("post", "up", 0)])
+        reads_between = [e for e in events if e[0] == "status" and .45 < e[2] < events[first][3]]
+        self.assertLessEqual(len(reads_between), 1)  # only the read in flight when the stop was published
+        # Confirmation bounded by a deadline, device-read time included: the device never shows the lift and one
+        # shell read would stall 5 s; the stop is still answered (marker kept) well inside the stopper's 5 s.
+        self.setUp()
+        rt = self.runtime()
+        self.read_latency = 5.0
+        self.controller.drop = lambda kind, args: kind == "up"
+        self.clock.at(.5, lambda: stop_requested(self.state))
+        with android_run(), self.assertRaises(host.InputUnconfirmed):
+            g.joystick_step(rt, self.frame, 270, 1, 1.5)
+        self.assertLess(self.clock.now, .5 + 3.0)
+        self.assertTrue(all(timeout <= g.CONFIRM_S for timeout in self.read_timeouts))
+        self.assert_halted_with_marker("unconfirmed: device reports injected")
+
+    def test_3_a_rejected_lift_is_retried_and_a_status_error_skips_no_other_lift(self):
+        for name in ("jump up rejected", "jump up status raises"):
+            with self.subTest(name=name):
+                self.setUp()
+                rt = self.runtime()
+                if name == "jump up rejected":
+                    rejected = []
+
+                    def reject(kind, args):  # the scripted jump UP only (MaaFramework returns id 0)
+                        if kind == "up" and args == (1,) and not rejected:
+                            rejected.append(True)
+                            return True
+                        return False
+                    self.controller.reject = reject
+                else:
+                    first_up1 = []
+
+                    def status_raise(job):
+                        entry = next((e for e in self.controller.jobs if e[2] is job), None)
+                        if entry and entry[:2] == ("up", (1,)) and (not first_up1 or first_up1[0] is job):
+                            first_up1[:] = [job]
+                            return True
+                        return False
+                    self.controller.status_raise = status_raise
+                with android_run(), self.assertRaises(host.InputUnconfirmed):
+                    g.joystick_step(rt, self.frame, 270, 1, 1.0, jump_at_s=.4)
+                ups = [args for kind, args in self.controller.touches() if kind == "up"]
+                self.assertEqual(ups, [(1,), (0,), (1,)])  # contact 0's up, then the jump's retried once
+                self.clock.sleep(.1)
+                self.assertEqual(self.controller.held(), set())
+                self.assertTrue(self.state.halted and self.state.marker().exists())
+
+    def test_4_a_late_jump_or_final_lift_is_an_overrun_never_a_confirmed_stop(self):
+        cases = ("slow stop check before the jump", "jump down completes after the cap", "final up submitted late")
+        for name in cases:
+            with self.subTest(name=name):
+                self.setUp()
+                rt = self.runtime()
+                gesture = g.joystick(270, 1, 1.5, jump_at_s=1.35)
+                if name == cases[0]:
+                    real, slow = self.state.stop_requested, []
+
+                    def stop_check():  # one stop-file check takes 0.175 s, just before the jump is due
+                        if self.clock.now >= 1.33 and not slow:
+                            slow.append(True)
+                            self.clock.now += .175
+                        return real()
+                    self.state.stop_requested = stop_check
+                elif name == cases[1]:
+                    self.controller.delay = {4: .25}  # posted at 1.35, completes at 1.60
+                    self.clock.at(1.40, lambda: stop_requested(self.state))
+                else:
+                    gesture = g.joystick(270, 1, 1.5, jump_at_s=1.3)
+                    self.controller.block = {5: .296}  # the jump UP returns at 1.676: the final UP is due at 1.5
+                with android_run(), self.assertRaises(host.InputUnconfirmed):
+                    rt.gesture(gesture, source_frame=self.frame)
+                late = [(kind, args) for t, kind, args, _m, _l in self.controller.calls
+                        if kind != "up" and t > 1.5 + g.TIMER_SLACK_S]
+                self.assertEqual(late, [])  # after the cap, nothing but lifts
+                if name == cases[0]:
+                    self.assertNotIn(("down", (965, 537, 1)), self.controller.touches())
+                self.assert_halted_with_marker(OVERRAN)
+
+    def test_5_two_taps_from_one_frame_cannot_share_a_lift(self):
+        rt = self.runtime()
+        with android_run():
+            self.assertTrue(rt.action("Click", target=[640, 360], source_frame=self.frame))
+            self.controller.tap_delays = [NEVER]  # tap B has not reached the device: only A's UP is visible
+            with self.assertRaises(host.InputUnconfirmed):
+                rt.action("Click", target=[640, 360], source_frame=self.frame)
+        self.assertTrue(self.state.halted and self.state.marker().exists())
+        self.assertEqual(self.outcomes()[-1], ("Click", "unconfirmed: device reports no new lift"))
+        # Same-frame taps stay legal, each confirmed by its own UP; and a frame captured before B reached the device
+        # (baseline A's UP) cannot borrow B's UP for a gesture whose events never arrive.
+        self.setUp()
+        rt = self.runtime()
+        with android_run():
+            self.assertTrue(rt.action("Click", target=[640, 360], source_frame=self.frame))
+            a_up = self.controller.device()[2]
+            self.assertTrue(rt.action("Click", target=[640, 360], source_frame=self.frame))
+            self.assertGreater(self.controller.device()[2], a_up)
+            frame = np.zeros((720, 1280, 3), np.uint8)
+            self.state.mark(frame, 0, TouchSnapshot("none", a_up, a_up, BOOT_ID))
+            self.controller.drop = lambda kind, args: True
+            with self.assertRaises(host.InputUnconfirmed):
+                g.joystick_step(rt, frame, 0, 1, .5)
+        self.assert_halted_with_marker("unconfirmed: device reports no new lift")
+
+    def test_6_camera_drag_takes_the_gesture_freshness_rule_both_ways(self):
+        rt = self.runtime()
+        with android_run():
+            self.assertTrue(g.camera_drag(rt, self.frame, (640, 300), (840, 300), .4))
+            self.assertEqual(self.state.last_gesture, self.state.inputs)
+            for send in (lambda: rt.action("Click", target=[640, 360], source_frame=self.frame),
+                         lambda: g.camera_drag(rt, self.frame, (640, 300), (840, 300), .4)):
+                with self.assertRaises(host.UnsupportedInput):
+                    send()
+            frame = self.fresh_frame()
+            self.assertTrue(rt.action("Click", target=[640, 360], source_frame=frame))
+            with self.assertRaises(host.UnsupportedInput):  # needs a frame captured after the last input
+                g.camera_drag(rt, frame, (640, 300), (840, 300), .4)
+            # Ordinary task swipes keep their rules: a tap may still follow one on the same frame.
+            frame = self.fresh_frame()
+            self.assertTrue(rt.action("Swipe", begin=[640, 300], end=[840, 300], duration=200, source_frame=frame))
+            self.assertTrue(rt.action("Click", target=[640, 360], source_frame=frame))
+        self.assertEqual(rt.context.run_action_direct.call_count, 4)
+
+    def test_7_a_gesture_on_a_frame_older_than_the_latest_capture_is_refused(self):
+        rt = self.runtime()
+        self.fresh_frame()  # another Runtime's capture completed after self.frame (same focus, same input count)
+        with android_run(), self.assertRaises(host.UnsupportedInput):
+            g.joystick_step(rt, self.frame, 270, 1, .5)
+        self.assert_nothing_sent()
 
 
 DESKTOP_CHECK = r"""

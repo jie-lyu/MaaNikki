@@ -411,7 +411,10 @@ class Runtime:
 
     def action(self, action, *, ui_click=True, focus_generation=None, source_frame=None, **fields):
         touch_only = capabilities(game_backend()).touch_actions_only
+        movement = False
         if touch_only:
+            # host.android.gesture.camera_drag: a movement swipe, with the gesture freshness rule (_dispatch_touch)
+            movement = bool(fields.pop("_movement", False))
             from host.android import check_touch_fields
             check_touch_fields(action, {k: v for k, v in fields.items() if k != "window_cursor_pos"})
             if source_frame is None:
@@ -500,6 +503,8 @@ class Runtime:
             # Never dispatch fallback Seize actions when the game is unfocused.
             inputs.check(require_foreground=True)
         if touch_only:
+            if movement:
+                return self._dispatch_touch(action, fields, focus_generation, source_frame, movement=True)
             return self._dispatch_touch(action, fields, focus_generation, source_frame)
         fields = native_key_fields(action, fields)
         with measure("input.action"):
@@ -510,13 +515,15 @@ class Runtime:
             return self.pause(.1) and self.ui.unhover()
         return succeeded
 
-    def _dispatch_touch(self, action, fields, focus_generation, source_frame, send=None):
+    def _dispatch_touch(self, action, fields, focus_generation, source_frame, send=None, movement=False):
         """Android: the last checks and the dispatch of a validated tap or swipe decided on ``source_frame``; with
         ``send``, a gesture (Runtime.gesture) is sent by calling it instead, under the same reservation, intent log,
         checks and device lift confirmation. ``send`` returns host.android.gesture's DONE, ABORTED (a stop seen during
         the gesture: it lifted early, and once that lift is confirmed this returns False), FAILED or OVERRUN (both
-        unconfirmed). A gesture needs a source frame captured after every earlier input; any input, one captured after
-        the latest gesture (DeviceInputState.inputs)."""
+        unconfirmed). A gesture (and a ``movement`` swipe, camera_drag) needs a source frame captured after every
+        earlier input and counts as a gesture; any input needs one captured after the latest gesture
+        (DeviceInputState.inputs); a gesture also needs the latest completed capture (DeviceInputState.captures).
+        Every touch is confirmed by an UP newer than its frame's baseline and the last UP that confirmed a touch."""
         from task_control import ForegroundChanged
         if send is not None:
             from host.android.gesture import ABORTED, DONE, OVERRUN
@@ -533,10 +540,16 @@ class Runtime:
                 return False
             # A frame captured before an earlier gesture (or, for a gesture, before any earlier input) shows a screen
             # that input may have changed, and its touch reading predates that input's lift: nothing is sent.
-            if state.predates_input(source_frame, gesture=send is not None):
+            fresh = send is not None or movement
+            if state.predates_input(source_frame, gesture=fresh):
                 from host import UnsupportedInput
                 raise UnsupportedInput(f"安卓模拟器上的「{action}」依据的截图是在上一次输入之前截的，画面可能已经变了，"
                                        "没有发送；手势前后都要重新截图再判断。")
+            # A gesture delayed behind another capture (any Runtime) decides again on the newer pixels.
+            if send is not None and state.superseded(source_frame):
+                from host import UnsupportedInput
+                raise UnsupportedInput("安卓模拟器上的手势依据的截图之后又截过新图，画面可能已经变了，没有发送；"
+                                       "要在最新的截图上重新判断。")
             target = self._sessionless_target()
             # The device reading kept with the source frame (no device I/O between the decision and the send): the
             # touch state and baseline below, and the guest the reservation names.
@@ -584,7 +597,7 @@ class Runtime:
                 if state.stop_requested():
                     return False
                 sent = True
-                state.sent_input(gesture=send is not None)
+                state.sent_input(gesture=fresh)
                 try:
                     with measure("input.action"):
                         if send is None:
@@ -599,7 +612,11 @@ class Runtime:
                         # The framework reports a lift as done once it is written to MaaTouch, even when MaaTouch
                         # is gone (measured 2026-11-26): only the device showing this touch's UP, after the
                         # baseline, with nothing held confirms it.
-                        after = self._device_touch_released(target, before.latest)
+                        timing = None
+                        if send is not None:
+                            from host.android.gesture import confirmation_clock
+                            timing = confirmation_clock()
+                        after = self._device_touch_released(target, before.latest, timing)
                         succeeded = after is True
                         if not succeeded:
                             why = "nothing readable" if after is None else \
@@ -671,24 +688,51 @@ class Runtime:
 
         def abort():  # local checks only (no IPC or device read while a contact is held): a halt, the stop request
             return state.halted or self.navigation_halted or state.stop_requested()
+
+        def keep_queue():  # a lift is still queued behind a pending job: the tasker must not be stopped (it clears it)
+            state.lifts_outstanding = True
         return self._dispatch_touch(self.GESTURE_ACTION, fields, None, source_frame,
-                                    send=lambda: perform(self.controller, gesture, abort))
+                                    send=lambda: perform(self.controller, gesture, abort, keep_queue))
 
     GESTURE_ACTION = "Gesture"
     TOUCH_KEY_ATTEMPTS = 3
     RELEASE_READS = 6
+    MIN_READ_S = .2  # the shortest timeout a gesture's confirmation read gets, even past its deadline
 
-    def _device_touch_released(self, target, baseline):
-        """Android: True once the device shows an injected UP after ``baseline`` and no contact held (a few short
-        reads, as the gesture may still be in flight); otherwise the last snapshot (None when unreadable)."""
+    def _device_touch_released(self, target, baseline, timing=None):
+        """Android: True once the device shows an injected UP newer than ``baseline`` and than the UP that confirmed
+        the latest touch (DeviceInputState.last_lift: no two touches share a lift), with no contact held; otherwise
+        the last snapshot (None when unreadable). Taps and swipes: RELEASE_READS short reads. A gesture
+        (``timing``: now, sleep and deadline from host.android.gesture.confirmation_clock): reads until the
+        deadline, each read's own timeout capped by the time left, so device reads count against it too."""
+        state = device_input()
+
+        def released(snapshot):
+            if snapshot is None:
+                return False
+            floor = state.lift_floor(snapshot.boot_id)
+            if not snapshot.released_after(baseline if floor is None else max(baseline, floor)):
+                return False
+            state.consumed_lift(snapshot)
+            return True
         snapshot = None
-        for attempt in range(self.RELEASE_READS):
-            if attempt:
-                wall_time.sleep(.15)
-            snapshot = target.touch_snapshot()
-            if snapshot is not None and snapshot.released_after(baseline):
+        if timing is None:
+            for attempt in range(self.RELEASE_READS):
+                if attempt:
+                    wall_time.sleep(.15)
+                snapshot = target.touch_snapshot()
+                if released(snapshot):
+                    return True
+            return snapshot
+        now, sleep, deadline = timing
+        while True:
+            snapshot = target.touch_snapshot(timeout_s=max(self.MIN_READ_S, deadline - now()))
+            if released(snapshot):
                 return True
-        return snapshot
+            left = deadline - now()
+            if left <= 0:
+                return snapshot
+            sleep(min(.15, left))
 
     def escape(self, delay=0.35):
         """Back out of the current screen: Esc (``key("menu")``) on the desktop, ``leave_page`` on Android, where
@@ -810,6 +854,13 @@ class Runtime:
         session = active_session()
         if session is not None:
             session.input_unconfirmed = True
+        if device_input().lifts_outstanding:
+            # A gesture's lift is still queued behind a pending job: MaaFramework's Tasker::post_stop clears the
+            # controller's queued jobs (that UP included) while the running DOWN, posted without auto-up, completes
+            # and stays held. The tasker is not stopped; this process is halted, so every Android task sends nothing
+            # (Android pipelines run only custom actions), and the marker stays (the client's stopper does not stop
+            # the tasker while touch.json exists).
+            return
         try:
             self.context.tasker.post_stop()
         except Exception:
@@ -1047,6 +1098,8 @@ class Runtime:
                         # never leave a capture queued for the next task to inherit.
                         with measure("capture.wait"):
                             result.wait()
+                    # Android: this screencap's number, counted as it completes (DeviceInputState.captures)
+                    capture_no = device_input().completed_capture() if device_focus else None
                     if self.stopped or available is not None and not available():
                         return None
                     self.check_focus()
@@ -1087,7 +1140,7 @@ class Runtime:
                         continue
                     self.validate_frame(image)
                     marked = device_input().mark_if_unchanged(image, self._focus_generation, epoch, touch,
-                                                                 inputs=inputs_sent)
+                                                                 inputs=inputs_sent, capture=capture_no)
                 if not marked:
                     count("capture.discarded")
                     continue
