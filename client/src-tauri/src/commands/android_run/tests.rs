@@ -356,6 +356,33 @@ fn direct_clicks_are_refused_for_every_adb_instance_under_the_clicks_own_lock() 
 }
 
 #[test]
+fn no_screencap_is_posted_to_an_instance_while_its_android_run_holds_the_slot() {
+    let _serial = serial();
+    use crate::commands::maa_core::post_screencap_impl;
+    let (state, _dir) = state();
+    for phase in [
+        Phase::Starting { token: 1, instance_id: A.into(), cancelled: false },
+        Phase::Running { token: 1, instance_id: A.into() },
+        Phase::Finishing { token: 1, instance_id: A.into(), released: false },
+    ] {
+        set_phase(&state, phase);
+        assert!(screencap_held(&state, A));
+        // Refused before the instance or its controller is looked at: the subscription and the one-shot command
+        // serve the cached image instead.
+        assert_eq!(post_screencap_impl(&state, A).err().as_deref(), Some(SCREENCAP_HELD));
+        // Other instances (another emulator, Win32, MacOS) keep the shared path and its answers.
+        for other in [B, W, M] {
+            assert!(!screencap_held(&state, other));
+            assert_eq!(post_screencap_impl(&state, other).err().as_deref(), Some("Controller not connected"));
+        }
+    }
+    set_phase(&state, Phase::Idle);
+    assert!(!screencap_held(&state, A));
+    assert_eq!(post_screencap_impl(&state, A).err().as_deref(), Some("Controller not connected"));
+    assert_eq!(post_screencap_impl(&state, "missing").err().as_deref(), Some("Instance not found"));
+}
+
+#[test]
 fn a_finishing_slot_whose_lock_frees_later_becomes_idle_at_the_next_check() {
     let _serial = serial();
     let (state, dir) = state();

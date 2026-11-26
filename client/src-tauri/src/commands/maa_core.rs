@@ -2196,6 +2196,11 @@ pub fn maa_post_click(
 
 /// 发起截图请求（内部实现）
 pub fn post_screencap_impl(state: &MaaState, instance_id: &str) -> Result<i64, String> {
+    // 安卓运行期间不往这个实例的控制器发截图（agent 可能正按着触点），调用方用缓存的图。
+    #[cfg(target_os = "macos")]
+    if super::android_run::screencap_held(state, instance_id) {
+        return Err(super::android_run::SCREENCAP_HELD.to_string());
+    }
     let instances = state.instances.lock().map_err(|e| e.to_string())?;
     let instance = instances.get(instance_id).ok_or("Instance not found")?;
     let controller = instance

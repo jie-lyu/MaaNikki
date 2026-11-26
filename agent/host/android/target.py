@@ -300,14 +300,14 @@ class AndroidTarget:
         self.controller = controller
         self._shell_failures = 0
 
-    def _shell(self, command: str) -> str | None:
+    def _shell(self, command: str, timeout_ms: int = 5000) -> str | None:
         # The device-input lock first, as everywhere (a tap's last checks hold it): a read that finds the device
         # unreachable makes earlier frames stale before anyone else can check a frame against the epoch.
         from host import DeviceUnreachable, device_input
         state = device_input()
         with state.lock, _SHELL_LOCK:
             try:
-                job = self.controller.post_shell(command, 5000).wait()
+                job = self.controller.post_shell(command, timeout_ms).wait()
                 output = job.get() if getattr(job, "succeeded", False) else None
             except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
                 output = None
@@ -352,10 +352,12 @@ class AndroidTarget:
                 state.observed_loss()
             return package
 
-    def touch_snapshot(self) -> TouchSnapshot | None:
+    def touch_snapshot(self, timeout_s: float | None = None) -> TouchSnapshot | None:
         """Whether a contact is held on the device now, with the dispatcher's recent events and the guest's boot
-        id; None when unreadable."""
-        return touch_snapshot(self._shell(TOUCH_READING))
+        id; None when unreadable. ``timeout_s`` caps the shell read (a gesture's confirmation, by its deadline)."""
+        if timeout_s is None:
+            return touch_snapshot(self._shell(TOUCH_READING))
+        return touch_snapshot(self._shell(TOUCH_READING, max(1, min(5000, round(timeout_s * 1000)))))
 
     def hung(self) -> bool:
         return False

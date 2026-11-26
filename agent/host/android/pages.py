@@ -663,6 +663,8 @@ def send_text(rt, text: str, source_frame) -> bool:
     with state.lock:
         if state.halted or rt.stopped:
             return False
+        if state.predates_input(source_frame, gesture=False):  # captured before a gesture (Runtime._dispatch_touch)
+            raise UnsupportedInput("依据的截图是在上一次手势之前截的，画面可能已经变了，这次文字输入没有发送。")
         target = rt._sessionless_target()
         before = state.touch_of(source_frame)
         booted = getattr(before, "boot_id", None)
@@ -697,6 +699,7 @@ def send_text(rt, text: str, source_frame) -> bool:
             if rt._stopped_now() or state.stop_requested():
                 return False
             sent = True
+            state.sent_input()  # a gesture after this needs a frame captured after it
             try:
                 succeeded = bool(rt.controller.post_input_text(text).wait().succeeded)
             except BaseException as error:
