@@ -37,7 +37,14 @@
     "ScrubTests.test_uid_like_text_numbers_and_keys_are_masked_and_other_numbers_kept",
     "ScrubTests.test_android_writes_and_shows_no_uid",
     "ScrubTests.test_the_desktop_writes_what_it_is_given",
-    "ExceptionOutputTests.test_registration_tracebacks_are_masked_on_android_only"
+    "ExceptionOutputTests.test_registration_tracebacks_are_masked_on_android_only",
+    "ReadTests.test_a_digit_fragment_right_next_to_the_uid_refuses",
+    "IdentifyTests.test_two_split_reads_of_a_longer_uid_refuse",
+    "PatternTests.test_the_uid_slot_is_left_anchored_for_full_and_cut_short_reads",
+    "ScrubTests.test_a_number_after_a_colon_is_masked_at_every_android_boundary",
+    "ScrubTests.test_time_stamps_and_file_names_keep_their_structured_fields",
+    "ExceptionOutputTests.test_the_exception_line_shown_in_the_ui_is_masked_on_android_only",
+    "UidShapedTests.test_uid_shaped_candidate_texts"
    ],
    "known_failures": [],
    "skips": []
@@ -545,7 +552,11 @@
     "WalkTests.test_the_longest_hold_leaves_a_dispatch_margin_under_the_gesture_cap",
     "WalkTests.test_three_steps_without_displacement_stop_as_blocked_with_the_frame_saved",
     "WalkTests.test_timeout_stops_with_the_frame_saved",
-    "WalkTests.test_walks_to_a_point_with_full_deflection_steps_and_arrives_on_a_settled_frame"
+    "WalkTests.test_walks_to_a_point_with_full_deflection_steps_and_arrives_on_a_settled_frame",
+    "AccountReviewRound2Tests.test_full_and_cut_short_uid_reads_sit_in_the_left_anchored_slot",
+    "AccountReviewRound2Tests.test_a_foreign_uid_shaped_block_refuses_the_frame",
+    "AccountReviewRound2Tests.test_the_first_frame_rule_stops_and_never_keeps_the_block_as_allowed",
+    "AccountReviewRound2Tests.test_a_later_frame_with_a_foreign_uid_shaped_block_stops_before_a_step_on_it"
    ],
    "known_failures": [],
    "skips": []
@@ -615,7 +626,9 @@
     "TextInputTests.test_the_intent_is_logged_before_and_the_outcome_after",
     "FlowTests.test_another_account_after_the_collection_is_never_given_the_first_ones_record",
     "FlowTests.test_a_focus_change_after_the_confirmation_stops_before_the_next_record_or_submit",
-    "FlowTests.test_only_the_classified_outcome_is_kept"
+    "FlowTests.test_only_the_classified_outcome_is_kept",
+    "FlowTests.test_a_uid_pasted_as_a_code_is_never_typed_journalled_or_recorded",
+    "TextInputTests.test_a_uid_shaped_text_is_refused_before_the_journal"
    ],
    "known_failures": [],
    "skips": []
@@ -1659,7 +1672,10 @@
     "FileTests.test_encodings",
     "FileTests.test_paths_and_output_never_show_digits",
     "FileTests.test_commit_messages",
-    "TreeTests.test_no_commit_message_in_the_push_range_holds_a_uid"
+    "TreeTests.test_no_commit_message_in_the_push_range_holds_a_uid",
+    "FileTests.test_utf16_without_a_bom_fails_the_check",
+    "FileTests.test_file_names_are_scanned_and_masked",
+    "DenylistProblemTests.test_a_denylist_problem_fails_the_tests"
    ],
    "known_failures": [],
    "skips": []

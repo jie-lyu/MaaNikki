@@ -70,6 +70,15 @@ def _print_exc():
     sys.stderr.write(redact(traceback.format_exc()))
 
 
+def _android_redacted(text):
+    """``text`` with UID-like text masked on the Android target (message_log.redact), for what goes to the UI through
+    message_override; the desktop gets ``text`` itself, as before."""
+    if game_backend() != "android":
+        return text
+    from message_log import redact
+    return redact(text)
+
+
 def _write_start_notice(context, task_id, entry):
     """Before the task's first action: macOS experimental tasks say so in their own instance's log, so a
     scheduled run or a background instance shows it as well. Never raises into the action."""
@@ -162,7 +171,7 @@ def agent_action(name, *, stop_on_failure=False):
                         return False  # Android: published during the action's own handling (never an unconfirmed touch)
                     try:
                         context.run_task("MaaNikki_Daily_Message", message_override({
-                            "Node.Action.Starting": f"{argv.node_name} 未完成：{error}。"}))
+                            "Node.Action.Starting": _android_redacted(f"{argv.node_name} 未完成：{error}。")}))
                     except Exception:
                         pass
                     return False

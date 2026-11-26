@@ -97,10 +97,40 @@ class FileTests(unittest.TestCase):
             with self.subTest(case=index):
                 found, warning = self.scan(data)
                 self.assertTrue(found == [(2, "UID form")] and warning is None, "an encoded UID was missed")
-        found, warning = self.scan(text.encode("utf-16-le"))  # no BOM
-        self.assertTrue(found == [] and warning is not None, "UTF-16 without a BOM was not warned about")
+        for encoding in ("utf-16-le", "utf-16-be"):  # no BOM: decoded and scanned, with a warning
+            with self.subTest(encoding=encoding):
+                found, warning = self.scan(text.encode(encoding))
+                self.assertTrue(found == [(2, "UID form")] and warning is not None, "UTF-16 without a BOM was skipped")
         found, warning = self.scan(b"\x89PNG\r\n\x1a\n\0\0\0" + text.encode("utf-8"))
         self.assertTrue(found == [] and warning is None, "a binary file was scanned or warned about")
+
+    def test_utf16_without_a_bom_fails_the_check(self):
+        # Account review round 2, finding 8: BOM-less UTF-16 holding a labelled UID was skipped with success.
+        from unittest.mock import patch
+        folder = Path(tempfile.mkdtemp())
+        (folder / "notes.txt").write_bytes(f"UID {OTHER}\n".encode("utf-16-le"))
+        with patch.object(guard, "ROOT", folder), patch.object(guard, "tracked_files", return_value=["notes.txt"]):
+            findings, warnings = guard.scan_tree()
+        self.assertTrue(findings == [("notes.txt", 1, "UID form")] and len(warnings) == 1,
+                        "a BOM-less UTF-16 file was not scanned")
+
+    def test_file_names_are_scanned_and_masked(self):
+        # Account review round 2, finding 8: file names were never scanned; full-width digits stayed in reports.
+        from unittest.mock import patch
+        folder = Path(tempfile.mkdtemp())
+        names = [f"UID {OTHER}.txt", f"UID/{wide(OTHER)}.txt", f"notes/{OTHER}.md", f"UID {FAKE}.txt", "plain.txt"]
+        for name in names:
+            (folder / name).parent.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_text("clean\n", encoding="utf-8")
+        with patch.object(guard, "ROOT", folder), patch.object(guard, "tracked_files", return_value=names):
+            findings, _warnings = guard.scan_tree(frozenset({OTHER}))
+        self.assertTrue(findings == [("UID ***.txt", 0, "UID form in the file name"),
+                                     ("UID/***.txt", 0, "UID form in the file name"),
+                                     ("notes/***.md", 0, "denylisted UID in the file name")],
+                        "a UID in a file name was missed or shown")
+        self.assertTrue(guard.masked(f"x/{wide(OTHER)}.txt") == "x/***.txt", "full-width digits stayed in a path")
+        self.assertTrue(not any(ch.isdigit() for where, _line, _rule in findings for ch in where),
+                        "a reported file name holds digits")
 
     def test_paths_and_output_never_show_digits(self):
         import contextlib
@@ -122,6 +152,26 @@ class FileTests(unittest.TestCase):
                         "a denylisted number in a commit message was missed")
 
 
+def local_denylist():
+    """The local denylist's numbers (check_uid_literals.load_denylist); an AssertionError when it reports a problem
+    (a tracked denylist, a malformed line): the tree and commit checks never run with it silently emptied."""
+    numbers, problem = guard.load_denylist()
+    if problem is not None:
+        raise AssertionError("the local UID denylist has a problem: run scripts/check_uid_literals.py locally")
+    return numbers
+
+
+class DenylistProblemTests(unittest.TestCase):
+    def test_a_denylist_problem_fails_the_tests(self):
+        # Account review round 2, finding 8: the problem load_denylist reports was discarded and the tests passed.
+        from unittest.mock import patch
+        with patch.object(guard, "load_denylist", return_value=(frozenset(), "the UID denylist is tracked by git")):
+            with self.assertRaises(AssertionError):
+                local_denylist()
+        with patch.object(guard, "load_denylist", return_value=(frozenset({OTHER}), None)):
+            self.assertTrue(local_denylist() == frozenset({OTHER}), "a clean denylist was not used")
+
+
 def _git_ok(*args) -> bool:
     return subprocess.run(["git", *args], cwd=ROOT, capture_output=True).returncode == 0
 
@@ -138,11 +188,11 @@ def push_range() -> str:
 @unittest.skipUnless((ROOT / ".git").exists() and shutil.which("git"), "needs a git checkout")
 class TreeTests(unittest.TestCase):
     def test_no_tracked_file_holds_a_uid(self):
-        findings, _warnings = guard.scan_tree(guard.load_denylist()[0])
+        findings, _warnings = guard.scan_tree(local_denylist())
         self.assertTrue(not findings, "a tracked file holds a UID: run scripts/check_uid_literals.py locally")
 
     def test_no_commit_message_in_the_push_range_holds_a_uid(self):
-        found = guard.scan_commits(push_range(), guard.load_denylist()[0])
+        found = guard.scan_commits(push_range(), local_denylist())
         self.assertTrue(not found, "a commit message holds a UID: run check_uid_literals.py --commits locally")
 
 

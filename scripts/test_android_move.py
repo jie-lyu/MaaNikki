@@ -479,6 +479,7 @@ LABEL_ROW = (("商城", [638, 62, 38, 22]), ("共鸣", [708, 62, 38, 22]),
              ("设计图", [1125, 62, 54, 22]), ("换装", [1203, 62, 38, 22]))  # where the saved frames read them
 HUD_TEXT = (*LABEL_ROW, ("登上鸣鸣列车", [110, 235, 120, 25]), ("1049米", [120, 262, 60, 20]),
             ("心誓5×1", [520, 668, 200, 22]), ("UID 123456789", [0, 700, 90, 18]))
+HUD_WITHOUT_UID = HUD_TEXT[:-1]  # (a UID form judged alone: one UID-shaped block per frame, account review round 2)
 
 
 NO_MOVE = ("other", "misread")  # verdicts on which no step is ever decided
@@ -721,8 +722,9 @@ class ReviewRound2Tests(unittest.TestCase):
                     ("45mm", [137, 704, 31, 9]), ("心誓5や♡", [520, 668, 120, 22]), ("33333×1", [600, 668, 80, 22]),
                     ("2A1", [966, 535, 30, 20], 0.79), ("ittit", [1017, 95, 30, 14], 0.69))
         for row in observed:
-            with self.subTest(row[0]):
-                self.assertEqual(hud_with(*HUD_TEXT, row), ("hud", ""))
+            with self.subTest(row[0]):  # a UID form in the UID's place of the HUD text
+                base = HUD_WITHOUT_UID if move.UID_FORM.fullmatch(row[0]) else HUD_TEXT
+                self.assertEqual(hud_with(*base, row), ("hud", ""))
         unobserved = (("活动人厅", [833, 62, 72, 22]), ("共吗", [708, 62, 38, 22]), ("23Gms", [80, 700, 40, 18]),
                       ("UID1234567A9", [0, 700, 90, 18]),
                       ("46ms", [0, 700, 30, 18]),  # a ping off its place (account review round 1, finding 7)
@@ -1228,6 +1230,53 @@ class ReviewRound4Tests(unittest.TestCase):
         walk = Walker(FakeIo(World((0, 0)), clock), FakeReader(World((0, 0))), clock=clock)
         walk.deadline = 1000
         self.assertEqual(walk._not_after(obs, 1.0), 100.0 + move.MAX_DECISION_AGE_S)  # already expired at 102
+
+
+
+class AccountReviewRound2Tests(unittest.TestCase):
+    """Account review round 2, finding 7: a UID-shaped block counts as the HUD's UID only in the left-anchored UID
+    slot and only once; anything else UID-shaped in the corner is foreign text, refused on the first frame and on any
+    later one."""
+
+    FOREIGN = {
+        "a D123 block right of the UID": (*HUD_TEXT, ("D123", [185, 702, 30, 14])),
+        "a second UID-shaped block in the slot": (*HUD_TEXT, ("UID 1234", [0, 700, 50, 18])),
+        "the UID shifted right": (*HUD_WITHOUT_UID, ("UID 123456789", [12, 700, 88, 18])),
+        "the UID off its row": (*HUD_WITHOUT_UID, ("UID 123456789", [0, 682, 90, 18])),
+    }
+
+    def test_full_and_cut_short_uid_reads_sit_in_the_left_anchored_slot(self):
+        for text, box in (("UID 123456789", [0, 700, 90, 18]), ("UID 1234", [0, 700, 40, 18]),
+                          ("D123456789", [2, 702, 86, 14])):
+            with self.subTest(text):
+                self.assertEqual(hud_with(*HUD_WITHOUT_UID, (text, box)), ("hud", ""))
+
+    def test_a_foreign_uid_shaped_block_refuses_the_frame(self):
+        for name, rows in self.FOREIGN.items():
+            with self.subTest(name):
+                kind, reason = hud_with(*rows)
+                self.assertEqual(kind, "other")
+                self.assertIn("像 UID", reason)
+
+    def test_the_first_frame_rule_stops_and_never_keeps_the_block_as_allowed(self):
+        from types import SimpleNamespace
+        from host.android.actions import Screen
+        reader = SimpleNamespace(present=lambda frame: True)
+        for name, rows in self.FOREIGN.items():
+            with self.subTest(name):
+                verdict = move.classify(Screen("hud", {"duck": [30, 18, 54, 54]}),
+                                        lambda node, override=None: Ocr([Row(*row) for row in rows]))
+                obs = Observation("f", verdict.kind, 0.0, verdict.reason, regions=TRACKER, blocks=verdict.blocks)
+                verdict_, reason, shape = move.first_frame_rule(obs, reader, "miraland")
+                self.assertEqual((verdict_, shape), ("stop", None))
+                self.assertIn("像 UID", reason)
+
+    def test_a_later_frame_with_a_foreign_uid_shaped_block_stops_before_a_step_on_it(self):
+        _kind, reason = hud_with(*self.FOREIGN["a D123 block right of the UID"])
+        walk, io = walker(World((0, 0)), kinds=["hud", ("other", reason)])
+        result = walk.walk([Goal(0, -20)], (0, 0), 60)
+        self.assertEqual((result.outcome, len(io.steps), io.observed), ("screen", 1, 2))
+        self.assertEqual(io.saved[0][2].number, 2)
 
 
 def _frame(name):

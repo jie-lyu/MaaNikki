@@ -100,6 +100,25 @@ class ReadTests(unittest.TestCase):
                 self.assertIsNone(digits)
                 self.assertTrue(reason)
 
+    def test_a_digit_fragment_right_next_to_the_uid_refuses(self):
+        # Account review round 2, finding 4: a longer UID split by OCR (its tenth digit a separate fragment right of
+        # the UID box, dropped by the walker's noise filters as a single character) gave the nine-digit prefix's key.
+        for name, fragment in (("a high-score digit", ("0", [90, 701, 8, 16], 0.99)),
+                               ("a low-score digit", ("7", [88, 700, 9, 17], 0.3)),
+                               ("two digits", ("01", [92, 701, 14, 16], 0.95)),
+                               ("a full-width digit", ("０", [91, 701, 8, 16], 0.99))):
+            with self.subTest(name):
+                digits, reason = read((f"UID {UID_A}", UID_BOX), fragment)
+                self.assertIsNone(digits)
+                self.assertIn("紧挨着还读到了数字", reason)
+                self.assertNotIn(UID_A[:3], reason)
+        # not a continuation: no digit, a digit further right (the ping's side), a digit on another row
+        for name, fragment in (("an icon glyph", ("口", [90, 701, 8, 16], 0.4)),
+                               ("a digit 22 px right", ("7", [112, 702, 8, 12], 0.5)),
+                               ("a digit above the row", ("7", [92, 686, 8, 10], 0.5))):
+            with self.subTest(name):
+                self.assertEqual(read((f"UID {UID_A}", UID_BOX), fragment), (UID_A, ""))
+
     def test_no_uid_read(self):
         self.assertEqual(read(), (None, "左下角没有读到 UID"))
         # below the walker's score floor for ASCII text: not counted, as in move.read_rows
@@ -213,6 +232,15 @@ class IdentifyTests(unittest.TestCase):
                 account.identify(rt)
         self.assertIn("不是分开截的", str(caught.exception))
 
+    def test_two_split_reads_of_a_longer_uid_refuse(self):
+        # Account review round 2, finding 4, as reproduced: two separate frames, each the UID in its box and a
+        # high-confidence tenth digit right of it.
+        split = (HUD, ((f"UID {UID_A}", UID_BOX), ("0", [90, 701, 8, 16], 0.99)))
+        key, error, captures, _rt = identify([split, split])
+        self.assertIsNone(key)
+        self.assertIsInstance(error, account.Unidentified)
+        self.assertEqual(captures, 1)
+
     def test_a_stop_gives_nothing(self):
         self.assertEqual(identify([None])[:2], (None, None))
         self.assertEqual(identify([A, None])[:2], (None, None))
@@ -278,6 +306,16 @@ class PatternTests(unittest.TestCase):
         self.assertIsNone(account._uid_text(f"UID {UID_A[:8]}"))
         for text in ("UID1234567A9", f"UID:{UID_A}", f"XUID{UID_A}", "46ms"):  # a ping is judged by its place
             self.assertFalse(move.UID_FORM.fullmatch(text) or account._uid_text(text), text)
+
+
+    def test_the_uid_slot_is_left_anchored_for_full_and_cut_short_reads(self):
+        # Account review round 2, finding 7: the walker's UID slot is the account reader's, without its right-edge
+        # floor (a cut-short read ends earlier).
+        for box in (UID_BOX, [0, 700, 40, 18], [2, 702, 60, 14]):
+            self.assertTrue(account.in_slot(box), box)
+        self.assertFalse(account.in_footer([0, 700, 40, 18]))
+        for box in ([185, 702, 30, 14], [10, 700, 80, 18], [0, 680, 88, 18], [0, 700, 100, 18]):
+            self.assertFalse(account.in_slot(box), box)
 
 
 class KeyTests(unittest.TestCase):
@@ -363,7 +401,10 @@ class ScrubTests(unittest.TestCase):
 
     def test_uid_like_text_numbers_and_keys_are_masked_and_other_numbers_kept(self):
         for text in (f"UID {UID_B}", f"LID{UID_B}", f"UID-{UID_B[:5]}", f"读到「{UID_B}」", f"UID：{UID_B}",
-                     f"page {UID_B} title", "UID " + "".join(chr(0xFF10 + int(d)) for d in UID_B)):
+                     f"page {UID_B} title", "UID " + "".join(chr(0xFF10 + int(d)) for d in UID_B),
+                     # account review round 2, finding 5: a colon, a period or a slash next to the bare number
+                     f"账号：{UID_B}", f"账号:{UID_B}", f"读到 {UID_B}.", f"{UID_B}。", f"a/{UID_B}/b", f"{UID_B}:",
+                     f"x.{UID_B}", "账号：" + "".join(chr(0xFF10 + int(d)) for d in UID_B)):
             with self.subTest(text=len(text)):
                 self.assertNotIn(UID_B[:5], account.scrub(text))
                 self.assertIn(account.UID_MASK, account.scrub(text))
@@ -377,17 +418,17 @@ class ScrubTests(unittest.TestCase):
                                                  "n": 123456789012, "uid": account.UID_MASK, account.UID_MASK: True,
                                                  "ok": True})
 
-    def boundaries(self, backend):
+    def boundaries(self, backend, uid_text=f"UID {UID_B}"):
         """A failure scene saved the way registration saves it (FailureEvidence.save), one through
         Runtime.diagnostic, a message line, and a Runtime.log whose message file cannot be written (the display
-        fallback): every text written or shown, on ``backend``."""
+        fallback): every text written or shown, on ``backend``, each holding ``uid_text``."""
         import diagnostics
         import message_log
         from daily import runtime
         root = Path(tempfile.mkdtemp())
         shown = []
         evidence = diagnostics.FailureEvidence()
-        evidence.observe("recognition", node=move.SCREEN_TEXT, results=[{"text": f"UID {UID_B}", "score": 0.99}])
+        evidence.observe("recognition", node=move.SCREEN_TEXT, results=[{"text": uid_text, "score": 0.99}])
         rt = runtime.Runtime.__new__(runtime.Runtime)
         rt._evidence, rt._focus_generation = evidence, 0
         rt.context = SimpleNamespace(run_task=lambda node, override: shown.append(json.dumps(override,
@@ -398,13 +439,13 @@ class ScrubTests(unittest.TestCase):
                 patch("host.android_user_stop", return_value=False), \
                 patch.object(diagnostics, "DATA_ROOT", root), \
                 patch.object(message_log, "_DIRECTORY", root / "debug/messages"):
-            evidence.save("action_exception", f"异常：页面标题「UID {UID_B}」", details={"row": f"UID {UID_B}"})
-            rt.diagnostic("android_test_stop_0", f"守卫拦下了一行「UID {UID_B}」", image=frame,
+            evidence.save("action_exception", f"异常：页面标题「{uid_text}」", details={"row": uid_text})
+            rt.diagnostic("android_test_stop_0", f"守卫拦下了一行「{uid_text}」", image=frame,
                           details={"digits": UID_B})
-            message_log.write_message(f"详细：UID {UID_B}", f"UID {UID_B}", report=f"UID {UID_B}")
+            message_log.write_message(f"详细：{uid_text}", uid_text, report=uid_text)
             with patch.object(runtime, "write_message", return_value=False), \
                     patch.object(runtime.Runtime, "stopped", False, create=True):
-                rt.log(f"读到 UID {UID_B}")
+                rt.log(f"读到 {uid_text}")
         written = [path.read_text(encoding="utf-8") for path in root.rglob("*") if path.suffix in (".json", ".log")]
         return written, shown
 
@@ -419,6 +460,34 @@ class ScrubTests(unittest.TestCase):
     def test_the_desktop_writes_what_it_is_given(self):
         written, shown = self.boundaries("win32")
         self.assertTrue(all(UID_B in text for text in written) and all(UID_B in text for text in shown))
+
+    def test_a_number_after_a_colon_is_masked_at_every_android_boundary(self):
+        # Account review round 2, finding 5: 「账号：」 + the number survived the message log, the failure JSON and
+        # the failed-log UI fallback; the desktop keeps it.
+        for uid_text in (f"账号：{UID_B}", f"账号:{UID_B}.", f"路径 a/{UID_B}/b"):
+            with self.subTest(text=len(uid_text)):
+                written, shown = self.boundaries("android", uid_text)
+                self.assertTrue(written and shown)
+                for text in (*written, *shown):
+                    self.assertNotIn(UID_B[:5], text)
+                written, shown = self.boundaries("win32", uid_text)
+                self.assertTrue(all(UID_B in text for text in written) and all(UID_B in text for text in shown))
+
+    def test_time_stamps_and_file_names_keep_their_structured_fields(self):
+        # The message log's "timestamp" and the failure scene's "time" and image name are not scrubbed.
+        written, _shown = self.boundaries("android", f"账号：{UID_B}")
+        scenes = [json.loads(text) for text in written if text.lstrip().startswith("{\n")]
+        lines = [json.loads(line) for text in written if not text.lstrip().startswith("{\n")
+                 for line in text.splitlines() if line.strip()]
+        self.assertTrue(scenes and lines)
+        for scene in scenes:
+            self.assertRegex(scene["time"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}")
+        for line in lines:
+            self.assertRegex(line["timestamp"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}")
+        for kept in ("2026-11-27T10:15:30.123+08:00", "on_error/20261127-101530-123456-action_exception-ab12cd34.jpg",
+                     "20261127_101530.png", "v5.16.1", "12:30:45", "1/12345678-x"):
+            with self.subTest(text=kept):
+                self.assertEqual(account.scrub(kept), kept)
 
 
 class ExceptionOutputTests(unittest.TestCase):
@@ -440,6 +509,53 @@ class ExceptionOutputTests(unittest.TestCase):
                         registration._print_exc()
                 self.assertEqual(UID_B in out.getvalue(), kept)
                 self.assertIn("RuntimeError", out.getvalue())
+
+
+    def test_the_exception_line_shown_in_the_ui_is_masked_on_android_only(self):
+        # Account review round 2, finding 5: stderr was masked, the message_override sent to the UI kept the digits.
+        from contextlib import nullcontext
+        import contextlib
+        import io
+        import registration
+        token = registration._LOCAL_REGISTRATION.set(True)
+        try:
+            @registration.agent_action("test.android_account.exception_override")
+            class Probe:
+                def run(self, context, argv):
+                    raise RuntimeError(f"页面标题「账号：{UID_B}」")
+        finally:
+            registration._LOCAL_REGISTRATION.reset(token)
+        self.addCleanup(registration._ACTION_TYPES.pop, "test.android_account.exception_override", None)
+        for backend, kept in (("android", False), ("win32", True)):
+            with self.subTest(backend=backend):
+                shown = []
+                context = SimpleNamespace(run_task=lambda entry, override: shown.append(
+                    override["MaaNikki_Daily_Message"]["focus"]["Node.Action.Starting"]))
+                with patch("host.game_backend", return_value=backend), \
+                        patch.object(registration, "game_backend", return_value=backend), \
+                        patch.object(registration, "android_user_stop", return_value=False), \
+                        patch.object(registration, "task_session", return_value=nullcontext(None)), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    self.assertFalse(Probe().run(context, SimpleNamespace(node_name="probe")))
+                self.assertEqual(len(shown), 1)
+                self.assertEqual(UID_B in shown[0], kept)
+                if kept:  # the desktop line, byte for byte as before
+                    self.assertEqual(shown[0], f"probe 未完成：页面标题「账号：{UID_B}」。")
+                else:
+                    self.assertIn(account.UID_MASK, shown[0])
+
+
+class UidShapedTests(unittest.TestCase):
+    def test_uid_shaped_candidate_texts(self):
+        # Account review round 2, finding 6: a UID pasted as a redeem code (the manual parser accepts UID + digits).
+        wide = "".join(chr(0xFF10 + int(d)) for d in UID_A)
+        for text in (f"UID{UID_A}", f"uid{UID_A}", f"LID{UID_A}", UID_A, f"D{UID_A}", f"UID{UID_A[:4]}", wide,
+                     f"码{UID_A}", f"{UID_A}.", f"UID：{UID_A}"):
+            with self.subTest(text=len(text)):
+                self.assertTrue(account.uid_shaped(text))
+        for text in ("ABC123", "NIKKI2025", "拾光二载暖赴新章", "GOLD2025", "NIKKI20251205", "AB12345678CD", "", None):
+            with self.subTest(text=text):
+                self.assertFalse(account.uid_shaped(text))
 
 
 class FramesToolTests(unittest.TestCase):

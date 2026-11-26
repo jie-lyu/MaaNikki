@@ -652,9 +652,13 @@ def send_text(rt, text: str, source_frame) -> bool:
     frame was captured, the game focused on the device now, the frame still current, no stop and no stop request;
     then Controller.post_input_text and its outcome logged. A text input has no lift to confirm (it is a paste key,
     no contact): the reservation is removed once the framework reports it done. A failure or an exception halts all
-    input and leaves the reservation (as an unconfirmed touch does): what reached the field is unknown."""
+    input and leaves the reservation (as an unconfirmed touch does): what reached the field is unknown. Text that is or
+    holds a UID (host.android.account.uid_shaped) is refused first: never typed, never journalled."""
     from host import InputUnconfirmed, UnsupportedInput, android_user_stop, device_input
+    from host.android.account import uid_shaped
     from task_control import ForegroundChanged
+    if uid_shaped(text):  # account review round 2, finding 6: its raw text would land in the input journal
+        raise UnsupportedInput("要输入的文字像游戏 UID，没有输入，也没有写进输入记录。")
     rt.check_focus()
     state = device_input()
     if state.marks_of(source_frame) != (rt._focus_generation, state.epoch):

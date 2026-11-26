@@ -13,12 +13,13 @@ count as their ASCII forms):
      ignored by git). The repository holds no real UID in any form, not even a hash; CI has no denylist and checks the
      HUD form only. A denylist file that git tracks is itself reported.
 
-Without arguments: every tracked text file (git ls-files). UTF-8 (with or without BOM) and UTF-16/32 with a BOM are
-decoded; a file with a NUL byte in its first 8 KB and no BOM is binary and skipped, with a warning when it looks like
-UTF-16 without a BOM. With --commits A..B: the messages of those commits instead (before a push:
---commits origin/android-emulator..HEAD). Findings name the file (digit runs in its name masked) and line, or the
-commit, and the rule, never the digits. Exit status 1 when anything is found. scripts/test_uid_literals.py runs both
-checks in the offline suite.
+Without arguments: every tracked text file (git ls-files), and every tracked file's name (NFKC-normalised, line 0).
+UTF-8 (with or without BOM) and UTF-16/32 with a BOM are decoded; a file that looks like UTF-16 without a BOM is
+decoded as such and scanned too (with a warning); any other file with a NUL byte in its first 8 KB and no BOM is
+binary and skipped. With --commits A..B: the messages of those commits instead (before a push:
+--commits origin/android-emulator..HEAD). Findings name the file (digit runs in its name masked, full-width ones
+included) and line, or the commit, and the rule, never the digits. Exit status 1 when anything is found or the
+denylist has a problem. scripts/test_uid_literals.py runs both checks in the offline suite.
 """
 from __future__ import annotations
 
@@ -38,6 +39,7 @@ DEFAULT_DENYLIST = ROOT / ".build" / "uid-denylist"
 HUD_FORM = re.compile(r"(?<![0-9A-Za-z_])(?:UID|LID)[\s:\-]*([0-9]{8,10})(?![0-9])")
 DIGIT_RUN = re.compile(r"(?<![0-9])[0-9]{8,10}(?![0-9])")
 BINARY_PROBE = 8192
+UTF16_WARNING = "looks like UTF-16 without a BOM; scanned as such (add a BOM or save it as UTF-8)"
 BOMS = ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"), (codecs.BOM_UTF8, "utf-8-sig"),
         (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16"))
 
@@ -61,23 +63,27 @@ def scan_text(text: str, denylist=frozenset()):
 
 
 def decode(data: bytes):
-    """``(text, warning)``: text None for a binary file (warning set when it looks like UTF-16 without a BOM)."""
+    """``(text, warning)``: text None for a binary file. Text that looks like UTF-16 without a BOM (mostly ASCII,
+    every other byte zero) is decoded as UTF-16 of that byte order and scanned like any text, with a warning: it is
+    never skipped (account review round 2, finding 8)."""
     for bom, encoding in BOMS:
         if data.startswith(bom):
             return data.decode(encoding, "replace"), None
     probe = data[:BINARY_PROBE]
     if b"\0" in probe:
-        for zeros, chars in ((probe[1::2], probe[0::2]), (probe[0::2], probe[1::2])):
+        for zeros, chars, encoding in ((probe[1::2], probe[0::2], "utf-16-le"),
+                                       (probe[0::2], probe[1::2], "utf-16-be")):
             text = sum(1 for byte in chars if byte in (9, 10, 13) or 32 <= byte < 127)
             if zeros.count(0) > 0.9 * max(len(zeros), 1) and text > 0.9 * max(len(chars), 1):
-                return None, "looks like UTF-16 without a BOM; skipped (add a BOM or save it as UTF-8)"
+                return data.decode(encoding, "replace"), UTF16_WARNING
         return None, None
     return data.decode("utf-8", "replace"), None
 
 
 def masked(name: str) -> str:
-    """``name`` with every digit run of 8 or more masked (a file named after a UID is reported without it)."""
-    return re.sub(r"[0-9]{8,}", "***", name)
+    """``name`` (NFKC-normalised: full-width digits count as digits) with every digit run of 8 or more masked (a
+    file named after a UID is reported without it)."""
+    return re.sub(r"\d{8,}", "***", normal(name))
 
 
 def scan_file(path: Path, denylist=frozenset()):
@@ -88,6 +94,12 @@ def scan_file(path: Path, denylist=frozenset()):
         return [], None
     text, warning = decode(data)
     return ([] if text is None else scan_text(text, denylist)), warning
+
+
+def scan_name(name: str, denylist=frozenset()):
+    """[(line, rule)] for a file name (scan_text over it, NFKC-normalised; its path separators read as spaces, so a
+    UID label in a folder name and the digits in the file's are seen together)."""
+    return scan_text(normal(name).replace("/", " "), denylist)
 
 
 def _git(*args) -> bytes:
@@ -126,6 +138,7 @@ def scan_tree(denylist=frozenset()):
     rule)], warnings [(path, text)], paths masked."""
     findings, warnings = [], []
     for name in tracked_files():
+        findings += [(masked(name), 0, f"{rule} in the file name") for _line, rule in scan_name(name, denylist)]
         found, warning = scan_file(ROOT / name, denylist)
         findings += [(masked(name), line, rule) for line, rule in found]
         if warning:

@@ -70,7 +70,7 @@ import re
 import time
 
 from host.android.actions import HUD_LABEL_ROW
-from host.android.account import UID_DIGITS, UID_PREFIX
+from host.android.account import UID_DIGITS, UID_PREFIX, in_slot as in_uid_slot
 from host.android.gesture import BELL_PRESS_MAX_S, DEFAULT_LAYOUT, GESTURE_MAX_S, DecisionExpired
 from navigation.geometry import segment_distance
 
@@ -797,7 +797,9 @@ def label_run(text: str, box) -> int:
 # 心誓5 / 心誓5×1 and its hearts (❤ ♡ や ゃ ～, or 3s with an occasional 0 or 8: 33333×1, 心誓530333, 38333);
 # the UID by its shape, for any account (host.android.account.UID_PREFIX: 「UID 」, 「UID-」, misread 「LID」 or 「D」,
 # then its digits, also cut short to as few as 3: the walker only judges the layout here, while the account reader
-# needs all UID_DIGITS) and the ping (46ms, 46m, 45mm: PING_FORM, accepted only at PING_PLACE).
+# needs all UID_DIGITS), accepted only in the left-anchored UID slot (host.android.account.in_slot) and only once
+# (account review round 2, finding 7: another UID-shaped block in the corner is foreign text, Rows.foreign_uid), and
+# the ping (46ms, 46m, 45mm: PING_FORM, accepted only at PING_PLACE).
 HEARTS_FORM = re.compile(r"(?:心?誓5?)?[308❤♡やゃ～]*(?:[×x]1?)?")
 UID_FORM = re.compile(rf"{UID_PREFIX}\d{{3,{UID_DIGITS[1]}}}")
 TRACKER_DISTANCE_FORM = re.compile(r"◆?\d{1,5}米?")  # 1049米, ◆1048米, 1046 (without 米)
@@ -1134,6 +1136,7 @@ class Rows:
     column: tuple = ()  # [(text, box)] counted rows centred in PROMPT_COLUMN (judged by prompt_verdict)
     fragments: tuple = ()  # ((x0, y0, x1, y1), text) of the rows the noise filters dropped, adjacent ones merged
     read_labels: frozenset = frozenset()  # indices into LABEL_CENTRES of the labels positively read in place
+    foreign_uid: int = 0  # UID-shaped blocks in the UID region outside the UID slot, or after the first one in it
 
 
 def read_rows(result) -> Rows:
@@ -1142,7 +1145,7 @@ def read_rows(result) -> Rows:
     not in its exact form; Walker gives such a frame one recapture when nothing else differs from the first frame)."""
     from host.android import actions, pages
     outside, tracker, blocks, labels, covered, misread, raw, column, dropped = [], [], [], 0, 0, 0, [], [], []
-    read_labels = set()
+    read_labels, uid_read, foreign_uid = set(), False, 0
     if result is not None and actions._hit(result):
         for row in pages._rows(result):
             if row is None:
@@ -1186,16 +1189,19 @@ def read_rows(result) -> Rows:
             if span is not None:
                 labels += span[1] - span[0] + 1
                 read_labels.update(range(span[0], span[1] + 1))
-            elif (region == "hearts" and HEARTS_FORM.fullmatch(squashed)) or (
-                    region == "uid" and (UID_FORM.fullmatch(text.strip()) or ping)):  # a ping only at its place
-                pass
+            elif region == "uid" and UID_FORM.fullmatch(text.strip()):
+                if uid_read or not in_uid_slot(box):  # one UID, in its slot (account review round 2, finding 7)
+                    foreign_uid += 1
+                uid_read = True
+            elif (region == "hearts" and HEARTS_FORM.fullmatch(squashed)) or (region == "uid" and ping):
+                pass  # a ping only at its place
             else:
                 misread += 1
                 if region == "labels":  # the labels whose places the misread block covers
                     covered += sum(1 for _label, x in LABEL_CENTRES if box[0] <= x <= box[0] + box[2])
     return Rows(outside, tuple(entry for _y, _x, entry in sorted(tracker)), labels + covered,
                 tuple(sorted(blocks)), misread, tuple(raw), tuple(column), merge_fragments(dropped),
-                frozenset(read_labels))
+                frozenset(read_labels), foreign_uid)
 
 
 # A quest tracker without a distance row. On 星海 the tracked story quest lies in another map and the tracker shows
@@ -1406,6 +1412,8 @@ def classify(screen, recognize, frame=None) -> Verdict:
     regions, blocks = rows.regions, rows.blocks
     if rows.labels < MIN_LABELS:  # positive evidence from this pass itself, not only read_screen's label check
         return Verdict("other", "画面（全画面文字里没有在原位读到大世界的快捷栏）", regions, blocks)
+    if rows.foreign_uid:  # never an allowed block of the walk's first frame, never waited through as a misread
+        return Verdict("other", "画面（左下角 UID 的位置之外还读到了像 UID 的文字）", regions, blocks)
     prompts = ()
     if rows.column:  # the interaction-prompt column: one prompt of the seen shape, and nothing else beyond the HUD
         why, prompts = prompt_verdict(rows.column, frame)

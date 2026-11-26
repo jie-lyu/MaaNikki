@@ -20,8 +20,11 @@ record decides something the task confirms the account on one fresh HUD capture 
 the saved device frames the corner reads 「UID 」 and nine digits (box ~[0,700,90,18], text rows y 703-714); the length
 range is that one observation. Over the 499 saved HUD frames (scripts/android/account_frames.py) 483 read a UID, all the
 same account; 16 refused, 13 of them cut short (8, 6 or 3 digits at OCR score 0.95-1.0) or misread, which a looser
-length would have turned into another account's key. A longer UID cut short to exactly UID_DIGITS on every read would
-still pass: the second account's UID length is not yet seen on device frames.
+length would have turned into another account's key (re-run with the round-2 rules: 476 read, all one account, 23
+refused, 17 of them cut short, misread or other text in the corner; none by the adjacent-digit rule below). A longer
+UID cut short to exactly UID_DIGITS on every read would still pass: the second account's UID length is not yet seen on
+device frames; a digit read as a separate fragment right next to the UID box (ADJACENT_PX), even one the walker's
+noise filters drop, refuses the read (account review round 2, finding 4).
 
 Records kept before the per-account split (config/android/redeem_codes.json, config/android/bell_attempts.json, one
 per data directory) belong to an unknown account: they are left in place and never read (docs/android-support-plan.md).
@@ -45,6 +48,10 @@ UID_BOX_X0 = (0, 4)
 UID_BOX_Y0 = (694, 706)
 UID_BOX_H = (12, 22)
 UID_BOX_X1 = (78, 96)
+# A digit fragment whose box starts at most this far right of the UID box's right edge (and reaches past it, on the
+# UID row) continues the UID: a longer UID split by OCR. Under the gap to the ping's place (PING_PLACE starts at 110,
+# the UID box ends by 96), so the ping is never taken for one.
+ADJACENT_PX = 12
 READS = 2  # separate frames that must agree
 READ_GAP_S = 0.3  # between the two captures (no input in between)
 KEY_SALT = b"MaaNikki/android-account/v1\x00"
@@ -85,11 +92,27 @@ def _uid_text(text):
     return match.group(1)
 
 
-def in_footer(box) -> bool:
-    """Whether an OCR box (x, y, w, h) lies where the UID row lies on the device frames (UID_BOX_*)."""
+def in_slot(box) -> bool:
+    """Whether an OCR box (x, y, w, h) lies in the left-anchored UID slot: starting where the UID row starts on the
+    device frames, on its row and at its height, ending by its right edge (UID_BOX_*); a full read or one cut short
+    (host.android.move's walker accepts a UID-shaped block only here)."""
     x, y, w, h = box
     return (UID_BOX_X0[0] <= x <= UID_BOX_X0[1] and UID_BOX_Y0[0] <= y <= UID_BOX_Y0[1]
-            and UID_BOX_H[0] <= h <= UID_BOX_H[1] and UID_BOX_X1[0] <= x + w <= UID_BOX_X1[1])
+            and UID_BOX_H[0] <= h <= UID_BOX_H[1] and x + w <= UID_BOX_X1[1])
+
+
+def in_footer(box) -> bool:
+    """Whether an OCR box (x, y, w, h) lies where the full UID row lies on the device frames (in_slot, and its right
+    edge within UID_BOX_X1)."""
+    return in_slot(box) and UID_BOX_X1[0] <= box[0] + box[2]
+
+
+def _continues(box, uid_box) -> bool:
+    """Whether the OCR box ``box`` lies right next to ``uid_box`` on its row, reaching past its right edge (within
+    ADJACENT_PX of it): a fragment of the same row."""
+    x0, x1, cy = box[0], box[0] + box[2], box[1] + box[3] / 2
+    right = uid_box[0] + uid_box[2]
+    return uid_box[0] < x0 <= right + ADJACENT_PX and x1 > right and uid_box[1] <= cy <= uid_box[1] + uid_box[3]
 
 
 def uid_on(result):
@@ -98,8 +121,9 @@ def uid_on(result):
     from host.android import actions, pages
     from host.android.move import (ASCII_SCORE, HUD_REGIONS, PING_FORM, PING_PLACE, TEXT_SCORE, _cjk, _inside,
                                    counts_as_text)
+    import unicodedata
     region = dict(HUD_REGIONS)["uid"]
-    found, other = set(), False
+    found, other, digit_rows, uid_boxes = set(), False, [], []
     if result is not None and actions._hit(result):
         for row in pages._rows(result):
             box = getattr(row, "box", None) if row is not None else None
@@ -109,19 +133,25 @@ def uid_on(result):
             score = float(getattr(row, "score", 0) or 0)
             if not _inside(box, region):
                 continue
+            x0, x1, cy = box[0], box[0] + box[2], box[1] + box[3] / 2
+            ping = bool(PING_FORM.fullmatch(text.strip())) and x0 >= PING_PLACE[0] and x1 <= PING_PLACE[1] \
+                and PING_PLACE[2] <= cy <= PING_PLACE[3]
+            if not ping and any(ch.isdigit() for ch in unicodedata.normalize("NFKC", text)):
+                digit_rows.append(box)  # at any score: checked against the UID box before the noise filters
             if score < (TEXT_SCORE if _cjk(text) else ASCII_SCORE) or not counts_as_text(text):
                 continue  # move.read_rows' noise filters: what the walker does not count either
-            x0, x1, cy = box[0], box[0] + box[2], box[1] + box[3] / 2
-            if PING_FORM.fullmatch(text.strip()) and x0 >= PING_PLACE[0] and x1 <= PING_PLACE[1] \
-                    and PING_PLACE[2] <= cy <= PING_PLACE[3]:
+            if ping:
                 continue
             digits = _uid_text(text)
             if digits is None or not in_footer(box):
                 other = True
                 continue
             found.add(digits)
+            uid_boxes.append(box)
     if other:
         return None, "左下角 UID 的位置读到了不完整或别的文字"
+    if any(_continues(box, uid_box) for uid_box in uid_boxes for box in digit_rows if box is not uid_box):
+        return None, "左下角 UID 的右边紧挨着还读到了数字（UID 可能更长），认不出是哪个账号"
     if not found:
         return None, "左下角没有读到 UID"
     if len(found) > 1:
@@ -211,11 +241,25 @@ def confirm(rt, binding):
 
 # Text that may be a UID, masked in what Android writes or shows (scrub): a UID label (UID_PREFIX, or UID / LID with
 # colons and spaces) with three or more digits (a cut-short read included), or a bare run of 8-10 digits (the UID read
-# apart from its label) that is not part of a file stem, a time stamp, a hex string or a word (no letter, digit, - / _
-# . : right next to it).
+# apart from its label) that is not part of a word, a hex string or a hyphenated or underscored file stem (no letter,
+# digit, - or _ right next to it). A colon (full-width included: the text is NFKC-normalised first), a period or a
+# slash next to the digits does not protect them (「账号：」 + the UID, account review round 2, finding 5): free-form
+# OCR and exception text is masked whatever punctuation surrounds it. The time stamps and file names Android writes
+# keep their own structured fields, which are not passed through scrub (message_log's "timestamp", the failure
+# scene's "time" and image name).
 UID_LIKE = re.compile(r"(?:UID|LID)[\s:\-]*[0-9]{3,}|" + UID_PREFIX + r"[0-9]{3,}"
-                      r"|(?<![0-9A-Za-z\-/_.:])[0-9]{8,10}(?![0-9A-Za-z\-/_.:])")
+                      r"|(?<![0-9A-Za-z\-_])[0-9]{8,10}(?![0-9A-Za-z\-_])")
 UID_MASK = "UID ***"
+# A candidate text (a 兑换码) that is a UID or holds one: a UID label with three or more digits, or 8-10 digits not
+# inside a word (optionally right after a lone D, OCR's form of the label). host.android.redeem drops such a candidate
+# before any input and pages.send_text refuses to type one: its raw text is never journalled or kept as a record key.
+UID_CODE = re.compile(r"(?:UID|LID)[\s:\-]*[0-9]{3,}|(?<![0-9A-Za-z])D?[\s\-]?[0-9]{8,10}(?![0-9A-Za-z])", re.I)
+
+
+def uid_shaped(text) -> bool:
+    """Whether ``text`` (NFKC-normalised: full-width digits count) is or holds a UID (UID_CODE)."""
+    import unicodedata
+    return bool(UID_CODE.search(unicodedata.normalize("NFKC", str(text or ""))))
 
 
 def scrub(value):

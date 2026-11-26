@@ -467,6 +467,24 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(game.texts, [])
         self.assertEqual(game.touches[-1], "field")
 
+    def test_a_uid_pasted_as_a_code_is_never_typed_journalled_or_recorded(self):
+        # Account review round 2, finding 6: the manual parser accepts UID + digits, and the code's raw text went to
+        # the input journal and became the record's key once the game answered 「无效」.
+        fake = "123456789"  # the documented fake UID (scripts/check_uid_literals.py)
+        game = Game(["invalid"])
+        outcome, rt = play(game, (f"UID{fake}", "ABC1", fake))
+        self.assertTrue(outcome, rt.logs)
+        self.assertEqual(game.texts, ["ABC1"])
+        self.assertEqual(rt.record, {"ABC1": "expired"})
+        items = json.loads(redeem.Record(rt.root, ACCOUNT).path.read_text(encoding="utf-8"))["items"]
+        self.assertNotIn(fake, json.dumps(items))
+        self.assertTrue(any("有 2 个候选兑换码像游戏 UID" in line for line in rt.logs), rt.logs)
+        self.assertFalse(any(fake[:5] in line for line in rt.logs))
+        kept, dropped = redeem.without_uids([(f"UID{fake}", True), ("NIKKI2025", True), (f"LID {fake}", False)])
+        self.assertEqual((kept, dropped), ([("NIKKI2025", True)], 2))
+        with self.assertRaises(ValueError):
+            redeem.Record(rt.root, ACCOUNT).record(f"UID{fake}", "expired")
+
     def test_a_forbidden_word_next_to_the_row_refuses_the_tap_and_ends_all_input(self):
         game = Game(["already_used"], forbidden=[("退出登录", [940, 615, 100, 30])])
         outcome, rt = play(game)
@@ -675,6 +693,15 @@ class TextInputTests(unittest.TestCase):
         self.state.halt()
         self.assertFalse(pages.send_text(self.rt, "ABC123", self.frame))
         self.assertEqual((self.posted, self.log()), ([], []))
+
+    def test_a_uid_shaped_text_is_refused_before_the_journal(self):
+        # Account review round 2, finding 6: nothing typed and no journal line holds the text.
+        for text in ("UID123456789", "123456789", "D123456789"):
+            with self.subTest(text=len(text)):
+                with self.assertRaises(host.UnsupportedInput):
+                    pages.send_text(self.rt, text, self.frame)
+                self.assertEqual((self.posted, self.log()), ([], []))
+                self.assertFalse(self.state.marker().exists())
 
     def test_a_stale_frame_or_a_held_contact_sends_nothing(self):
         from task_control import ForegroundChanged

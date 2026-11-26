@@ -14,6 +14,7 @@ The phone flow keeps its own record (Record below) per game account: back on the
 from the UID in the HUD's corner (host.android.account.identify: two separate frames that agree, nothing sent) before
 the record is read; when it cannot be told the task refuses (nothing submitted, nothing skipped). The record of the
 data directory kept before that split (config/android/redeem_codes.json) belongs to an unknown account and is not read.
+A candidate that is or holds a UID (a UID pasted as a manual code) is dropped before any input (without_uids).
 
 What the frames show (1280x720): the gear on the menu's bottom bar ~(633,668); 设置 opens on 图像 (its 「基础设置」
 header); the 其他 tab label ~[82,600,55,32]; on 其他 the 兑换码 row is cut by the list's bottom fade until the list is
@@ -122,15 +123,27 @@ class Record:
         return {code: entry["outcome"] for code, entry in self.load()["items"].items()}
 
     def record(self, code, outcome):
-        """Keep ``outcome`` (the classified result only: never the banner's text) for ``code``."""
+        """Keep ``outcome`` (the classified result only: never the banner's text) for ``code`` (never a UID-shaped
+        one: host.android.account.uid_shaped)."""
         from file_io import exclusive_file_lock, write_json
+        from host.android.account import uid_shaped
         clean = str(code or "").strip()
-        if not clean or len(clean) > 40 or any(ch.isspace() for ch in clean) or outcome not in RECORD_OUTCOMES:
+        if not clean or len(clean) > 40 or any(ch.isspace() for ch in clean) or outcome not in RECORD_OUTCOMES \
+                or uid_shaped(clean):
             raise ValueError("兑换码或处理结果无效")
         with exclusive_file_lock(self.path.with_name("redeem_codes.lock")):
             data = self.load()
             data["items"][clean] = {"outcome": outcome, "confirmed_at": datetime.now(timezone.utc).isoformat()}
             write_json(self.path, data)
+
+
+def without_uids(candidates):
+    """``(kept, dropped)``: the ``(code, is_manual)`` candidates that are no UID, and how many were (a UID pasted as
+    a manual code, host.android.account.uid_shaped): those are never typed, journalled, recorded or named (account
+    review round 2, finding 6)."""
+    from host.android.account import uid_shaped
+    kept = [(code, is_manual) for code, is_manual in candidates if not uid_shaped(code)]
+    return kept, len(candidates) - len(kept)
 
 
 def pending_codes(candidates, done) -> list[str]:
@@ -725,6 +738,9 @@ def run(rt, collected=None) -> bool:
         codes = candidates(rt) if collected is None else collected  # may block (online sync)
     except (OSError, ValueError) as error:
         return fail(rt, f"读不了兑换码列表（{error}）")
+    codes, dropped = without_uids(list(codes))
+    if dropped:
+        rt.log(f"兑换码领取：有 {dropped} 个候选兑换码像游戏 UID，没有输入，也不记录。")
     # Right before the record decides which codes are skipped and which submitted: the account confirmed once more on
     # a fresh HUD (another account may have come in during the collection).
     binding = account_step(rt, lambda: account.confirm(rt, binding))
