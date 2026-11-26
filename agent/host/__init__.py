@@ -125,7 +125,15 @@ class DeviceInputState:
     - marks: (focus generation, epoch) per captured frame, recorded only if the epoch the capture started with is
       still current.
     - halted: this process saw an unconfirmed touch; nothing more is sent by it at all.
+    - inputs: Android inputs this process sent (taps, swipes, gestures, text), counted under the lock as each is
+      sent; every frame's mark records the count read when its capture began, under the lock, so every input it
+      counts had been confirmed (or input halted) before that frame. A gesture is sent only on a frame that counts
+      every input sent so far, and any input only on a frame that counts the latest gesture: a frame captured before
+      an input that may have changed the screen authorises nothing after it, and the touch reading kept with the
+      frame (the lift baseline) postdates the previous input's lift.
     - lock: one touch at a time; reservation, halt, focus and marks are checked inside it right before dispatch.
+      Android capture holds it from the touch reading until the frame is complete, so no frame is captured while
+      a touch, a gesture's contact in particular, is down.
     """
 
     def __init__(self, root=None):
@@ -134,6 +142,8 @@ class DeviceInputState:
         self.root = root
         self.halted = False
         self.epoch = 0
+        self.inputs = 0
+        self.last_gesture = 0  # ``inputs`` right after the latest gesture was sent
         self._marks = {}
         self._owner = None
 
@@ -253,20 +263,37 @@ class DeviceInputState:
         with self.lock:
             self.epoch += 1
 
-    def mark_if_unchanged(self, frame, generation, epoch, touch=None) -> bool:
-        """Record the frame's (focus generation, epoch) and the device's touch reading taken right before it was
-        captured (``touch``: a TouchSnapshot, or None), if ``epoch`` is still current."""
+    def mark_if_unchanged(self, frame, generation, epoch, touch=None, inputs=None) -> bool:
+        """Record the frame's (focus generation, epoch), the device's touch reading taken right before it was
+        captured (``touch``: a TouchSnapshot, or None) and the input count read then (``inputs``; None: the count
+        now), if ``epoch`` is still current."""
         import weakref
         with self.lock:
             if self.epoch != epoch:
                 return False
             self._marks = {key: value for key, value in self._marks.items() if value[0]() is not None}
-            self._marks[id(frame)] = (weakref.ref(frame), (generation, epoch), touch)
+            self._marks[id(frame)] = (weakref.ref(frame), (generation, epoch), touch,
+                                      self.inputs if inputs is None else inputs)
             return True
 
     def mark(self, frame, generation, touch=None):
         with self.lock:
             return self.mark_if_unchanged(frame, generation, self.epoch, touch)
+
+    def sent_input(self, *, gesture=False):
+        """Count an Android input as it is sent (under the lock, inside the dispatch)."""
+        with self.lock:
+            self.inputs += 1
+            if gesture:
+                self.last_gesture = self.inputs
+
+    def predates_input(self, frame, *, gesture) -> bool:
+        """True when ``frame`` was captured before an input it must follow: for a gesture, any input sent so far;
+        for any other input, the latest gesture. Also True for a frame without a mark."""
+        entry = self._marks.get(id(frame)) if frame is not None else None
+        if entry is None or entry[0]() is not frame:
+            return True
+        return entry[3] < (self.inputs if gesture else self.last_gesture)
 
     def marks_of(self, frame):
         entry = self._marks.get(id(frame)) if frame is not None else None
