@@ -62,6 +62,7 @@ JOB_POLL_S = 0.002  # how often a posted job's status is polled (a touch job nor
 KINDS = ("down", "move", "up")
 
 DONE, ABORTED, FAILED, OVERRUN = "done", "aborted", "failed", "overrun"
+EXPIRED = "expired"  # the deciding frame's not_after passed right before the first down: nothing was posted
 
 # The joystick: down at the centre, then RAMP_MOVES moves RAMP_STEP_S apart out to the target (as measured in phase
 # E, .build/android/phase-e-measure/measure.py), hold, up. The jump tap on contact 1 is held JUMP_TAP_S.
@@ -213,7 +214,7 @@ def bell_press(point, duration_s) -> Gesture:
     return Gesture(BELL_PRESS, (Step(0.0, "down", 0, point), Step(float(duration_s), "up", 0)))
 
 
-def perform(controller, gesture: Gesture, abort, keep_queue=None) -> str:
+def perform(controller, gesture: Gesture, abort, keep_queue=None, not_after=None) -> str:
     """Send a checked gesture's steps on schedule through ``controller``. Returns DONE; ABORTED (``abort()`` became
     true while a contact was held: it was lifted early); FAILED (a call reported failure or was rejected, or a lift
     was not reported done within CLEANUP_S); or OVERRUN (a step not submitted or completed by its limit, see
@@ -221,7 +222,9 @@ def perform(controller, gesture: Gesture, abort, keep_queue=None) -> str:
     grace). Every contact whose down was posted and whose up was not reported done is lifted in ``finally``, also
     when a call or a wait raises; ``keep_queue()`` is called when a lift is still outstanding at the end (nothing
     may clear the controller's queue then, see DeviceInputState.lifts_outstanding). No job is waited on blocking:
-    one status read per poll (_status). Nothing here captures, reads the device or decides."""
+    one status read per poll (_status). Nothing here captures, reads the device or decides. ``not_after``
+    (time.monotonic): the deciding frame's expiry, checked immediately before the first post_touch_down: past it,
+    EXPIRED and nothing posted (route review round 3, finding 5)."""
     start = time.monotonic()
     cap_end = start + cap_for(gesture)
     late_end = cap_end + OVERRUN_S
@@ -229,13 +232,15 @@ def perform(controller, gesture: Gesture, abort, keep_queue=None) -> str:
     pending = []  # (job, limit) of a down or move posted and not yet seen done: carried into the cleanup
     result, late, lifted, failed = FAILED, False, False, False
     try:
-        result = _send_steps(controller, gesture, abort, held, pending, start, cap_end, late_end)
+        result = _send_steps(controller, gesture, abort, held, pending, start, cap_end, late_end, not_after)
     finally:
         try:
             lifted, late, failed = lift(controller, held, pending)
         finally:
             if held and keep_queue is not None:
                 keep_queue()
+    if result == EXPIRED and not held and not pending:
+        return EXPIRED  # nothing was posted: the caller treats it as never sent
     if result == OVERRUN or late or time.monotonic() > late_end:
         return OVERRUN  # checked after the last call too: a lift that completed late is no confirmed gesture
     if failed or not lifted:
@@ -243,7 +248,7 @@ def perform(controller, gesture: Gesture, abort, keep_queue=None) -> str:
     return result
 
 
-def _send_steps(controller, gesture, abort, held, pending, start, cap_end, late_end) -> str:
+def _send_steps(controller, gesture, abort, held, pending, start, cap_end, late_end, not_after=None) -> str:
     for index, step in enumerate(gesture.steps):
         due = start + step.at
         lifting = step.kind == "up"
@@ -259,6 +264,8 @@ def _send_steps(controller, gesture, abort, held, pending, start, cap_end, late_
             return stopped
         if time.monotonic() > submit_by:  # right before the post: the stop check above may itself have been slow
             return OVERRUN
+        if index == 0 and not_after is not None and time.monotonic() > not_after:
+            return EXPIRED  # the deciding frame aged out before anything was posted
         if step.kind == "down":
             held[step.contact] = None  # before the call: a down that raised may still have reached the device
             job = controller.post_touch_down(*step.point, step.contact, 1)
@@ -426,7 +433,9 @@ def _refuse_off_android(frame):
 
 class DecisionExpired(Exception):
     """A gesture's ``not_after`` (time.monotonic) passed before its first contact went down: nothing was sent and
-    nothing is halted; the caller captures a new frame and decides again."""
+    nothing is halted; the caller captures a new frame and decides again. Raised by Runtime._dispatch_touch at its
+    last check, or after perform returned EXPIRED (checked immediately before the first post_touch_down; the input
+    count DeviceInputState.inputs has then already counted it, which only makes later frames' freshness stricter)."""
 
 
 def joystick_step(rt, frame, angle_deg, magnitude, duration_s, jump_at_s=None, layout: Layout = DEFAULT_LAYOUT, *,

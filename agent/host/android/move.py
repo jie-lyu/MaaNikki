@@ -162,6 +162,7 @@ class Observation:
     blocks: tuple = ()  # Verdict.blocks
     name_only: bool = False  # Verdict.name_only
     prompts: tuple = ()  # Verdict.prompts
+    fragments: tuple = ()  # Verdict.fragments
 
     def __post_init__(self):
         if self.captured is None:
@@ -435,11 +436,15 @@ class Walker:
         return fix.heading
 
     def _check_controls(self, obs, *, jump=False, bell=None):
-        """No interaction prompt on ``obs`` lies on or next to a control the gesture touches (the joystick ring, the
-        jump button when the step jumps, the bell point): else stop, frame saved, nothing sent."""
+        """No interaction prompt and no other text on ``obs`` lies on or next to a control the gesture touches (the
+        joystick ring, the jump button when the step jumps, the bell point; contacts_clear): else stop, frame saved,
+        nothing sent."""
         if obs.prompts and not all(controls_clear(extent, jump=jump, bell=bell) for extent in obs.prompts):
             self._fail("screen", "交互提示挨着或盖住了移动要用的按键，已停止所有输入", obs,
                        details={"prompts": [list(extent) for extent in obs.prompts]})
+        if not contacts_clear(obs, jump=jump, bell=bell):
+            self._fail("screen", "移动要用的按键上或旁边有文字（可能是弹窗或按钮），已停止所有输入", obs,
+                       details={"fragments": [list(extent) for extent in obs.fragments]})
 
     def _not_after(self, obs, hold) -> float:
         """The latest contact-down for a gesture of ``hold`` seconds decided on ``obs``: within the frame's age limit
@@ -848,7 +853,9 @@ PROMPT_TEXT_X0_MAX = 800  # the block starts no later than the label (saved: 790
 PROMPT_TEXT_CY = (335, 355)  # its centre y (saved: 343.5-344.5; composites 340-348)
 PROMPT_ICON_AREA = (752, 326, 793, 366)  # where the icon is looked for (x0, y0, x1, y1)
 PROMPT_ICON_X0, PROMPT_ICON_Y0 = (763, 773), (333, 343)
-PROMPT_ICON_W, PROMPT_ICON_H = (18, 27), (16, 23)
+PROMPT_ICON_W, PROMPT_ICON_H = (22, 25), (18, 21)  # saved: 23-24 x 19-20
+PROMPT_ICON_SOLIDITY = 0.92  # contour area / its convex hull's (saved hexagons 0.951-0.971; an L or a ring far less)
+PROMPT_ICON_VERTICES = (5, 7)  # corners of its contour simplified to 4 % of its perimeter (saved: 6 on all 11)
 PROMPT_ICON_PIXELS = (260, 400)
 PROMPT_ICON_FILL = (0.6, 0.9)  # pixels / box area (a hexagon is ~0.75)
 PROMPT_LINE_ROWS = (320, 329)  # the gold line's rows (y0, y1)
@@ -856,6 +863,12 @@ PROMPT_LINE_X = (740, 1040)
 PROMPT_LINE_SPAN = (756, 940)  # one warm run (gaps up to PROMPT_LINE_GAP px bridged) covers at least these x
 PROMPT_LINE_GAP = 6
 PROMPT_LINE_WARMTH, PROMPT_LINE_RED = 35, 140  # a gold pixel: red - blue above the first, red above the second
+# The line is thin: averaged over PROMPT_LINE_SPAN, the brightness (max channel) peaks on its rows in
+# PROMPT_LINE_ROWS and stands at least PROMPT_LINE_CONTRAST above the rows 5 px above and below it, and at most
+# PROMPT_LINE_MAX_ROWS rows lie within half that contrast of the peak (saved prompts: rows 323-324, 2-3 rows,
+# contrast 11.6-107 above and 75-122 below; a 29 px panel header is flat: route review round 3, finding 2).
+PROMPT_LINE_MAX_ROWS = 3
+PROMPT_LINE_CONTRAST = 6.0
 # A gesture contact stays this far from any prompt's extent (on top of the control's own radius).
 CONTROL_CLEAR_PX = 40
 JUMP_RADIUS_PX = 60  # the jump button's drawn radius around Layout.jump (~55 px on the saved frames)
@@ -886,6 +899,32 @@ def controls_clear(extent, *, jump=False, bell=None, layout=DEFAULT_LAYOUT) -> b
     return all(clear_of(extent, centre, radius) for centre, radius in controls)
 
 
+def merge_fragments(boxes) -> tuple:
+    """OCR boxes [x, y, w, h] as extents (x0, y0, x1, y1), adjacent ones judged together: boxes on one line (their
+    rows overlap) with at most LINE_GAP_PX between them merge into one extent (确 + 认 over a button: one block)."""
+    extents = sorted((b[0], b[1], b[0] + b[2], b[1] + b[3]) for b in boxes if len(b) == 4)
+    merged = []
+    for extent in extents:
+        for index, other in enumerate(merged):
+            if extent[1] < other[3] and other[1] < extent[3] and extent[0] - other[2] <= LINE_GAP_PX \
+                    and other[0] - extent[2] <= LINE_GAP_PX:
+                merged[index] = (min(other[0], extent[0]), min(other[1], extent[1]), max(other[2], extent[2]),
+                                 max(other[3], extent[3]))
+                break
+        else:
+            merged.append(extent)
+    return tuple(merged)
+
+
+def contacts_clear(obs, *, jump=False, bell=None, layout=DEFAULT_LAYOUT) -> bool:
+    """Whether nothing on ``obs`` lies on or next to a control the gesture touches (controls_clear): neither an
+    interaction prompt (Observation.prompts) nor any text the noise filters dropped (Observation.fragments: single
+    characters and low-score rows, adjacent ones merged; route review round 3, finding 2: 「确」「认」 over the jump
+    button were dropped one by one). Any text there stops."""
+    return all(controls_clear(extent, jump=jump, bell=bell, layout=layout)
+               for extent in (*obs.prompts, *getattr(obs, "fragments", ())))
+
+
 def _usable(frame) -> bool:
     shape = getattr(frame, "shape", None)
     return shape is not None and tuple(shape) == (720, 1280, 3)
@@ -901,16 +940,32 @@ def prompt_icon(frame):
     x0, y0, x1, y1 = PROMPT_ICON_AREA
     hsv = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
     mask = ((hsv[..., 2] >= 200) & (hsv[..., 1] <= 60)).astype(np.uint8)
-    _count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask)
+    _count, labels, stats, _centroids = cv2.connectedComponentsWithStats(mask)
     found = []
-    for x, y, w, h, pixels in stats[1:]:
+    for index, (x, y, w, h, pixels) in enumerate(stats[1:], 1):
         x, y = int(x) + x0, int(y) + y0
         if PROMPT_ICON_X0[0] <= x <= PROMPT_ICON_X0[1] and PROMPT_ICON_Y0[0] <= y <= PROMPT_ICON_Y0[1] \
                 and PROMPT_ICON_W[0] <= w <= PROMPT_ICON_W[1] and PROMPT_ICON_H[0] <= h <= PROMPT_ICON_H[1] \
                 and PROMPT_ICON_PIXELS[0] <= pixels <= PROMPT_ICON_PIXELS[1] \
-                and PROMPT_ICON_FILL[0] <= pixels / (w * h) <= PROMPT_ICON_FILL[1]:
+                and PROMPT_ICON_FILL[0] <= pixels / (w * h) <= PROMPT_ICON_FILL[1] \
+                and _hexagon((labels == index).astype(np.uint8)):
             found.append((x, y, int(w), int(h)))
     return found[0] if len(found) == 1 else None
+
+
+def _hexagon(mask) -> bool:
+    """The blob's outer contour is convex and hexagon-like: solidity at least PROMPT_ICON_SOLIDITY and
+    PROMPT_ICON_VERTICES corners (route review round 3, finding 2: a white L passed size and fill)."""
+    import cv2
+    contours, _hierarchy = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if len(contours) != 1:
+        return False
+    contour = contours[0]
+    hull = cv2.contourArea(cv2.convexHull(contour))
+    if hull <= 0 or cv2.contourArea(contour) / hull < PROMPT_ICON_SOLIDITY:
+        return False
+    corners = len(cv2.approxPolyDP(contour, 0.04 * cv2.arcLength(contour, True), True))
+    return PROMPT_ICON_VERTICES[0] <= corners <= PROMPT_ICON_VERTICES[1]
 
 
 def prompt_line(frame):
@@ -933,7 +988,27 @@ def prompt_line(frame):
                 best = (int(run[0]) + PROMPT_LINE_X[0], row + PROMPT_LINE_ROWS[0], length)
     if best is None or best[0] > PROMPT_LINE_SPAN[0] or best[0] + best[2] - 1 < PROMPT_LINE_SPAN[1]:
         return None
-    return best
+    return best if line_thin(frame) else None
+
+
+def line_thin(frame) -> bool:
+    """The gold line's thickness (see PROMPT_LINE_MAX_ROWS): a thin bright ridge in PROMPT_LINE_ROWS."""
+    import numpy as np
+    top = PROMPT_LINE_ROWS[0] - 10
+    profile = frame[top:PROMPT_LINE_ROWS[1] + 10, PROMPT_LINE_SPAN[0]:PROMPT_LINE_SPAN[1] + 1].max(axis=2) \
+        .astype(float).mean(axis=1)
+    peak = 10 + int(np.argmax(profile[10:10 + PROMPT_LINE_ROWS[1] - PROMPT_LINE_ROWS[0]]))
+    side = min(profile[peak] - profile[peak - 5], profile[peak] - profile[peak + 5])
+    if side < PROMPT_LINE_CONTRAST:
+        return False
+    floor = profile[peak] - side / 2
+    rows, y = 1, peak - 1
+    while y >= 0 and profile[y] >= floor:
+        rows, y = rows + 1, y - 1
+    y = peak + 1
+    while y < len(profile) and profile[y] >= floor:
+        rows, y = rows + 1, y + 1
+    return rows <= PROMPT_LINE_MAX_ROWS
 
 
 def prompt_verdict(column, frame):
@@ -967,6 +1042,7 @@ class Verdict:
     blocks: tuple = ()  # Rows.blocks: the permanent-HUD text block layout
     name_only: bool = False  # name_only_tracker on the frame (set on "hud" and "hud_prompt" verdicts only)
     prompts: tuple = ()  # "hud_prompt": the prompt's extent (prompt_verdict)
+    fragments: tuple = ()  # Rows.fragments: OCR text the noise filters dropped, judged near gesture contacts
 
 
 def _inside(box, region) -> bool:
@@ -998,6 +1074,7 @@ class Rows:
     misread: int  # blocks in BLOCK_REGIONS whose text is not that region's exact form
     raw: tuple = ()  # every OCR row with a box, at any score, before any filtering: (text, box)
     column: tuple = ()  # [(text, box)] counted rows centred in PROMPT_COLUMN (judged by prompt_verdict)
+    fragments: tuple = ()  # extents (x0, y0, x1, y1) of the rows the noise filters dropped, adjacent ones merged
 
 
 def read_rows(result) -> Rows:
@@ -1005,7 +1082,7 @@ def read_rows(result) -> Rows:
     labels read in place, the permanent-HUD block layout, and how many of those blocks were misread (in a HUD region,
     not in its exact form; Walker gives such a frame one recapture when nothing else differs from the first frame)."""
     from host.android import actions, pages
-    outside, tracker, blocks, labels, covered, misread, raw, column = [], [], [], 0, 0, 0, [], []
+    outside, tracker, blocks, labels, covered, misread, raw, column, dropped = [], [], [], 0, 0, 0, [], [], []
     if result is not None and actions._hit(result):
         for row in pages._rows(result):
             if row is None:
@@ -1019,6 +1096,8 @@ def read_rows(result) -> Rows:
             if _glyph(text):  # the raw text, before anything else
                 if score >= TEXT_SCORE:
                     outside.append((text, box))
+                else:
+                    dropped.append(box)
                 continue
             squashed = re.sub(r"\s", "", text)
             # A distance row in the tracker with its 米 (1米, 3米: two characters, under counts_as_text's floor) is
@@ -1028,6 +1107,8 @@ def read_rows(result) -> Rows:
                 tracker.append((box[1], box[0], TRACKER_DISTANCE))
                 continue
             if score < (TEXT_SCORE if _cjk(text) else ASCII_SCORE) or not counts_as_text(text):
+                if text.strip():
+                    dropped.append(box)  # never dropped near a gesture contact (fragments, contacts_clear)
                 continue
             region = next((name for name, area in HUD_REGIONS if _inside(box, area)), None)
             if region is None:
@@ -1051,7 +1132,7 @@ def read_rows(result) -> Rows:
                 if region == "labels":  # the labels whose places the misread block covers
                     covered += sum(1 for _label, x in LABEL_CENTRES if box[0] <= x <= box[0] + box[2])
     return Rows(outside, tuple(entry for _y, _x, entry in sorted(tracker)), labels + covered,
-                tuple(sorted(blocks)), misread, tuple(raw), tuple(column))
+                tuple(sorted(blocks)), misread, tuple(raw), tuple(column), merge_fragments(dropped))
 
 
 # A quest tracker without a distance row. On 星海 the tracked story quest lies in another map and the tracker shows
@@ -1157,7 +1238,7 @@ def tracker_kept(obs, shape) -> bool:
     return names == [shape.name] and distances <= (0 if shape.name_only else 1)
 
 
-def first_frame_rule(obs, reader, map_id):
+def first_frame_rule(obs, reader, map_id, *, map_unknown_ok=False):
     """Walker._first_look's decision on one observation (blank captures and the wait's deadline stay with the
     caller): ``("ok", "", Shape)`` for a frame a walk (or a touch on the open world) may start on: the HUD (with at
     most an allowed interaction prompt: MOVE_KINDS), the minimap chevron at its pivot, and the tracker showing one
@@ -1166,7 +1247,10 @@ def first_frame_rule(obs, reader, map_id):
     waits through (a blank capture, an ambient remark, a distance neither read nor shown absent);
     ``("stop", reason, None)`` for one it refuses on (a misread before any clean frame, anything else on screen, the
     chevron away, extra tracker text or a NARRATION_DENY word, a name-only tracker on a map not in NAME_ONLY_MAPS or
-    not known: ``map_id`` None). Reasons are fixed text."""
+    not known: ``map_id`` None). ``map_unknown_ok``: with ``map_id`` None, a name-only tracker is accepted as on
+    NAME_ONLY_MAPS (only for the minimap tap that opens the map, which commits nothing: the map card then has to show
+    星海 positively, host.android.teleport.Teleport.open_map; route review round 3, finding 9). Reasons are fixed
+    text."""
     if obs.kind == "blank":
         return "wait", "没有拿到截图", None
     if obs.kind == "misread":  # no layout to compare with yet: a misread at the start is never waited through
@@ -1182,7 +1266,7 @@ def first_frame_rule(obs, reader, map_id):
         return "ok", "", Shape(names[0], obs.blocks, False)
     if obs.kind in MOVE_KINDS and len(names) == 1 and distances == 0 and obs.name_only \
             and _cjk(names[0]) >= TRACKER_NAME_MIN_CJK:
-        if map_id not in NAME_ONLY_MAPS:  # route review round 2, finding 6: positive evidence only where observed
+        if map_id not in NAME_ONLY_MAPS and not (map_id is None and map_unknown_ok):  # only where observed
             return "stop", ("任务栏只显示任务名、没有距离；只在星海认这种任务栏（这里不是星海，或还不知道在哪张地图），"
                             "没有开始移动"), None
         return "ok", "", Shape(names[0], obs.blocks, True)
@@ -1271,7 +1355,8 @@ def classify(screen, recognize, frame=None) -> Verdict:
         return Verdict("narration", "", regions, blocks) if not why else Verdict("other", why, regions, blocks)
     if rows.misread:
         return Verdict("misread", "大世界常驻界面的文字没有按原样读出", regions, blocks)
-    return Verdict("hud_prompt" if prompts else "hud", "", regions, blocks, name_only_tracker(rows, frame), prompts)
+    return Verdict("hud_prompt" if prompts else "hud", "", regions, blocks, name_only_tracker(rows, frame), prompts,
+                   rows.fragments)
 
 
 class RuntimeIo:
@@ -1308,7 +1393,7 @@ class RuntimeIo:
         recognize = self.rt._recognizer_on(frame)
         verdict = classify(actions.read_screen(recognize), recognize, frame)
         return Observation(frame, verdict.kind, at, verdict.reason, captured, verdict.regions, verdict.blocks,
-                           verdict.name_only, verdict.prompts)
+                           verdict.name_only, verdict.prompts, verdict.fragments)
 
     def step(self, frame, angle, seconds, jump_at, *, not_after=None) -> bool:
         from host.android import gesture

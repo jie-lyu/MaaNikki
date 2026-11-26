@@ -157,14 +157,26 @@ class LookTests(unittest.TestCase):
     def test_panel_names_and_buttons(self):
         self.assertEqual(teleport.point_name("星梦群屿 · 主岛"), "星梦群屿·主岛")
         self.assertEqual(teleport.point_name("星梦群屿・主岛"), "星梦群屿·主岛")
-        good = teleport.Panel("星梦群屿·主岛", ("传送", "详情"), (), [1000, 637, 70, 40], [766, 639, 74, 39], True)
+        good = teleport.Panel("星梦群屿·主岛", ("传送", "详情"), (), [1000, 637, 70, 40], [766, 639, 74, 39], True,
+                              [1000, 637, 70, 40])
         self.assertTrue(teleport.panel_ok(good, "星梦群屿·主岛"))
         self.assertFalse(teleport.panel_ok(good, "无界枢纽"))
         for change in ({"buttons": ("传送", "立即前往", "详情")}, {"buttons": ("OK", "传送", "详情")},
                        {"buttons": ("传送",)}, {"words": ("立即前往",)}, {"teleport": None}, {"detail": None},
-                       {"detail": [990, 637, 20, 40]}, {"agree": False}):
+                       {"detail": [990, 637, 20, 40]}, {"agree": False}, {"narrow": None},
+                       {"narrow": [913, 637, 150, 40]}):
             with self.subTest(change=change):
                 self.assertFalse(teleport.panel_ok(teleport.Panel(**{**good.__dict__, **change}), "星梦群屿·主岛"))
+
+    def test_both_teleport_readings_must_contain_the_tap_point_and_agree(self):
+        # Route review round 3, finding 1: the band's [900,643,14,26] and the narrow pass's [913,637,150,40] share a
+        # pixel but not the tap point (906,655, on 详情's right edge): refused. The centres must agree too.
+        self.assertFalse(teleport.readings_agree([900, 643, 14, 26], [913, 637, 150, 40]))
+        self.assertTrue(teleport.readings_agree([1000, 637, 70, 40], [1000, 637, 70, 40]))
+        self.assertTrue(teleport.readings_agree([1000, 637, 70, 40], [1006, 641, 68, 36]))  # centres 6 px apart
+        self.assertFalse(teleport.readings_agree([1000, 637, 70, 40], [913, 637, 150, 40]))  # point in both, centres not
+        self.assertFalse(teleport.readings_agree([1000, 637, 70, 40], [1036, 637, 70, 40]))  # point outside the narrow
+        self.assertFalse(teleport.readings_agree([1000, 637, 70, 40], None))
 
     def test_province_headers(self):
         self.assertTrue(teleport.province_header([888, 100, 57, 32]))
@@ -370,8 +382,9 @@ class HudIo:
     """move.RuntimeIo stand-in: each observation a HUD frame of ``kinds`` (then clean HUD frames), stamped with the
     (patched) clock; ``regions``: the tracker each shows."""
 
-    def __init__(self, kinds=(), regions=None, prompts=None, name_only=None):
+    def __init__(self, kinds=(), regions=None, prompts=None, name_only=None, fragments=None):
         self.kinds, self.regions, self.prompts = list(kinds), list(regions or []), list(prompts or [])
+        self.fragments = list(fragments or [])
         self.name_only = list(name_only or [])  # per frame; default: a name-only tracker shows its evidence
         self.frames = []
 
@@ -380,12 +393,14 @@ class HudIo:
         kind = self.kinds.pop(0) if self.kinds else "hud"
         region = self.regions.pop(0) if self.regions else ("登上鸣鸣列车", "#")
         prompts = self.prompts.pop(0) if self.prompts else ()
+        fragments = self.fragments.pop(0) if self.fragments else ()
         evidence = self.name_only.pop(0) if self.name_only else region == ("登上鸣鸣列车",)
         frame = Frame(view=None, zoom=None, where="hud", index=len(self.frames))
         self.frames.append(frame)
         return move.Observation(frame, kind, time.monotonic(), "提示" if kind != "hud" else "", regions=region,
                                 blocks=(("labels", 600, 1270, 75, False),),
-                                name_only=kind in move.MOVE_KINDS and evidence, prompts=prompts)
+                                name_only=kind in move.MOVE_KINDS and evidence, prompts=prompts,
+                                fragments=fragments)
 
 
 READER = SimpleNamespace(present=lambda frame: True)
@@ -583,11 +598,14 @@ class TeleportFlowTests(unittest.TestCase):
         self.assertEqual(len(game.calls), 3)  # the expired pillar tap, then the pillar and 传送
 
     def test_the_two_passes_must_agree_on_where_teleport_is(self):
-        # Review round 2, finding 4: the narrower pass reading 传送 elsewhere (on 详情's edge) stops before any tap.
-        game = Game(zoom="max", view=(1394.5, 1010.4), narrow_box=[900, 643, 14, 26])
-        _result, _rt, error = transport(game)
-        self.assertIsInstance(error, Stop)
-        self.assertNotIn("teleport", game.taps)
+        # Review round 2, finding 4; round 3, finding 1: the narrower pass reading 传送 elsewhere (on 详情's edge),
+        # or over a wider box that holds the tap point but is centred elsewhere, stops before any tap.
+        for narrow in ([900, 643, 14, 26], [913, 637, 150, 40]):
+            with self.subTest(narrow=narrow):
+                game = Game(zoom="max", view=(1394.5, 1010.4), narrow_box=narrow)
+                _result, _rt, error = transport(game)
+                self.assertIsInstance(error, Stop)
+                self.assertNotIn("teleport", game.taps)
 
     def open_on(self, io, map_id="starsea"):
         game = Game()
@@ -606,7 +624,6 @@ class TeleportFlowTests(unittest.TestCase):
                            (HudIo(regions=[alone, ("登上鸣鸣列车", "#")]), "starsea"),  # a distance appearing
                            (HudIo(regions=[alone, alone], name_only=[True, False]), "starsea"),  # evidence gone
                            (HudIo(kinds=["hud", "misread"]), "starsea"),
-                           (HudIo(regions=[alone] * 30), None),  # name-only with the map unknown: never starts
                            # route review round 2, finding 7: only 交谈 in the tracker on both frames (and an
                            # instruction, finding 6), on 星海 too
                            (HudIo(regions=[("交谈",)] * 3), "starsea"),
@@ -621,6 +638,41 @@ class TeleportFlowTests(unittest.TestCase):
         _look, game, error = self.open_on(HudIo(kinds=["hud", "narration", "hud", "hud"]), None)
         self.assertIsNone(error)
         self.assertEqual(game.calls[0]["source"].index, 3)
+
+    def test_a_restart_on_starsea_opens_the_map_on_its_name_only_tracker(self):
+        # Route review round 3, finding 9: start, wait, stop on 星海 (the name-only tracker), start again: the
+        # map-opening tap (map not known) may use the name-only tracker; the map must then show 星海 positively.
+        alone = ("登上鸣鸣列车",)
+        look, game, error = self.open_on(HudIo(regions=[alone] * 4), None)
+        self.assertIsNone(error)
+        self.assertEqual((game.taps, look.state), (["minimap"], "map"))
+        # the evidence must still hold on the confirming frame
+        _look, game, error = self.open_on(HudIo(regions=[alone, alone], name_only=[True, False]), None)
+        self.assertIsInstance(error, Stop)
+        self.assertEqual(game.taps, [])
+        # the map opens on another region: the name-only exception did not apply; stop with that frame
+        game = Game(region="心愿原野")
+        rt = scripted_rt(game)
+        with patched(game), self.assertRaises(Stop) as caught:
+            teleporter(rt, io=HudIo(regions=[alone] * 4)).open_map(None)
+        self.assertEqual(game.taps, ["minimap"])
+        self.assertEqual(caught.exception.frames[0].where, "map")
+        # the same HUD with its distance: no 星海 card needed
+        game = Game(region="心愿原野")
+        rt = scripted_rt(game)
+        with patched(game):
+            self.assertIsNotNone(teleporter(rt, io=HudIo()).open_map(None))
+
+    def test_the_whole_restart_reaches_the_card(self):
+        # The second start of start-wait-stop-start on 星海: Run.open_card(None) from the name-only HUD reads the card.
+        game = Game()
+        rt = scripted_rt(game)
+        run = crystal_route.Run(rt, reader=READER, world=FakeWorld(), io=HudIo(regions=[("登上鸣鸣列车",)] * 4))
+        with patched(game):
+            card = run.open_card(None)
+        self.assertEqual(card.kind, "not_rung")
+        self.assertEqual(game.taps, ["minimap"])
+        self.assertIsNotNone(run.map.card_day)
 
     def test_a_prompt_near_the_minimap_blocks_its_tap_one_elsewhere_does_not(self):
         # Phase B: hud_prompt is fine for the tap unless the prompt lies within 40 px + the minimap's radius.
@@ -655,6 +707,39 @@ class TeleportFlowTests(unittest.TestCase):
         self.assertEqual(game.taps, ["minimap", "pillar main"])
         self.assertEqual(error.frames[0].where, "panel")
 
+    def test_the_frame_in_hand_and_the_opening_transitions_are_judged(self):
+        # Route review round 3, finding 4: a HUD with 点击继续 in the tracker as transport()'s first frame, and an
+        # explicit 点击继续 on the first transition after the minimap tap: both stop with that frame saved, before
+        # the pillar or 传送.
+        game = Game()
+        game.queue = ["tracker prompt"]
+        _result, _rt, error = transport(game)
+        self.assertIsInstance(error, Stop)
+        self.assertEqual((game.taps, error.frames[0].where), ([], "tracker prompt"))
+        game = Game()
+        original = game.action
+
+        def prompt_after_the_minimap(*args, **kwargs):
+            done = original(*args, **kwargs)
+            if game.taps[-1] == "minimap":
+                game.queue = ["loading prompt", "map"]
+            return done
+        game.action = prompt_after_the_minimap
+        _result, _rt, error = transport(game)
+        self.assertIsInstance(error, Stop)
+        self.assertEqual((game.taps, error.frames[0].where), (["minimap"], "loading prompt"))
+        game = Game()  # a plain loading frame on the way is still waited through
+        original_plain = game.action
+
+        def loading_after_the_minimap(*args, **kwargs):
+            done = original_plain(*args, **kwargs)
+            if game.taps[-1] == "minimap":
+                game.queue = ["loading", "map"]
+            return done
+        game.action = loading_after_the_minimap
+        _result, _rt, error = transport(game)
+        self.assertIsNone(error)
+
     def test_arrival_refuses_what_the_walker_refuses(self):
         for sequence in (["loading", "tracker prompt", "hud"], ["loading", "loading prompt", "hud"]):
             with self.subTest(sequence=sequence):
@@ -686,6 +771,28 @@ class TeleportFlowTests(unittest.TestCase):
             teleporter(rt).card()
         self.assertEqual(game.taps, [])
 
+    def test_the_card_day_comes_from_its_own_captures(self):
+        # Route review round 3, finding 6: the day is bound to the card's captures, not to when it is used; a pair
+        # straddling the 04:00 reset stops.
+        import datetime as dt
+        from account_state import game_day
+        utc = dt.timezone.utc
+        before_reset = dt.datetime(2026, 11, 26, 19, 49, tzinfo=utc)  # 03:49 UTC+8 on the 27th: still the 26th
+        after_reset = dt.datetime(2026, 11, 26, 20, 11, tzinfo=utc)  # 04:11: the 27th
+        game = Game(where="map")
+        rt = scripted_rt(game)
+        tp = teleporter(rt)
+        tp.now = iter([before_reset] * 4).__next__
+        with patched(game):
+            self.assertEqual(tp.card().kind, "not_rung")
+        self.assertEqual(tp.card_day, game_day(before_reset))
+        tp = teleporter(rt)
+        tp.now = iter([before_reset, before_reset, after_reset, after_reset]).__next__  # paused after the 1st capture
+        with patched(game), self.assertRaises(Stop) as caught:
+            tp.card()
+        self.assertIn("4 点重置", str(caught.exception))
+        self.assertIsNone(tp.card_day)
+
     def test_leaving_the_map_ends_on_a_confirmed_hud(self):
         game = Game(where="map")
         rt = scripted_rt(game)
@@ -708,6 +815,7 @@ class FakeMap:
     def __init__(self, cards, *, leave=True, transports_ok=True):
         self.cards, self.calls, self.card_frame = list(cards), [], "card frame"
         self._leave, self.transports_ok = leave, transports_ok
+        self.card_day = None
 
     def open_map(self, map_id=None):
         self.calls.append(f"open {map_id}" if map_id else "open")
@@ -719,10 +827,12 @@ class FakeMap:
         return True
 
     def card(self):
+        from account_state import game_day
         self.calls.append("card")
         card = self.cards.pop(0)
         if isinstance(card, Exception):
             raise card
+        self.card_day = game_day(crystal_route.now_utc())  # the captures' own time (Teleport.card)
         return card
 
     def transport(self, record):
@@ -770,9 +880,19 @@ def route_run(cards, *, outcome="arrived", ring=True, record=None, leave=True, u
             patch("host.game_backend", return_value="android"), \
             patch("host.android_user_stop", side_effect=lambda *a, **k: published()), \
             patch.object(crystal_route, "now_utc", side_effect=lambda: next(times) if times else SAFE_NOON), \
-            patch.object(crystal_route, "Run", side_effect=lambda rt_: run):
+            patch.object(crystal_route, "Run", side_effect=lambda rt_: run), reports(rt):
         result = crystal_route.run(rt, {"kind": "android_crystal_route"})
     return result, rt, run.map.calls, [name for name, _day in rings]
+
+
+def reports(rt, during_write=None):
+    """teleport.announce's file write and display stubbed: shown texts go to rt.logs (as say's do);
+    ``during_write()`` runs inside the write (a stop published then)."""
+    stack = contextlib.ExitStack()
+    stack.enter_context(patch("message_log.write_message",
+                              side_effect=lambda text, display, report=None: during_write and during_write()))
+    stack.enter_context(patch.object(teleport, "show", side_effect=lambda rt_, text: rt_.logs.append(text)))
+    return stack
 
 
 RUNG4 = Card("rung", 4, ((3, 0), (30, 4), (100, 0)))
@@ -869,11 +989,30 @@ class RouteTests(unittest.TestCase):
         run = crystal_route.Run(rt, reader=READER, world=FakeWorld(), io=HudIo())
         route = SimpleNamespace(id="xinghai_crystal_3", map_id="starsea", start_radius=9, timeout=900, points=())
         with patch("host.android.walk_probe.DiagnosticIo", Io), patch("host.android.move.Walker", walker), \
-                patch("host.android.move.route_goals", return_value=[]), \
+                patch("host.android.move.route_goals", return_value=[]), reports(rt), \
                 patch("host.android_user_stop", side_effect=lambda *a, **k: bool(published)):
             run.walk(route, (1, 2))
         self.assertEqual(rt.logs, [])
         self.assertEqual(walker.call_args.kwargs["map_id"], "starsea")  # the name-only rule knows the map (finding 6)
+
+    def test_a_stop_published_during_the_message_write_displays_nothing(self):
+        # Route review round 3, finding 10: the stop lands inside the message file write of 「本趟 +5」 (and of the
+        # walk's arrival): nothing is displayed. Without a stop it is written (no display text, marked as a report)
+        # and then displayed.
+        published = []
+        rt = SimpleNamespace(stopped=False, logs=[])
+        rt.log = lambda text, detail=False: rt.logs.append(text)
+        run = crystal_route.Run(rt, reader=READER, world=FakeWorld(), io=HudIo())
+        with reports(rt, during_write=lambda: published.append(True)), \
+                patch("host.android_user_stop", side_effect=lambda *a, **k: bool(published)):
+            run.report(4, 9)
+        self.assertEqual(rt.logs, [])
+        with reports(rt), patch("host.android_user_stop", return_value=False), \
+                patch("message_log.write_message") as write:
+            self.assertTrue(teleport.announce(rt, "星光结晶：路线前 4/30，路线后 9/30（本趟 +5）。"))
+        write.assert_called_once_with("星光结晶：路线前 4/30，路线后 9/30（本趟 +5）。", None,
+                                      report="星光结晶：路线前 4/30，路线后 9/30（本趟 +5）。")
+        self.assertEqual(rt.logs, ["星光结晶：路线前 4/30，路线后 9/30（本趟 +5）。"])
 
     def test_the_card_and_the_press_belong_to_one_day(self):
         import datetime as dt
@@ -914,11 +1053,11 @@ class BellTests(unittest.TestCase):
     and kept unless the device input count shows nothing went down (review round 2, findings 1 and 2)."""
 
     def ring(self, kinds=(), regions=None, *, at_hub=True, bell_box=(593, 590, 47, 47), outcomes=(True,),
-             record=None, clock=None, day=DAY, prompts=None, name_only=None):
+             record=None, clock=None, day=DAY, prompts=None, name_only=None, valid=None, fragments=None):
         from host import UnsupportedInput
         from host.android import gesture
         rt = SimpleNamespace(stopped=False, logs=[], pause=Mock(return_value=True), TOUCH_KEY_ATTEMPTS=3,
-                             _frame_still_valid=Mock(return_value=True))
+                             _frame_still_valid=Mock(side_effect=valid or (lambda frame: True)))
         rt.log = lambda text, detail=False: rt.logs.append(text)
         rt._recognizer_on = lambda frame: (lambda node, override=None: hit(list(bell_box))
                                            if node == teleport.HUD_BELL and bell_box else MISS)
@@ -926,13 +1065,16 @@ class BellTests(unittest.TestCase):
         reader.present.return_value = True
         reader.fix.return_value = SimpleNamespace(x=HUB["x"] + (0 if at_hub else 30), y=HUB["y"], reliable=True)
         record = record or crystal_route.BellRecord(tempfile.mkdtemp())
-        io = HudIo(kinds=kinds, regions=regions, prompts=prompts, name_only=name_only)
+        io = HudIo(kinds=kinds, regions=regions, prompts=prompts, name_only=name_only, fragments=fragments)
         run = crystal_route.Run(rt, reader=reader, world=FakeWorld(), io=io, record=record)
         calls, states, outcomes = [], [], list(outcomes)
         device = SimpleNamespace(inputs=0)
         times = iter(clock) if clock is not None else None
 
+        self.deadlines = []
+
         def press(rt_, frame, point, seconds, not_after=None):
+            self.deadlines.append((not_after, frame.index))
             calls.append((point, seconds, frame.index))
             states.append((record.attempt(day) or {}).get("state"))  # what was recorded when it was handed over
             outcome = outcomes.pop(0)
@@ -1016,6 +1158,79 @@ class BellTests(unittest.TestCase):
             clock=[SAFE_NOON, dt.datetime(2026, 11, 26, 20, 0, tzinfo=utc)])
         self.assertIsInstance(error, Stop)
         self.assertEqual((calls, final), ([], None))
+
+    def test_the_press_must_go_down_before_the_exclusion_window(self):
+        # Route review round 3, finding 6: checked at 03:49:59.900 UTC+8, the press's not_after is capped at the
+        # window's start (0.1 s later), so 300 ms in the record and dispatch path refuse it before contact-down
+        # (gesture.perform); decided again, the window has begun: stop, nothing pressed, no record.
+        import datetime as dt
+        utc = dt.timezone.utc
+        almost = dt.datetime(2026, 11, 26, 19, 49, 59, 900000, tzinfo=utc)
+        inside = dt.datetime(2026, 11, 26, 19, 50, 0, 200000, tzinfo=utc)
+        _result, calls, error, _states, final = self.ring(clock=[almost, almost, inside], outcomes=("expired",),
+                                                          day=dt.date(2026, 11, 26))
+        self.assertIsInstance(error, Stop)
+        self.assertIn("太近", str(error))
+        self.assertEqual((len(calls), final), (1, None))
+        not_after, _index = self.deadlines[0]
+        self.assertLess(not_after, 1.2)  # far below the frame's own expiry (its capture + MAX_DECISION_AGE_S)
+
+    def test_the_window_is_inclusive_at_full_precision(self):
+        import datetime as dt
+        from account_state import GAME_TIMEZONE as local
+        for when, inside in ((dt.datetime(2026, 11, 27, 3, 50, 0, 700000, tzinfo=local), True),
+                             (dt.datetime(2026, 11, 27, 3, 50, tzinfo=local), True),
+                             (dt.datetime(2026, 11, 27, 4, 10, tzinfo=local), True),
+                             (dt.datetime(2026, 11, 27, 3, 49, 59, 999999, tzinfo=local), False),
+                             (dt.datetime(2026, 11, 27, 4, 10, 0, 1, tzinfo=local), False)):
+            with self.subTest(when=when):
+                self.assertEqual(crystal_route.reset_window(when)[0], inside)
+        _inside, start = crystal_route.reset_window(dt.datetime(2026, 11, 27, 3, 49, 59, 900000, tzinfo=local))
+        self.assertEqual(start, dt.datetime(2026, 11, 27, 3, 50, tzinfo=local))
+        _inside, start = crystal_route.reset_window(dt.datetime(2026, 11, 27, 12, 0, tzinfo=local))
+        self.assertEqual(start, dt.datetime(2026, 11, 28, 3, 50, tzinfo=local))
+
+    def test_either_frame_with_a_void_focus_mark_restarts_the_pair(self):
+        # Route review round 3, finding 7: the deciding frame's focus mark expired, the confirming one current:
+        # the pair starts again; the press is decided on the next pair.
+        result, calls, error, _states, final = self.ring(valid=lambda frame: frame.index != 0)
+        self.assertIsNone(error)
+        self.assertTrue(result)
+        self.assertEqual([index for _point, _seconds, index in calls], [3])
+        self.assertEqual(final, "pressed")
+
+    def test_text_by_the_bell_blocks_the_press(self):
+        # Route review round 3, finding 2: any text the noise filters dropped near the bell (a gesture contact).
+        near = ((600, 560, 640, 580),)
+        for fragments in ([near, ()], [(), near]):
+            with self.subTest(fragments=fragments):
+                _result, calls, error, _states, final = self.ring(fragments=fragments)
+                self.assertIsInstance(error, Stop)
+                self.assertEqual((calls, final), ([], None))
+        result, calls, _error, _states, _final = self.ring(fragments=[((100, 100, 120, 120),)] * 2)
+        self.assertTrue(result)
+
+    def test_future_dated_records_are_refused_and_the_reserved_day_is_never_pruned(self):
+        # Route review round 3, finding 8.
+        import datetime as dt
+        record = crystal_route.BellRecord(tempfile.mkdtemp())
+        today = dt.date(2026, 11, 26)
+        record.path.parent.mkdir(parents=True)
+        later = {str(today + dt.timedelta(days=n)): {"state": "pressed", "at": "x"} for n in range(1, 15)}
+        record.path.write_text(json.dumps({"schema_version": 1, "attempts": later}), encoding="utf-8")
+        for call in (lambda: record.attempt(today), lambda: record.mark(today, "pressing")):
+            with self.assertRaises(crystal_route.RecordError) as caught:
+                call()
+            self.assertIn("比今天还晚", str(caught.exception))
+        self.assertEqual(json.loads(record.path.read_text(encoding="utf-8"))["attempts"], later)  # untouched
+        earlier = {str(today - dt.timedelta(days=n)): {"state": "pressed", "at": "x"} for n in range(1, 31)}
+        record.path.write_text(json.dumps({"schema_version": 1, "attempts": earlier}), encoding="utf-8")
+        record.mark(today, "pressing")
+        kept = json.loads(record.path.read_text(encoding="utf-8"))["attempts"]
+        self.assertEqual(len(kept), crystal_route.RECORD_KEEP)
+        self.assertEqual(record.attempt(today)["state"], "pressing")
+        record.mark(today, "pressed")
+        self.assertEqual(record.attempt(today)["state"], "pressed")
 
     def test_a_prompt_near_the_bell_blocks_the_press_one_elsewhere_does_not(self):
         # Phase B: hud_prompt (movement allowed, never tapped) is fine for the bell unless the prompt lies within
@@ -1111,9 +1326,25 @@ class EntryTests(unittest.TestCase):
             stamp = (since + dt.timedelta(seconds=1)).isoformat()
             rows_ = [{"timestamp": stamp, "message": "失败现场：读到「SENTINEL」", "display": None},
                      {"timestamp": stamp, "message": "detail", "display": None},
-                     {"timestamp": stamp, "message": "星海结晶路线：本次未完成。", "display": "星海结晶路线：本次未完成。"}]
+                     {"timestamp": stamp, "message": "星海结晶路线：本次未完成。", "display": "星海结晶路线：本次未完成。"},
+                     # route review round 3, finding 13: a result written before its display (the walk probe's
+                     # terminal report, teleport.announce) carries its report text and is printed
+                     {"timestamp": stamp, "message": "走路探针：已到达目标位置。", "display": None,
+                      "report": "走路探针：已到达目标位置。"}]
             (folder / "x.log").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows_), encoding="utf-8")
-            self.assertEqual(runner.agent_messages(Path(tmp), since), ["星海结晶路线：本次未完成。"])
+            self.assertEqual(runner.agent_messages(Path(tmp), since),
+                             ["星海结晶路线：本次未完成。", "走路探针：已到达目标位置。"])
+
+    def test_the_message_log_keeps_a_report_field_only_when_given(self):
+        import message_log
+        with tempfile.TemporaryDirectory() as tmp, patch.object(message_log, "_DIRECTORY", Path(tmp)):
+            self.assertTrue(message_log.write_message("a", None))
+            self.assertTrue(message_log.write_message("b", None, report="b"))
+            self.assertTrue(message_log.write_message("c", "c"))
+            entries = [json.loads(line) for path in Path(tmp).glob("*.log")
+                       for line in path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([("report" in e, e.get("report"), e["display"]) for e in entries],
+                         [(False, None, None), (True, "b", None), (False, None, "c")])
 
     def test_gameplay_runs_it_only_for_its_entry_and_kind_and_only_on_android(self):
         from action import gameplay

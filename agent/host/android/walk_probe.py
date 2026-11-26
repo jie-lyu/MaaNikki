@@ -123,7 +123,7 @@ def run(rt, options: dict) -> bool:
             # The message file's copy (blocking I/O), not shown yet. Not Runtime.log: when its file append fails it
             # displays the text at once; here a failed append is followed by the same rechecks before any display.
             from message_log import write_message
-            write_message(text, None)
+            write_message(text, None, report=text)
     _show(rt, text)  # shown only now: both rechecks passed immediately before it
     return decided[0] == "arrived" and not io.stopped()
 

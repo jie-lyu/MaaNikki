@@ -539,7 +539,7 @@ class Runtime:
         nothing sent, nothing halted."""
         from task_control import ForegroundChanged
         if send is not None:
-            from host.android.gesture import ABORTED, DONE, OVERRUN
+            from host.android.gesture import ABORTED, DONE, EXPIRED, OVERRUN
         self.check_focus()
         if focus_generation is not None and self._focus_generation != focus_generation:
             raise ForegroundChanged("前台切换后已取消本次输入，等待重新核对")
@@ -615,6 +615,7 @@ class Runtime:
                     raise DecisionExpired(f"安卓模拟器上的「{action}」依据的截图已经超过了有效时间，没有发送；要在新截图上重新判断。")
                 sent = True
                 state.sent_input(gesture=fresh)
+                expired = False
                 try:
                     with measure("input.action"):
                         if send is None:
@@ -623,6 +624,10 @@ class Runtime:
                         else:
                             performed = send()  # every contact it put down is lifted before it returns or raises
                             succeeded, cut_short = performed in (DONE, ABORTED), performed == ABORTED
+                            # the frame's not_after passed right before the first down: nothing was posted
+                            expired = performed == EXPIRED
+                    if expired:
+                        sent = False  # definitely unsent: cancelled and released below, nothing halted
                     outcome = "unconfirmed: overran its time cap" if send is not None and performed == OVERRUN \
                         else "unconfirmed"
                     if succeeded:
@@ -651,12 +656,17 @@ class Runtime:
                     from host import InputUnconfirmed
                     raise InputUnconfirmed(f"安卓模拟器上的「{action}」发出后没能确认完成（{type(error).__name__}: {error}），"
                                            "可能留下按住的触点，已停止所有输入；请检查模拟器后重新启动 MaaNikki。") from error
-                state.record_touch(action, fields, outcome)
+                if not expired:
+                    state.record_touch(action, fields, outcome)
             finally:
                 if not sent:
                     if intent:
                         state.record_touch(action, fields, "cancelled")  # logged as not sent
                     self._release_touch(state)
+            if expired:
+                from host.android.gesture import DecisionExpired
+                raise DecisionExpired(f"安卓模拟器上的「{action}」依据的截图在第一个触点按下之前超过了有效时间，没有发送；"
+                                      "要在新截图上重新判断。")
             if succeeded:
                 self._release_touch(state)
             else:
@@ -713,7 +723,8 @@ class Runtime:
         def keep_queue():  # a lift is still queued behind a pending job: the tasker must not be stopped (it clears it)
             state.lifts_outstanding = True
         return self._dispatch_touch(self.GESTURE_ACTION, fields, None, source_frame,
-                                    send=lambda: perform(self.controller, gesture, abort, keep_queue),
+                                    send=lambda: perform(self.controller, gesture, abort, keep_queue,
+                                                         not_after),
                                     not_after=not_after)
 
     GESTURE_ACTION = "Gesture"

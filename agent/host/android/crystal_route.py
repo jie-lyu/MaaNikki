@@ -12,9 +12,9 @@ input, the map card read again for the 星光结晶 count and the map left by it
 character stays where the walk ended: on the route, on the ground). Success: the walk arrived, both counts read, the
 final HUD confirmed and no stop requested.
 
-The run starts from the open world with the quest tracker showing a name and its distance: before the map opens the
-map is not known, and a name-only tracker is accepted only on 星海 (move.first_frame_rule); after the teleports the
-map is 星海. Nothing on the route is a prompt to tap: route 3 has only plain points and one wait, and its crystals
+The run starts from the open world: before the map opens the map is not known; the tap that opens it may be decided
+on a name-only tracker (a restart on 星海), and the map must then show the 星海 card positively (Teleport.open_map);
+walking and the bell accept a name-only tracker only on 星海 (move.first_frame_rule), which the teleports establish. Nothing on the route is a prompt to tap: route 3 has only plain points and one wait, and its crystals
 are collected by walking through them (as on PC, navigation.daily_route: crystal routes complete by traversal).
 
 This version always walks route 3 (PC picks one of eight routes from the crystal markers the bell reveals on the map;
@@ -26,7 +26,9 @@ The bell record (BellRecord): config/android/bell_attempts.json in the data dire
 yet (as the 兑换码 record). It is written right before the press is handed to the device path and removed only when
 the device input count (DeviceInputState.inputs, counted right before a touch's first contact goes down) shows that
 nothing went down; a press that may have gone down stays recorded, whatever it raised. The card, the record's key
-and the press belong to one game day: no press within RESET_WINDOW_MIN of the 04:00 reset or once the day changed.
+and the press belong to one game day: the card's from its own captures' times (Teleport.card), no press within
+RESET_WINDOW_MIN of the 04:00 reset (inclusive) or once the day changed, and the press's deadline capped at the next
+window's start. A record dated after the current game day is refused, never pruned.
 
 Never a user task, gated like MaaNikki_AndroidWalkProbe: its pipeline node exists only in
 resource_android/pipeline/android_crystal_route.json; it is not in agent/host/android/tasks.json, interface.json or any
@@ -36,14 +38,15 @@ DATA_ROOT/debug/android_route/<time>/ (walk.jsonl).
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import math
 from pathlib import Path
+import time
 
 from host.android import actions, pages
 from host.android.move import BELL_RADIUS_PX
-from host.android.teleport import HUD_BELL, STARSEA, STARSEA_MAP, Stop, Teleport, guard, say, stopping
+from host.android.teleport import HUD_BELL, STARSEA, STARSEA_MAP, Stop, Teleport, announce, guard, say, stopping
 
 ENTRY = "MaaNikki_AndroidCrystalRoute"
 KIND = "android_crystal_route"
@@ -66,6 +69,9 @@ RESET_MINUTE = 4 * 60  # the daily reset, 04:00 UTC+8 (account_state.game_day)
 RESET_WINDOW_MIN = 10  # no press from 03:50 to 04:10
 MANUAL = "今天已经尝试过按铃（有当天的记录），没有再按；请手动打开星海地图看卡片，仍显示尚未召唤摇铃就手动摇一次铃"
 RECORD_BROKEN = "安卓按铃记录读不出或写不进去，没有按铃"
+RECORD_FUTURE = ("安卓按铃记录里有比今天还晚的日期（系统时间可能被调回过，或记录文件是从别处恢复的），没有按铃；"
+                 "请确认后删除数据目录里的 config/android/bell_attempts.json")
+RECORD_KEEP = 14  # days kept (the day being reserved always among them)
 
 
 def checkpoint(name: str) -> dict:
@@ -81,7 +87,8 @@ def checkpoint(name: str) -> dict:
 
 def record_key(day) -> str:
     """The key of a bell attempt in the record: the game day alone, for this data directory. The one place the key
-    is made: once the phone client's UID is read from the HUD, the account joins it here (per-account records)."""
+    is made: once the phone client's UID is read from the HUD, the account joins it here (per-account records). Keys
+    sort in day order (ISO dates; BellRecord compares them for pruning and future-dated entries)."""
     return str(day)
 
 
@@ -108,17 +115,28 @@ class BellRecord:
             raise RecordError(RECORD_BROKEN)
         return data
 
-    def attempt(self, day) -> dict | None:
-        return self.load()["attempts"].get(record_key(day))
+    @staticmethod
+    def _current(attempts, day) -> dict:
+        """``attempts`` when none is dated after game day ``day`` (the card's: the current game day); otherwise
+        RecordError (RECORD_FUTURE): a clock set back or a journal restored from elsewhere is refused, never pruned
+        (route review round 3, finding 8)."""
+        if any(key > record_key(day) for key in attempts):
+            raise RecordError(RECORD_FUTURE)
+        return attempts
 
-    def _write(self, change):
+    def attempt(self, day) -> dict | None:
+        return self._current(self.load()["attempts"], day).get(record_key(day))
+
+    def _write(self, day, change):
         from file_io import exclusive_file_lock, write_json
         try:
             with exclusive_file_lock(self.path.with_name("bell_attempts.lock")):
                 data = self.load()
-                change(data["attempts"])
-                keep = sorted(data["attempts"])[-14:]  # two weeks are plenty
-                data["attempts"] = {day: data["attempts"][day] for day in keep}
+                attempts = self._current(data["attempts"], day)
+                change(attempts)
+                # RECORD_KEEP days (two weeks are plenty); the day being written is never pruned
+                keep = set(sorted(attempts)[-RECORD_KEEP:]) | ({record_key(day)} & set(attempts))
+                data["attempts"] = {key: attempts[key] for key in sorted(keep)}
                 write_json(self.path, data)
         except OSError as error:
             raise RecordError(RECORD_BROKEN) from error
@@ -126,17 +144,17 @@ class BellRecord:
     def mark(self, day, state):
         if state not in RECORD_STATES:
             raise ValueError(state)
-        self._write(lambda attempts: attempts.__setitem__(record_key(day), {
+        self._write(day, lambda attempts: attempts.__setitem__(record_key(day), {
             "state": state, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}))
 
     def clear(self, day):
-        self._write(lambda attempts: attempts.pop(record_key(day), None))
+        self._write(day, lambda attempts: attempts.pop(record_key(day), None))
 
 
 class Run:
     def __init__(self, rt, *, reader=None, world=None, io=None, record=None):
         self.rt = rt
-        self.map = Teleport(rt, world, io=io, reader=reader)
+        self.map = Teleport(rt, world, io=io, reader=reader, now=lambda: now_utc())
         self._record = record
 
     @property
@@ -184,7 +202,10 @@ class Run:
         """One bell press for game day ``day`` (the day the not-rung card was read on), decided on a HUD frame at the
         hub by the walker's first-frame rule and confirmed on the next by its later-frame rule (hud_pair); the gesture
         carries the confirming frame, the latest capture, and its expiry. Refused within RESET_WINDOW_MIN of the
-        04:00 reset or once the game day is no longer ``day``. The attempt is recorded before the press is handed
+        04:00 reset (inclusive, at full precision) or once the game day is no longer ``day``, and the press must go
+        down before the next exclusion window starts (its not_after is capped there; gesture.perform checks it right
+        before contact-down). The decision pair starts again when either frame's focus mark is no longer valid. The
+        attempt is recorded before the press is handed
         over and removed only when the device input count (DeviceInputState.inputs, counted right before a touch's
         first contact goes down) shows that nothing went down: an expired decision or a focus change then decides
         again, a stop seen before contact-down ends without a record. Anything that may have gone down keeps the
@@ -197,17 +218,24 @@ class Run:
         if self.record.attempt(day) is not None:
             raise Stop(MANUAL, [])
         for _attempt in range(self.rt.TOUCH_KEY_ATTEMPTS):
-            pair = self.map.hud_pair("按铃", self.bell_target(hub), STARSEA_MAP, (BELL_POINT, BELL_RADIUS_PX))
+            pair = self.map.hud_pair("按铃", self.bell_target(hub), STARSEA_MAP, (BELL_POINT, BELL_RADIUS_PX),
+                                     contact=True)
             if pair is None:
                 return False
-            _first, second, box = pair
-            same_day(day, [second.frame])
+            first, second, box = pair
+            if not (self.rt._frame_still_valid(first.frame) and self.rt._frame_still_valid(second.frame)):
+                continue  # a focus change voided either frame of the pair (route review round 3, finding 7)
+            clock = time.monotonic()
+            window = same_day(day, [second.frame])  # seconds until the next exclusion window starts
+            not_after = min(second.at + MAX_DECISION_AGE_S, clock + window)
             before = device_input().inputs
             self.record.mark(day, "pressing")  # raises when it cannot be written: then nothing is pressed
             try:
-                sent = gesture.bell_step(self.rt, second.frame, touch_point(box), BELL_S,
-                                         not_after=second.at + MAX_DECISION_AGE_S)
-            except (gesture.DecisionExpired, ForegroundChanged):
+                sent = gesture.bell_step(self.rt, second.frame, touch_point(box), BELL_S, not_after=not_after)
+            except gesture.DecisionExpired:  # raised before anything was posted (the dispatch's last check, or
+                self.record.clear(day)        # gesture.perform right before the first down): definitely unsent
+                continue
+            except ForegroundChanged:
                 if device_input().inputs != before:  # not raised before contact-down after all: keep the record
                     raise
                 self.record.clear(day)
@@ -249,7 +277,7 @@ class Run:
         card = self.open_card(None)
         if card is None:
             return False
-        day = game_day_now()  # the card's day: the record's key and the only day the press may happen on
+        day = self.map.card_day  # the card's own day (its captures): the record's key, the only day to press on
         if card.kind == "not_rung":
             same_day(day, [self.map.card_frame])
             if self.record.attempt(day) is not None:
@@ -262,7 +290,7 @@ class Run:
             card = self.open_card(STARSEA_MAP)
             if card is None:
                 return False
-            if game_day_now() != day:
+            if self.map.card_day != day:
                 raise Stop("按铃之后已经过了每日 4 点重置，卡片读数不能说明这次按铃的结果", [self.map.card_frame])
             if card.kind != "rung":
                 raise Stop("按铃之后地图卡片仍然显示今天尚未召唤摇铃，没有再按", [self.map.card_frame])
@@ -296,8 +324,8 @@ class Run:
         result = walker.walk(route_goals(route), hint, route.timeout, start_radius=route.start_radius)
         io.record("result", {"outcome": result.outcome, "message": result.message, "position": result.position,
                              "attempted": result.attempted, "confirmed": result.confirmed}, None)
-        # after the blocking write: a stop published meanwhile reports nothing (say checks it)
-        say(self.rt, f"3 号路线：{result.message}（发出 {result.attempted} 步，完成 {result.confirmed} 步）")
+        # after the blocking write: a stop published meanwhile, or during the message's own write, shows nothing
+        announce(self.rt, f"3 号路线：{result.message}（发出 {result.attempted} 步，完成 {result.confirmed} 步）")
         return result
 
     def read_after(self, result):
@@ -318,10 +346,10 @@ class Run:
     def report(self, before, after):
         if before is not None and after is not None:
             gained = after - before
-            say(self.rt, f"星光结晶：路线前 {before}/30，路线后 {after}/30（本趟 +{gained}）。" if gained >= 0 else
-                f"星光结晶：路线前 {before}/30，路线后 {after}/30（读数变少，收集情况不确定）。")
+            announce(self.rt, f"星光结晶：路线前 {before}/30，路线后 {after}/30（本趟 +{gained}）。" if gained >= 0
+                     else f"星光结晶：路线前 {before}/30，路线后 {after}/30（读数变少，收集情况不确定）。")
         else:
-            say(self.rt, "没有读到路线前后的星光结晶数量，收集情况没有看到。")
+            announce(self.rt, "没有读到路线前后的星光结晶数量，收集情况没有看到。")
 
 
 def now_utc():
@@ -333,17 +361,32 @@ def game_day_now():
     return game_day(now_utc())
 
 
-def same_day(day, frames=()):
-    """Stop unless it is still game day ``day`` and not within RESET_WINDOW_MIN of the 04:00 reset (UTC+8): a press
-    near the reset could land on the next day, after the card and the record spoke for this one."""
-    from account_state import GAME_TIMEZONE, game_day
-    now = now_utc()
+def reset_window(now):
+    """``(inside, start)`` for the exclusion window RESET_WINDOW_MIN either side of the 04:00 reset (UTC+8), at full
+    precision with both ends inclusive (03:50:00.000 and 04:10:00.000 are inside): whether ``now`` lies in one, and
+    otherwise when the next one starts (an aware datetime)."""
+    from account_state import GAME_TIMEZONE
     local = now.astimezone(GAME_TIMEZONE)
-    minutes = local.hour * 60 + local.minute + local.second / 60
-    if abs(minutes - RESET_MINUTE) < RESET_WINDOW_MIN:
+    reset = local.replace(hour=RESET_MINUTE // 60, minute=RESET_MINUTE % 60, second=0, microsecond=0)
+    half = timedelta(minutes=RESET_WINDOW_MIN)
+    resets = [reset + timedelta(days=offset) for offset in (-1, 0, 1)]
+    if any(r - half <= local <= r + half for r in resets):
+        return True, None
+    return False, min(r - half for r in resets if r - half > local)
+
+
+def same_day(day, frames=()) -> float:
+    """Stop unless it is still game day ``day`` and not within the exclusion window around the 04:00 reset
+    (reset_window): a press near the reset could land on the next day, after the card and the record spoke for this
+    one. Returns the seconds until the next window starts (a press's not_after is capped there)."""
+    from account_state import game_day
+    now = now_utc()
+    inside, start = reset_window(now)
+    if inside:
         raise Stop("离每日 4 点重置太近，没有按铃", list(frames))
     if game_day(now) != day:
         raise Stop("已经过了每日 4 点重置，读到的地图卡片不能代表今天，没有按铃", list(frames))
+    return (start - now).total_seconds()
 
 
 def run(rt, options: dict) -> bool:

@@ -24,8 +24,11 @@ def message_scope(action):
         _ACTION.reset(token)
 
 
-def write_message(text, display):
+def write_message(text, display, *, report=None):
     """Append before UI delivery, including file-only and stopped-task messages.
+
+    ``report``: a result written before its display (Android: the text is displayed only after the stop is asked
+    again), kept as its own field so tools can show it; None (every other caller) adds nothing to the record.
 
     Return False on an IO failure so the caller can keep detail visible rather
     than silently discarding the only human-readable copy.
@@ -33,6 +36,8 @@ def write_message(text, display):
     now = datetime.now().astimezone()
     record = {"timestamp": now.isoformat(timespec="milliseconds"), "pid": os.getpid(),
               "action": _ACTION.get(), "message": text, "display": display}
+    if report is not None:
+        record["report"] = report
     try:
         with _LOCK:
             _DIRECTORY.mkdir(parents=True, exist_ok=True)

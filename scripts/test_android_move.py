@@ -78,6 +78,7 @@ class FakeIo:
         self.regions = lambda number: ("登上鸣鸣列车", move.TRACKER_DISTANCE)  # the tracker's rows on frame ``number``
         self.name_only = lambda number: False  # Verdict.name_only on frame ``number``
         self.prompts = lambda number: (PROMPT_EXTENT,) if self.kinds_seen.get(number) == "hud_prompt" else ()
+        self.fragments = lambda number: ()  # Verdict.fragments: text the noise filters dropped
         self.kinds_seen = {}
 
     def stopped(self):
@@ -102,7 +103,8 @@ class FakeIo:
         self.started[frame.number] = at
         self.kinds_seen[frame.number] = kind
         return Observation(frame, kind, at, reason, self.clock(), self.regions(self.observed),
-                           name_only=self.name_only(self.observed), prompts=self.prompts(self.observed))
+                           name_only=self.name_only(self.observed), prompts=self.prompts(self.observed),
+                           fragments=self.fragments(self.observed))
 
     BELL_S = 4.0
 
@@ -1357,6 +1359,10 @@ class NameOnlyTrackerTests(unittest.TestCase):
         self.assertEqual(move.first_frame_rule(alone, reader, "starsea")[0], "ok")
         for map_id in (None, "miraland"):  # refused at once, not waited through: the evidence will not change
             self.assertEqual(move.first_frame_rule(alone, reader, map_id)[0], "stop")
+        # route review round 3, finding 9: the map-opening tap (map not known, map_unknown_ok) may use it; a known
+        # other map never
+        self.assertEqual(move.first_frame_rule(alone, reader, None, map_unknown_ok=True)[0], "ok")
+        self.assertEqual(move.first_frame_rule(alone, reader, "miraland", map_unknown_ok=True)[0], "stop")
 
     def test_a_distance_appearing_after_a_name_only_start_stops(self):
         # Route review round 2, finding 6: a new 3米 row read on a later frame (recognised at any score) is a change.
@@ -1658,6 +1664,8 @@ class DevEntryTests(unittest.TestCase):
         rt.context.run_task.assert_called_once()
         rt.log.assert_not_called()  # the file copy went straight to the message file: no Runtime.log fallback
         self.assertIsNone(rt.written.call_args.args[1])  # written as a file-only message
+        # route review round 3, finding 13: marked as a report, so the dev runner prints it (fixed text, no OCR)
+        self.assertEqual(rt.written.call_args.kwargs["report"], rt.written.call_args.args[0])
 
     def test_6_a_failed_message_file_append_with_a_stop_shows_nothing(self):
         flag = {"stop": False}
@@ -1821,6 +1829,68 @@ class PromptColumnTests(unittest.TestCase):
         self.assertFalse(move.controls_clear((250, 540, 300, 600)))  # on the joystick ring
         self.assertFalse(move.controls_clear((300, 560, 340, 580)))  # next to it (within CONTROL_CLEAR_PX)
         self.assertFalse(move.controls_clear((600, 600, 640, 640), bell=move.RuntimeIo.BELL_POINT))
+
+    def test_the_saved_lines_are_thin_and_the_saved_icons_hexagons(self):
+        for index in range(len(PROMPT_ROWS)):
+            with self.subTest(index):
+                frame = _prompt_frame(index)
+                self.assertTrue(move.line_thin(frame))
+                self.assertIsNotNone(move.prompt_icon(frame))
+
+    def test_a_thick_header_or_a_white_l_is_no_prompt(self):
+        # Route review round 3, finding 2: a 29 px thick red panel header and a white L passed the line and hexagon
+        # checks; with a 点击继续 row in the column the classifier returned hud_prompt. Now neither passes.
+        frame = _prompt_frame(0)
+        header, letter = frame.copy(), frame.copy()
+        header[300:329, 740:1040] = (40, 40, 210)  # red, warm enough for the gold test on every row
+        letter[330:365, 755:792] = 90
+        letter[337:357, 767:775] = 255  # an L: a 8 x 20 bar
+        letter[349:357, 767:791] = 255  # and a 24 x 8 foot (288 px, fill 0.6 of its 24 x 20 box)
+        self.assertIsNotNone(move.prompt_line(frame))
+        self.assertIsNone(move.prompt_line(header))
+        self.assertFalse(move.line_thin(header))
+        self.assertIsNone(move.prompt_icon(letter))
+        both = header.copy()
+        both[330:365, 740:1040] = letter[330:365, 740:1040]
+        row = ("点击继续", [794, 329, 110, 31])
+        for name, image in (("header", header), ("letter", letter), ("both", both)):
+            with self.subTest(name):
+                self.assertEqual(frame_verdict(image, row).kind, "other")
+        self.assertEqual(frame_verdict(frame, row).kind, "hud_prompt")  # the seen shape: words are not read
+
+    def test_single_characters_near_a_contact_are_text_there(self):
+        # Route review round 3, finding 2: 「确」 and 「认」 over the jump button, each a single high-score character,
+        # were dropped one by one and the walker put the jump contact down inside 认. Now the dropped fragments are
+        # kept (adjacent ones as one block) and any of them near a contact the gesture uses stops.
+        frame = _prompt_frame(0)
+        verdict = frame_verdict(frame, PROMPT_ROWS[0], ("确", [940, 525, 22, 24], 0.97), ("认", [964, 525, 22, 24], 0.97))
+        self.assertEqual(verdict.kind, "hud_prompt")  # still too short to count as text on its own
+        self.assertEqual(verdict.fragments, ((940, 525, 986, 549),))  # judged together
+        obs = move.Observation(frame, verdict.kind, 0.0, prompts=verdict.prompts, fragments=verdict.fragments)
+        self.assertFalse(move.contacts_clear(obs, jump=True))
+        self.assertTrue(move.contacts_clear(obs, jump=False))  # far from the joystick and the bell
+        low = frame_verdict(frame, ("确认", [940, 525, 46, 24], 0.2))  # a low-score row is kept the same way
+        self.assertFalse(move.contacts_clear(move.Observation(frame, low.kind, 0.0, fragments=low.fragments),
+                                             jump=True))
+        far = frame_verdict(frame, ("丶", [640, 140, 12, 12], 0.9))
+        self.assertTrue(move.contacts_clear(move.Observation(frame, far.kind, 0.0, fragments=far.fragments),
+                                            jump=True, bell=move.RuntimeIo.BELL_POINT))
+
+    def test_the_walker_stops_on_text_by_a_contact_it_would_touch(self):
+        for name, extent, goal, options in (
+                ("确认 over the jump button, the step jumps", (940, 525, 986, 549), Goal(0, -5, jump=True),
+                 {"allow_jump": True}),
+                ("a character by the joystick", (300, 600, 312, 620), Goal(0, -12), {})):
+            with self.subTest(name):
+                walk, io = walker(World((0, 0), yaw=0.0), **options)
+                io.fragments = lambda n, extent=extent: (extent,)
+                result = walk.walk([goal], (0, 0), 60)
+                self.assertEqual((result.outcome, io.steps), ("screen", []))
+                self.assertEqual(io.saved[0][2].number, 1)
+                self.assertIn("文字", result.message)
+        walk, io = walker(World((0, 0), yaw=0.0))
+        io.fragments = lambda n: ((940, 525, 986, 549),)  # by the jump button, and the step does not jump
+        self.assertTrue(walk.walk([Goal(0, -5)], (0, 0), 60).ok)
 
     def test_nothing_in_the_walk_taps(self):
         source = Path(move.__file__).read_text(encoding="utf-8")

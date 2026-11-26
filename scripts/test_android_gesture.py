@@ -1099,6 +1099,37 @@ class NotAfterTests(GestureTestCase):
                 g.joystick_step(rt, self.frame, 270, 1, .5, not_after=bad)
         self.assert_nothing_sent()
 
+    def test_perform_checks_the_expiry_right_before_the_first_down(self):
+        # Route review round 3, finding 5: perform receives not_after and checks it immediately before the first
+        # post_touch_down; past it, EXPIRED with nothing posted.
+        for gesture in (g.joystick(270, 1, .5, .2), g.bell_press((616, 612), 4.0)):
+            with self.subTest(gesture=gesture.name):
+                self.controller.calls.clear()
+                self.assertEqual(g.perform(self.controller, gesture, lambda: False,
+                                           not_after=self.clock.now - 0.001), g.EXPIRED)
+                self.assertEqual(self.controller.calls, [])
+        self.assertEqual(g.perform(self.controller, g.joystick(270, 1, .5), lambda: False,
+                                   not_after=self.clock.now + 10), g.DONE)
+
+    def test_a_stall_after_the_dispatchs_last_check_is_refused_before_contact_down(self):
+        # Codex's scenario: the dispatcher's last check passes (its clock still before the expiry), then a
+        # scheduling stall: by the gesture's first post the frame has aged out (the gesture's clock is past it).
+        # Joystick and bell: DecisionExpired, nothing posted, nothing halted, the intent logged as cancelled.
+        import time as real_time
+        for name, send in (("joystick", lambda rt, frame, t: g.joystick_step(rt, frame, 270, 1, .5, not_after=t)),
+                           ("bell", lambda rt, frame, t: g.bell_step(rt, frame, (616, 612), 4.0, not_after=t))):
+            with self.subTest(name):
+                self.controller.calls.clear()
+                rt, frame = self.runtime(), self.fresh_frame()
+                self.clock.now = real_time.monotonic() + 10  # the stall, on the gesture's clock
+                before = list(self.outcomes())
+                with android_run(), self.assertRaises(g.DecisionExpired):
+                    send(rt, frame, real_time.monotonic() + 1)
+                self.assertEqual(self.controller.calls, [])
+                self.assertFalse(self.state.halted)
+                self.assertFalse(self.state.marker().exists())
+                self.assertEqual(self.outcomes()[len(before):], [("Gesture", "sending"), ("Gesture", "cancelled")])
+
 
 
 class MovementNotAfterTests(GestureTestCase):
