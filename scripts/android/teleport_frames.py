@@ -3,6 +3,7 @@
 repository). No device, no input. Needs ./maafw.
 
     python -I -X utf8 scripts/android/teleport_frames.py [--build DIR]
+        [--max-frames N] [--max-seconds S] [--max-rss-mb MB]
 
 DIR defaults to .build/android. For each frame of DIR/map-survey/frames it prints what the task would recognise and
 decide there, through the real nodes (both resource layers):
@@ -15,6 +16,7 @@ decide there, through the real nodes (both resource layers):
   - on the HUD frames (DIR/map-survey and DIR/survey/walk): the bell button, the walk's screen class and whether the
     frame passes the walker's first-frame rule for the minimap tap or the bell (move.first_frame_rule, off 星海 and on it), with
     the tap's guards.
+The frames run on one recognizer through scripts/android/replay.py (its frame, wall-time and memory limits).
 """
 from __future__ import annotations
 
@@ -45,11 +47,9 @@ class _Rt:
         return True
 
 
-def judge(world, frame_path):
-    import cv2
+def judge(world, frame):
     from host.android import actions, move, pages, teleport, touch_point
     from host.android.crystal_route import BELL_POINT
-    frame = cv2.imread(str(frame_path))
 
     def run(recognize):
         screen = actions.read_screen(recognize)
@@ -136,18 +136,22 @@ def judge(world, frame_path):
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--build", default=str(ROOT / ".build" / "android"))
+    import replay
+    replay.add_arguments(parser)
     args = parser.parse_args()
     build = Path(args.build)
-    import probe
     from host.android.teleport import WorldMap
     world = WorldMap(resource=ROOT / "resource")
     frames = sorted((build / "map-survey" / "frames").glob("*.png")) + sorted((build / "survey" / "walk").glob("*.png"))
-    keep = []
-    for path in frames:
-        recognizer = probe.Recognizer(probe.frame_controller(path), android_layer=True)
-        keep.append(recognizer)  # several recognizers in one process: keep them alive
-        result = recognizer.on_one_frame(judge(world, path))
-        print(json.dumps({"frame": f"{path.parent.name}/{path.name}", **result}, ensure_ascii=False))
+    try:
+        # one recognizer for every frame, under the replay's frame, time and memory limits
+        with replay.Replay(limits=replay.limits_from(args)) as session:
+            for path, result in session.run(frames, lambda recognizer, path, image:
+                                            recognizer.on_one_frame(judge(world, image))):
+                print(json.dumps({"frame": f"{path.parent.name}/{path.name}", **result}, ensure_ascii=False))
+    except replay.ReplayLimit as error:
+        print(error, file=sys.stderr)
+        return 2
     return 0
 
 

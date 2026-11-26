@@ -572,6 +572,25 @@
    "known_failures": [],
    "skips": []
   },
+  "test_android_replay.py": {
+   "tests": [
+    "FrameworkTests.test_one_recognizer_sees_each_frame_and_is_freed",
+    "LimitTests.test_a_replay_over_more_frames_than_the_limit_is_refused_before_any_frame",
+    "LimitTests.test_current_rss_reads_this_process",
+    "LimitTests.test_the_command_line_limits",
+    "LimitTests.test_the_guard_reads_memory_right_after_the_recognizer_is_built",
+    "LimitTests.test_the_memory_guard_stops_the_replay_above_the_limit",
+    "LimitTests.test_the_wall_time_limit_stops_the_replay",
+    "OneRecognizerTests.test_accept_skips_frames_without_a_callback_or_a_count",
+    "OneRecognizerTests.test_replaying_many_frames_builds_one_recognizer_and_shows_each_frame_to_it",
+    "ReleaseTests.test_an_unreadable_frame_raises_and_releases",
+    "ReleaseTests.test_everything_is_released_when_the_callback_raises",
+    "ReleaseTests.test_run_outside_the_block_is_refused",
+    "ReleaseTests.test_the_controller_is_freed_when_the_recognizer_cannot_be_built"
+   ],
+   "known_failures": [],
+   "skips": []
+  },
   "test_android_runner.py": {
    "tests": [
     "RunnerTests.test_a_blocking_step_that_overruns_ends_with_the_adb_advice",

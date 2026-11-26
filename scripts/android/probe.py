@@ -466,6 +466,20 @@ class Recognizer:
     def run(self, name: str, *, any_roi: bool = False) -> dict:
         return self.run_many([name], any_roi=any_roi)[0]
 
+    def release(self) -> None:
+        """Free the tasker and the resource (OCR models, templates: about 100 MB once OCR ran) now. The controller
+        is the caller's. The object is unusable afterwards; a second call does nothing."""
+        tasker, resource = getattr(self, "tasker", None), getattr(self, "resource", None)
+        self.tasker = self.resource = self._action = None  # the action's closure holds self: break the cycle
+        self._request, self._results, self.last_frame = ([], False, {}), None, None
+        if tasker is not None:
+            destroy_native(tasker)
+            tasker._resource_holder = tasker._controller_holder = None
+        if resource is not None:
+            destroy_native(resource)
+            resource._custom_action_holder.clear()
+            resource._custom_recognition_holder.clear()
+
 
 def judged(name: str, reco) -> dict:
     """JSON-friendly summary of a RecognitionDetail (None when the recognition could not start).
@@ -605,28 +619,45 @@ def agent_recognitions() -> dict:
     return instances
 
 
-def frame_controller(path: Path):
-    """A controller whose every capture is the saved frame at `path`, scaled to 720p by the core like a
-    live capture. It refuses every input. (The pip runtime has no MaaDbgControlUnit.)"""
+def read_frame(path: Path):
+    """The saved frame at `path` as a BGR array; refused unless it is 16:9 (the resources are 1280x720 and another
+    aspect would not scale to them)."""
     import cv2
-    from maa.controller import CustomController
 
     image = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if image is None:
         raise ProbeError(f"could not read {path}")
     height, width = image.shape[:2]
-    if abs(width * 9 - height * 16) > 16:  # resources are 1280x720; another aspect would not scale to it
+    if abs(width * 9 - height * 16) > 16:
         raise ProbeError(f"{path} is {width}x{height}, not 16:9")
+    return image
+
+
+def frame_controller(path: Path | None = None):
+    """A controller whose every capture is the saved frame at `path`, scaled to 720p by the core like a
+    live capture. It refuses every input. (The pip runtime has no MaaDbgControlUnit.)
+
+    Its frame is replaceable: ``controller.show(image)`` makes the next capture that image (the core rescales a
+    frame of another 16:9 size). Without `path` it captures nothing until shown one. Replays over many saved frames
+    use one such controller through scripts/android/replay.py, never one controller or Recognizer per frame."""
+    from maa.controller import CustomController
 
     class FrameController(CustomController):
+        image = None
+
+        def show(self, image):
+            self.image = image
+
         def connect(self):
             return True
 
         def request_uuid(self):
-            return f"android-probe-frame:{path}"
+            return f"android-probe-frame:{path}" if path is not None else "android-probe-frame"
 
         def screencap(self):
-            return image
+            if self.image is None:
+                raise ProbeError("no frame shown")
+            return self.image
 
         def start_app(self, intent):
             return False
@@ -656,10 +687,41 @@ def frame_controller(path: Path):
         key_down = key_up = click_key
 
     controller = FrameController()
+    if path is not None:
+        controller.show(read_frame(path))
     controller.set_screenshot_target_short_side(FRAME[1])
     if not controller.post_connection().wait().succeeded:
-        raise ProbeError(f"could not load {path} as a frame")
+        raise ProbeError(f"could not load {path} as a frame" if path is not None else "could not connect the frames")
     return controller
+
+
+def destroy_native(obj) -> None:
+    """Free a maafw Tasker, Resource or Controller now instead of whenever the garbage collector gets to it (the
+    binding frees them only in __del__); its __del__ then does nothing. Free a tasker before what it is bound to."""
+    from maa.controller import Controller
+    from maa.library import Library
+    from maa.resource import Resource
+    from maa.tasker import Tasker
+
+    for kind, destroy in ((Tasker, "MaaTaskerDestroy"), (Resource, "MaaResourceDestroy"),
+                          (Controller, "MaaControllerDestroy")):
+        if isinstance(obj, kind):
+            if getattr(obj, "_handle", None) and getattr(obj, "_own", False):
+                getattr(Library.framework(), destroy)(obj._handle)
+            obj._handle = None
+            return
+    raise TypeError(f"not a maafw object: {type(obj).__name__}")
+
+
+def _replay_module():
+    """scripts/android/replay.py, sharing this module with it also when probe.py runs as a script (-I leaves the
+    script's folder off sys.path)."""
+    sys.modules.setdefault("probe", sys.modules[__name__])
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import replay
+    return replay
 
 
 def recognition_nodes(pattern: str | None) -> list[str]:
@@ -1182,13 +1244,17 @@ def android_screen(recognize) -> dict:
 
 def cmd_screen(args) -> int:
     """Classify frames with the Android action table (resource/ plus resource_android/). Sends no input."""
-    if args.live:
-        frames = [("live", connect(args).controller)]
-    else:
-        frames = [(path, frame_controller(Path(path))) for path in args.frame]
-    for name, controller in frames:
-        result = Recognizer(controller, android_layer=True).on_one_frame(android_screen)
+    def show(name, result):
         print(json.dumps({"frame": str(name), **result}, ensure_ascii=False, default=_jsonable), flush=True)
+
+    if args.live:
+        show("live", Recognizer(connect(args).controller, android_layer=True).on_one_frame(android_screen))
+        return 0
+    replay = _replay_module()  # saved frames: one recognizer for all of them, under the replay's limits
+    with replay.Replay() as session:
+        for path, result in session.run(args.frame,
+                                        lambda recognizer, _path, _image: recognizer.on_one_frame(android_screen)):
+            show(path, result)
     return 0
 
 
@@ -1211,12 +1277,8 @@ def cmd_fix(args) -> int:
     from host.android.minimap import MinimapReader
 
     reader = MinimapReader(args.map, RESOURCE)
-    if args.live:
-        sources = [("live", connect(args).controller)]
-    else:
-        sources = [(path, frame_controller(Path(path))) for path in args.frame]
-    for name, controller in sources:
-        recognizer = Recognizer(controller, android_layer=True)
+
+    def judge(recognizer, name, _image=None):
         verdict = recognizer.on_one_frame(
             lambda recognize: move.classify(actions.read_screen(recognize), recognize))
         frame = recognizer.last_frame
@@ -1225,6 +1287,14 @@ def cmd_fix(args) -> int:
                           "tracker": [_opaque(entry) for entry in verdict.regions], "chevron": reader.present(frame),
                           "fix": fix.log(), "from_hint": round(math.dist((fix.x, fix.y), args.hint), 2)},
                          ensure_ascii=False), flush=True)
+
+    if args.live:
+        judge(Recognizer(connect(args).controller, android_layer=True), "live")
+        return 0
+    replay = _replay_module()  # saved frames: one recognizer for all of them, under the replay's limits
+    with replay.Replay() as session:
+        for _ in session.run(args.frame, judge):
+            pass
     return 0
 
 

@@ -1048,11 +1048,12 @@ class ReviewRound3Tests(unittest.TestCase):
         sys.path.insert(0, str(ROOT / "scripts" / "android"))
         import probe
         verdict = move.Verdict("hud", "", ("登上鸣鸣列车", move.TRACKER_DISTANCE), ())
-        recognizer = SimpleNamespace(on_one_frame=lambda function: verdict, last_frame=object())
+        recognizer = SimpleNamespace(on_one_frame=lambda function: verdict, last_frame=object(), release=lambda: None)
         reader = SimpleNamespace(fix=lambda *a: Fix(1, 2, 0.8, 10.0, 1.0, True), present=lambda frame: True)
         out = text_io.StringIO()
         with patch.object(probe, "Recognizer", return_value=recognizer), \
-                patch.object(probe, "frame_controller", return_value=object()), \
+                patch.object(probe, "frame_controller", return_value=SimpleNamespace(show=lambda image: None)), \
+                patch.object(probe, "read_frame", return_value=object()), patch.object(probe, "destroy_native"), \
                 patch("host.android.minimap.MinimapReader", return_value=reader), contextlib.redirect_stdout(out):
             self.assertEqual(probe.main(["fix", "--map", "miraland", "--hint", "1", "2", "--frame", "f.png"]), 0)
         printed = out.getvalue()

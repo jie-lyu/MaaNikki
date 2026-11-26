@@ -2,6 +2,7 @@
 frames; not part of the offline suite (.build/ is not in the repository). No device, no input.
 
     python -I -X utf8 scripts/android/move_frames.py [--build DIR] [--no-screens] [--all-frames]
+        [--max-frames N] [--max-seconds S] [--max-rss-mb MB]
 
 DIR defaults to .build/android. Reported, per measured run in DIR/phase-e-measure/m2-*/results.jsonl:
   - fixes: the reader on each saved frame with the previous logged position as the hint, against what the session
@@ -15,6 +16,8 @@ DIR defaults to .build/android. Reported, per measured run in DIR/phase-e-measur
     frame's own pixels, as the walk does. With --all-frames: every 1280x720 PNG under DIR (not reviews/ or the later
     walk runs and investigations: phase-e-walk*, heading-investigation) whose screen read_screen calls the HUD (the
     495 frames of the 2026-11-26 replay: 473 hud, 4 narration, 8 misread, and the 10 prompt frames).
+The screens run on one recognizer through scripts/android/replay.py (its frame, wall-time and memory limits; the
+--all-frames set needs no raised limit). Run it in the foreground and never two at once.
 """
 from __future__ import annotations
 
@@ -41,6 +44,8 @@ def main() -> int:
     parser.add_argument("--build", default=str(ROOT / ".build" / "android"))
     parser.add_argument("--no-screens", action="store_true")
     parser.add_argument("--all-frames", action="store_true")
+    import replay
+    replay.add_arguments(parser)
     args = parser.parse_args()
     build = Path(args.build)
     import cv2
@@ -92,41 +97,46 @@ def main() -> int:
                             "max_abs": round(max(map(abs, angle_errors)), 1)},
     }, ensure_ascii=False, indent=1))
     if not args.no_screens:
-        screens(build, args.all_frames)
+        try:
+            screens(build, args.all_frames, replay.limits_from(args))
+        except replay.ReplayLimit as error:
+            print(error, file=sys.stderr)
+            return 2
     return 0
 
 
 LATER = ("reviews", "phase-e-walk", "phase-e-walk2", "heading-investigation")  # not in the --all-frames set
 
 
-def screens(build: Path, all_frames: bool = False):
-    import cv2
-    import probe
+def screens(build: Path, all_frames: bool = False, limits=None):
+    import replay
     from host.android import actions, move
     if all_frames:
         frames = sorted(p for p in build.glob("*/**/*.png") if p.relative_to(build).parts[0] not in LATER)
     else:
         frames = sorted((build / "phase-e-measure").glob("m*/*-hud.png")) + \
             sorted(p for p in (build / "phase-e-measure").glob("m*/*.png") if not p.name.endswith("-hud.png"))[::6]
-    counts, odd = {}, []
-    for path in frames:
-        image = cv2.imread(str(path))
-        if image is None or image.shape[:2] != (720, 1280):
-            continue
-        recognizer = probe.Recognizer(probe.frame_controller(path), android_layer=True)
 
-        def judge(recognize, image=image):
+    def judge_frame(recognizer, path, image):
+        def judge(recognize):
             screen = actions.read_screen(recognize)
             if all_frames and screen.kind != "hud":
                 return None  # not an open-world frame: outside this set
             return move.classify(screen, recognize, image)
-        verdict = recognizer.on_one_frame(judge)
-        if verdict is None:
-            continue
-        kind, reason = verdict.kind, verdict.reason
-        counts[kind] = counts.get(kind, 0) + 1
-        if kind != "hud":
-            odd.append([str(path.relative_to(build)), kind, reason])
+        return recognizer.on_one_frame(judge)
+
+    counts, odd = {}, []
+    # one recognizer for every frame, under the replay's frame, time and memory limits
+    with replay.Replay(limits=limits or replay.Limits()) as session:
+        for path, verdict in session.run(frames, judge_frame,
+                                         accept=lambda image: image is not None and image.shape[:2] == (720, 1280)):
+            if verdict is None:
+                continue
+            kind, reason = verdict.kind, verdict.reason
+            counts[kind] = counts.get(kind, 0) + 1
+            if kind != "hud":
+                odd.append([str(path.relative_to(build)), kind, reason])
+        print(f"replay: {session.frames} frames, peak RSS {session.peak_rss / 2 ** 20:.0f} MB", file=sys.stderr)
     print(json.dumps({"screens": counts, "not_hud": odd}, ensure_ascii=False, indent=1))
 
 
