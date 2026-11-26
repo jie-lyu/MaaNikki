@@ -94,7 +94,7 @@ def run(rt, options: dict) -> bool:
     io = DiagnosticIo(rt, folder)
     io.record("start", {"map": params.map, "hint": params.hint, "target": params.target, "timeout": params.timeout,
                         "leash": params.leash, "radius": params.radius}, None)
-    walker = Walker(io, MinimapReader(params.map), leash=(*params.hint, params.leash))
+    walker = Walker(io, MinimapReader(params.map), leash=(*params.hint, params.leash), map_id=params.map)
     result = walker.walk([Goal(*params.target, params.radius)], params.hint, params.timeout)
 
     def outcome():  # the loop's own stop check and its deadline, asked again after every blocking write

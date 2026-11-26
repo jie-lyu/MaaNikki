@@ -292,7 +292,7 @@ class Run:
         io = DiagnosticIo(self.rt, folder)
         io.record("start", {"route": route.id, "hint": list(hint), "start_radius": route.start_radius,
                             "timeout": route.timeout}, None)
-        walker = Walker(io, self.reader, allow_jump=True)
+        walker = Walker(io, self.reader, allow_jump=True, map_id=route.map_id)
         result = walker.walk(route_goals(route), hint, route.timeout, start_radius=route.start_radius)
         io.record("result", {"outcome": result.outcome, "message": result.message, "position": result.position,
                              "attempted": result.attempted, "confirmed": result.confirmed}, None)

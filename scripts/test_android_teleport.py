@@ -178,6 +178,8 @@ class LookTests(unittest.TestCase):
         self.assertFalse(teleport.prompt_clear(SimpleNamespace(prompts=((560, 560, 600, 600),)), (616, 613), 30))
         self.assertTrue(teleport.prompt_clear(SimpleNamespace(prompts=()), (159.6, 110.8), 83.25))
         centre, radius = teleport.minimap_disc()
+        from host.android import touch_point
+        self.assertEqual((list(centre), radius), (touch_point(list(actions.MINIMAP)), 83.25))  # the tap's own point
         self.assertFalse(teleport.prompt_clear(SimpleNamespace(prompts=((250, 120, 420, 160),)), centre, radius))
 
 
@@ -604,7 +606,11 @@ class TeleportFlowTests(unittest.TestCase):
                            (HudIo(regions=[alone, ("登上鸣鸣列车", "#")]), "starsea"),  # a distance appearing
                            (HudIo(regions=[alone, alone], name_only=[True, False]), "starsea"),  # evidence gone
                            (HudIo(kinds=["hud", "misread"]), "starsea"),
-                           (HudIo(regions=[alone] * 30), None)):  # name-only with the map unknown: never starts
+                           (HudIo(regions=[alone] * 30), None),  # name-only with the map unknown: never starts
+                           # route review round 2, finding 7: only 交谈 in the tracker on both frames (and an
+                           # instruction, finding 6), on 星海 too
+                           (HudIo(regions=[("交谈",)] * 3), "starsea"),
+                           (HudIo(regions=[("与大喵交谈",)] * 3), "starsea")):
             with self.subTest(kinds=io.kinds, regions=io.regions[:2], evidence=io.name_only, map_id=map_id):
                 _look, game, error = self.open_on(io, map_id)
                 self.assertIsInstance(error, Stop)
@@ -861,12 +867,13 @@ class RouteTests(unittest.TestCase):
         walker.return_value.walk.return_value = SimpleNamespace(outcome="arrived", message="已到达目标位置。",
                                                                 position=(1, 2), attempted=3, confirmed=3)
         run = crystal_route.Run(rt, reader=READER, world=FakeWorld(), io=HudIo())
-        route = SimpleNamespace(id="xinghai_crystal_3", start_radius=9, timeout=900, points=())
+        route = SimpleNamespace(id="xinghai_crystal_3", map_id="starsea", start_radius=9, timeout=900, points=())
         with patch("host.android.walk_probe.DiagnosticIo", Io), patch("host.android.move.Walker", walker), \
                 patch("host.android.move.route_goals", return_value=[]), \
                 patch("host.android_user_stop", side_effect=lambda *a, **k: bool(published)):
             run.walk(route, (1, 2))
         self.assertEqual(rt.logs, [])
+        self.assertEqual(walker.call_args.kwargs["map_id"], "starsea")  # the name-only rule knows the map (finding 6)
 
     def test_the_card_and_the_press_belong_to_one_day(self):
         import datetime as dt
@@ -907,7 +914,7 @@ class BellTests(unittest.TestCase):
     and kept unless the device input count shows nothing went down (review round 2, findings 1 and 2)."""
 
     def ring(self, kinds=(), regions=None, *, at_hub=True, bell_box=(593, 590, 47, 47), outcomes=(True,),
-             record=None, clock=None, day=DAY, prompts=None):
+             record=None, clock=None, day=DAY, prompts=None, name_only=None):
         from host import UnsupportedInput
         from host.android import gesture
         rt = SimpleNamespace(stopped=False, logs=[], pause=Mock(return_value=True), TOUCH_KEY_ATTEMPTS=3,
@@ -919,7 +926,7 @@ class BellTests(unittest.TestCase):
         reader.present.return_value = True
         reader.fix.return_value = SimpleNamespace(x=HUB["x"] + (0 if at_hub else 30), y=HUB["y"], reliable=True)
         record = record or crystal_route.BellRecord(tempfile.mkdtemp())
-        io = HudIo(kinds=kinds, regions=regions, prompts=prompts)
+        io = HudIo(kinds=kinds, regions=regions, prompts=prompts, name_only=name_only)
         run = crystal_route.Run(rt, reader=reader, world=FakeWorld(), io=io, record=record)
         calls, states, outcomes = [], [], list(outcomes)
         device = SimpleNamespace(inputs=0)
@@ -1047,7 +1054,11 @@ class BellTests(unittest.TestCase):
         for case in ({"kinds": ["misread"]}, {"kinds": ["other"]}, {"kinds": ["hud", "other"]},
                      {"kinds": ["hud", "misread"]}, {"regions": [("前往目标",)]},
                      {"regions": [("登上鸣鸣列车",), ("别的任务",)]}, {"regions": [("登上鸣鸣列车",), ("登上鸣鸣列车", "#")]},
-                     {"at_hub": False}, {"bell_box": None}, {"bell_box": (640, 590, 47, 47)}):
+                     {"at_hub": False}, {"bell_box": None}, {"bell_box": (640, 590, 47, 47)},
+                     # route review round 2, findings 6 and 7: an instruction or the talk prompt in the tracker, and
+                     # the name-only evidence gone on the confirming frame
+                     {"regions": [("交谈",)]}, {"regions": [("与大喵交谈",)]},
+                     {"regions": [("登上鸣鸣列车",), ("登上鸣鸣列车",)], "name_only": [True, False]}):
             with self.subTest(case=case):
                 _result, calls, error, _states, final = self.ring(**case)
                 self.assertIsInstance(error, Stop)

@@ -1140,7 +1140,6 @@ class MisreadRuleTests(unittest.TestCase):
 class ReviewRound4Tests(unittest.TestCase):
     """Movement review round 4: each finding's scenario, replayed."""
 
-
     def test_the_hud_label_set_has_one_source(self):
         # The label row is account-specific: actions.HUD_LABEL_ROW is the one place it is kept and extended.
         from host.android import actions, pages
@@ -1153,6 +1152,14 @@ class ReviewRound4Tests(unittest.TestCase):
         ping = ("uid", 141.0, 168.0, 708.0, True)
         self.assertFalse(move.same_blocks((ping, ("uid", 168.0, 197.0, 708.0, False)), (ping,)))
         self.assertTrue(move.same_blocks((("uid", 167.0, 197.0, 708.0, False),), (("uid", 141.0, 168.0, 708.0, False),)))
+        # Codex's replay: the ping [141,168) on the first frame, a new UID123 block [168,197) on the second: the walk
+        # stops on the second frame instead of stepping from it.
+        walk, io = self._blocks_walker(lambda n: HUD_BLOCKS + (PING,) if n == 1
+                                       else HUD_BLOCKS + (PING, ("uid", 168.0, 197.0, 709.0, False)))
+        result = walk.walk([Goal(0, -20)], (0, 0), 60)
+        self.assertEqual((result.outcome, len(io.steps), io.observed), ("screen", 1, 2))
+        self.assertEqual(io.saved[0][2].number, 2)
+
     def test_1_a_misread_at_the_start_is_saved_and_refused(self):
         walk, io = walker(World((0, 0)), kinds=[("misread", "读错"), ("misread", "读错"), "hud"])  # c05 a, b, b-hud
         result = walk.walk([Goal(0, -6)], (0, 0), 60)
@@ -1302,6 +1309,11 @@ class NameOnlyTrackerTests(unittest.TestCase):
             with self.subTest(text):
                 self.assertEqual(tracker_verdict(self.starsea, STARSEA_NAME, (text, [129, 255, 30, 24], 0.9)),
                                  ("hud", ("登上鸣鸣列车", move.TRACKER_DISTANCE), False))
+        # at any score: the row is recognised before the score and counts_as_text filters
+        for text, score in (("3米", 0.3), ("◆1米", 0.5)):
+            with self.subTest(text=text, score=score):
+                self.assertEqual(tracker_verdict(self.starsea, STARSEA_NAME, (text, [129, 255, 30, 24], score)),
+                                 ("hud", ("登上鸣鸣列车", move.TRACKER_DISTANCE), False))
         # a lone digit there is still noise, not a distance (and the row is no longer positively empty)
         self.assertEqual(tracker_verdict(self.starsea, STARSEA_NAME, ("3", [129, 255, 12, 24], 0.9))[:2],
                          ("hud", ("登上鸣鸣列车",)))
@@ -1329,6 +1341,31 @@ class NameOnlyTrackerTests(unittest.TestCase):
                 io.regions, io.name_only = (lambda n: ("登上鸣鸣列车",)), (lambda n: True)
                 result = walk.walk([Goal(0, -6)], (0, 0), 60)
                 self.assertEqual((result.outcome, io.steps), ("refused", []))
+
+    def test_a_quest_instruction_never_starts_a_walk(self):
+        # Route review round 2, finding 6: native OCR read 「与大喵交谈」 in the tracker on constructed pixels and the
+        # walker took it for a name-only tracker. 交谈 is an instruction word (NARRATION_DENY): refused on 星海 too.
+        for map_id in (None, "starsea"):
+            with self.subTest(map_id=map_id):
+                walk, io = walker(World((0, 0)), map_id=map_id)
+                io.regions, io.name_only = (lambda n: ("与大喵交谈",)), (lambda n: True)
+                result = walk.walk([Goal(0, -6)], (0, 0), 60)
+                self.assertEqual((result.outcome, io.steps, io.observed), ("refused", [], 1))
+        from types import SimpleNamespace
+        reader = SimpleNamespace(present=lambda frame: True)
+        alone = move.Observation("f", "hud", 0.0, "", regions=("登上鸣鸣列车",), blocks=(), name_only=True)
+        self.assertEqual(move.first_frame_rule(alone, reader, "starsea")[0], "ok")
+        for map_id in (None, "miraland"):  # refused at once, not waited through: the evidence will not change
+            self.assertEqual(move.first_frame_rule(alone, reader, map_id)[0], "stop")
+
+    def test_a_distance_appearing_after_a_name_only_start_stops(self):
+        # Route review round 2, finding 6: a new 3米 row read on a later frame (recognised at any score) is a change.
+        walk, io = walker(World((0, 0)), map_id="starsea")
+        io.regions = lambda n: ("登上鸣鸣列车",) if n == 1 else ("登上鸣鸣列车", move.TRACKER_DISTANCE)
+        io.name_only = lambda n: n == 1
+        result = walk.walk([Goal(0, -20)], (0, 0), 60)
+        self.assertEqual((result.outcome, len(io.steps), io.observed), ("screen", 1, 2))
+        self.assertEqual(io.saved[0][2].number, 2)
 
     def test_the_empty_distance_evidence_is_rechecked_on_every_later_frame(self):
         # Route review round 2, finding 6: the distance row must stay positively empty, not merely unread.

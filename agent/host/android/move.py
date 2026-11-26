@@ -9,7 +9,9 @@ the only touch this module sends; the bell press, off by default, is the one oth
    region showing only what it may (HUD_REGIONS: the label row's labels, the 心誓 bar, the masked UID and ping, the
    icon badges' numbers, and the quest tracker as it was on the walk's first frame). The first frame must be such a
    clean HUD, its tracker showing a quest name and its distance, or (a quest tracked in another map, as on 星海) a
-   name alone with the distance row positively empty (name_only_tracker), or nothing is sent. The one exception is ambient narration: a known companion's label (AMBIENT_SPEAKERS)
+   name alone with the distance row positively empty (name_only_tracker; on 星海 only, NAME_ONLY_MAPS), or nothing
+   is sent; later frames keep that shape and that evidence (first_frame_rule / later_frame_rule, the same rules for
+   teleport's touches on the HUD). The one exception is ambient narration: a known companion's label (AMBIENT_SPEAKERS)
    over one short plain line in the subtitle band, no marker, no word of NARRATION_DENY: it pauses without input until
    it goes (logged), up to NARRATION_MAX_S. The other exception is the game's interaction prompt (查看, 拾取, an NPC's
    name): one row in the prompt column (PROMPT_COLUMN) with the shape seen on the saved frames (the label's box, the
@@ -475,7 +477,8 @@ class Walker:
     def _first_look(self) -> Observation:
         """The walk's first frame: the open-world HUD and nothing else, with the minimap chevron and the quest tracker
         showing one quest name and its distance, or one name of at least TRACKER_NAME_MIN_CJK characters whose
-        distance row is positively empty (Observation.name_only: a quest tracked in another map, as on 星海); that
+        distance row is positively empty (Observation.name_only: a quest tracked in another map) on NAME_ONLY_MAPS (星海,
+        the map this was observed on; self.map_id, else the reader's); first_frame_rule decides. That
         shape and name are what later frames must keep showing. While an allowed ambient remark is on screen, or the
         tracker's distance is neither read nor shown to be absent, the walk waits (STARTUP_WAIT_S, within the
         deadline) for such a frame; anything else, or no clean frame in time, refuses with nothing sent."""
@@ -512,11 +515,6 @@ class Walker:
             self._detail(f"interaction prompt on the frame (hud_prompt, {[list(e) for e in obs.prompts]}): moving on, "
                          "nothing tapped")
         return obs
-
-    @staticmethod
-    def _tracker_parts(obs):
-        names = [entry for entry in obs.regions if entry != TRACKER_DISTANCE]
-        return names, len(obs.regions) - len(names)
 
     def _tracker_kept(self, obs) -> bool:
         """The quest tracker still shows the first frame's quest name exactly (after tracker_name's 呜/鸣 and
@@ -824,7 +822,7 @@ LINE_MAX_CHARS = 26
 NARRATION_DENY = ("点击", "点按", "继续", "跳过", "任务", "对话", "选择", "前往", "交互", "领取", "战斗", "开始", "完成",
                   "获得", "奖励", "解锁", "挑战", "拾取", "查看", "采集", "确认", "取消", "按住", "长按", "滑动",
                   "触摸", "提交", "传送", "进入", "打开", "失败", "胜利", "击败", "教程", "提示", "去", "找", "跟上",
-                  "跟着", "过来", "快来", "帮我", "帮忙", "请")
+                  "跟着", "过来", "快来", "帮我", "帮忙", "请", "交谈")
 
 
 MOVE_KINDS = ("hud", "hud_prompt")  # the classes a step may be decided on
@@ -1023,10 +1021,10 @@ def read_rows(result) -> Rows:
                     outside.append((text, box))
                 continue
             squashed = re.sub(r"\s", "", text)
-            # A short distance row in the tracker (1米, 3米: two characters, under counts_as_text's floor) is a
-            # distance, recognised before the noise filter drops it.
-            if "米" in squashed and _inside(box, TRACKER_AREA) and TRACKER_DISTANCE_FORM.fullmatch(squashed) \
-                    and score >= TEXT_SCORE:
+            # A distance row in the tracker with its 米 (1米, 3米: two characters, under counts_as_text's floor) is
+            # a distance at any score, recognised before the noise filters (score, counts_as_text) could drop it:
+            # a distance appearing is a change (route review round 2, finding 6).
+            if "米" in squashed and _inside(box, TRACKER_AREA) and TRACKER_DISTANCE_FORM.fullmatch(squashed):
                 tracker.append((box[1], box[0], TRACKER_DISTANCE))
                 continue
             if score < (TEXT_SCORE if _cjk(text) else ASCII_SCORE) or not counts_as_text(text):
@@ -1133,7 +1131,6 @@ def same_blocks(blocks, first) -> bool:
                            for r, fx0, fx1, fy, _ping in allowed) for region, x0, x1, y, ping in blocks)
 
 
-
 # ---- the walk's screen rules, shared with every touch decided on the open world (host.android.teleport) ----
 
 NAME_ONLY_MAPS = frozenset({"starsea"})  # maps where a name-only tracker may start a walk (route review round 2, 6)
@@ -1166,9 +1163,10 @@ def first_frame_rule(obs, reader, map_id):
     most an allowed interaction prompt: MOVE_KINDS), the minimap chevron at its pivot, and the tracker showing one
     quest name and its distance, or, on NAME_ONLY_MAPS only, one name of at least TRACKER_NAME_MIN_CJK characters
     with its distance row positively empty (Observation.name_only); ``("wait", reason, None)`` for a frame the start
-    waits through (a blank capture, an ambient remark, a distance neither read nor shown absent, a name-only tracker
-    off NAME_ONLY_MAPS); ``("stop", reason, None)`` for one it refuses on (a misread before any clean frame, anything
-    else on screen, the chevron away, extra tracker text or a NARRATION_DENY word). Reasons are fixed text."""
+    waits through (a blank capture, an ambient remark, a distance neither read nor shown absent);
+    ``("stop", reason, None)`` for one it refuses on (a misread before any clean frame, anything else on screen, the
+    chevron away, extra tracker text or a NARRATION_DENY word, a name-only tracker on a map not in NAME_ONLY_MAPS or
+    not known: ``map_id`` None). Reasons are fixed text."""
     if obs.kind == "blank":
         return "wait", "没有拿到截图", None
     if obs.kind == "misread":  # no layout to compare with yet: a misread at the start is never waited through
@@ -1183,7 +1181,10 @@ def first_frame_rule(obs, reader, map_id):
     if obs.kind in MOVE_KINDS and len(names) == 1 and distances == 1:
         return "ok", "", Shape(names[0], obs.blocks, False)
     if obs.kind in MOVE_KINDS and len(names) == 1 and distances == 0 and obs.name_only \
-            and _cjk(names[0]) >= TRACKER_NAME_MIN_CJK and map_id in NAME_ONLY_MAPS:
+            and _cjk(names[0]) >= TRACKER_NAME_MIN_CJK:
+        if map_id not in NAME_ONLY_MAPS:  # route review round 2, finding 6: positive evidence only where observed
+            return "stop", ("任务栏只显示任务名、没有距离；只在星海认这种任务栏（这里不是星海，或还不知道在哪张地图），"
+                            "没有开始移动"), None
         return "ok", "", Shape(names[0], obs.blocks, True)
     return "wait", "开始时一直没有等到干净的大世界画面（任务栏没有显示任务名和距离，或旁白没有消失），没有开始移动", None
 
@@ -1207,6 +1208,7 @@ def later_frame_rule(obs, reader, shape):
     if shape is not None and shape.blocks is not None and not same_blocks(obs.blocks, shape.blocks):
         return "stop", "大世界常驻界面上出现了开始时没有的文字块，已停止所有输入"
     return "ok", ""
+
 
 def narration_verdict(rows) -> str:
     """"" when ``rows`` (text outside the HUD regions, at least one) are one ambient remark; otherwise why not (a fixed
@@ -1344,7 +1346,7 @@ class RuntimeIo:
 def walk_to(rt, map_id: str, target, hint, *, radius: float = ARRIVAL_U, timeout: float = 60.0, **options):
     """Walk to ``target`` (map x, y) on ``map_id``, starting from the position near ``hint``."""
     from host.android.minimap import MinimapReader
-    walker = Walker(RuntimeIo(rt), MinimapReader(map_id), **options)
+    walker = Walker(RuntimeIo(rt), MinimapReader(map_id), map_id=map_id, **options)
     return walker.walk([Goal(float(target[0]), float(target[1]), float(radius))], hint, timeout)
 
 
@@ -1357,5 +1359,5 @@ def walk_route(rt, route, hint, **options):
     """Walk all of ``route`` (navigation.models.Route) from the position near ``hint`` within the route's timeout;
     the first trusted fix must lie within the route's start radius of its first point (else nothing is sent)."""
     from host.android.minimap import MinimapReader
-    walker = Walker(RuntimeIo(rt), MinimapReader(route.map_id), **options)
+    walker = Walker(RuntimeIo(rt), MinimapReader(route.map_id), map_id=route.map_id, **options)
     return walker.walk(route_goals(route), hint, route.timeout, start_radius=route.start_radius)

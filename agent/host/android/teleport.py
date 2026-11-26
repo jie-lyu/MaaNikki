@@ -476,8 +476,11 @@ def province_header(box) -> bool:
 
 
 def minimap_disc():
-    from host.android.minimap import CENTER, RADIUS
-    return CENTER, RADIUS
+    """The minimap as a control for prompt_clear: centred on the point its tap uses (actions.MINIMAP's touch point),
+    with the minimap's radius on the frame (host.android.minimap.RADIUS)."""
+    from host.android import touch_point
+    from host.android.minimap import RADIUS
+    return tuple(touch_point(list(actions.MINIMAP))), RADIUS
 
 
 def prompt_clear(obs, centre, radius) -> bool:
