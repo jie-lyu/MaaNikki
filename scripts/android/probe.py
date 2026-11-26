@@ -1211,11 +1211,12 @@ def cmd_fix(args) -> int:
         sources = [(path, frame_controller(Path(path))) for path in args.frame]
     for name, controller in sources:
         recognizer = Recognizer(controller, android_layer=True)
-        kind, reason = recognizer.on_one_frame(
+        verdict = recognizer.on_one_frame(
             lambda recognize: move.classify(actions.read_screen(recognize), recognize))
         frame = recognizer.last_frame
         fix = reader.fix(frame, tuple(args.hint), args.search)
-        print(json.dumps({"frame": str(name), "screen": kind, "reason": reason, "chevron": reader.present(frame),
+        print(json.dumps({"frame": str(name), "screen": verdict.kind, "reason": verdict.reason,
+                          "tracker": list(verdict.regions), "chevron": reader.present(frame),
                           "fix": fix.log(), "from_hint": round(math.dist((fix.x, fix.y), args.hint), 2)},
                          ensure_ascii=False), flush=True)
     return 0

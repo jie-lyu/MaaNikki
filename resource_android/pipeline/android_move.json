@@ -3,7 +3,7 @@
     "recognition": "OCR",
     "roi": [0, 0, 1280, 720],
     "expected": ".+",
-    "threshold": 0.8,
+    "threshold": 0.5,
     "action": "DoNothing"
   }
 }

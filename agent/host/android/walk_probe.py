@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import datetime
 import json
 import math
+import time
 
 from host.android.move import RuntimeIo
 
@@ -95,11 +96,14 @@ def run(rt, options: dict) -> bool:
                         "leash": params.leash, "radius": params.radius}, None)
     walker = Walker(io, MinimapReader(params.map), leash=(*params.hint, params.leash))
     result = walker.walk([Goal(*params.target, params.radius)], params.hint, params.timeout)
-    # The loop's own stop check (the tasker or the stop request): after a stop nothing is reported, not even arrival.
-    stopped = io.stopped()
+    # The loop's own stop check (the tasker or the stop request) and its deadline, again after the result write and
+    # right before the report: after a stop nothing is reported, not even arrival; past the deadline no arrival.
     io.record("result", {"outcome": result.outcome, "message": result.message, "position": result.position,
-                         "attempted": result.attempted, "confirmed": result.confirmed, "stopped": stopped}, None)
-    if stopped:
+                         "attempted": result.attempted, "confirmed": result.confirmed, "stopped": io.stopped()}, None)
+    ok, message = result.ok, result.message
+    if ok and walker.deadline is not None and time.monotonic() > walker.deadline:
+        ok, message = False, "移动超时（写完记录时已经超过了限时），不算到达。"
+    if io.stopped():
         return False
-    rt.log(f"走路探针：{result.message}（发出 {result.attempted} 步，完成 {result.confirmed} 步）")
-    return result.ok
+    rt.log(f"走路探针：{message}（发出 {result.attempted} 步，完成 {result.confirmed} 步）")
+    return ok and not io.stopped()

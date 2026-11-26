@@ -100,8 +100,9 @@ def screens(build: Path):
     counts, odd = {}, []
     for path in frames:
         recognizer = probe.Recognizer(probe.frame_controller(path), android_layer=True)
-        kind, reason = recognizer.on_one_frame(lambda recognize: move.classify(actions.read_screen(recognize),
-                                                                               recognize))
+        verdict = recognizer.on_one_frame(lambda recognize: move.classify(actions.read_screen(recognize),
+                                                                          recognize))
+        kind, reason = verdict.kind, verdict.reason
         counts[kind] = counts.get(kind, 0) + 1
         if kind != "hud":
             odd.append([str(path.relative_to(build)), kind, reason])
