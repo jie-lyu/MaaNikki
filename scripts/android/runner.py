@@ -6,6 +6,8 @@
     .venv/bin/python scripts/android/runner.py run MaaNikki_AndroidWalkProbe --option hint=X,Y --option target=X,Y \
         [--option map=miraland --option timeout=S --option leash=U --option radius=U] --purpose "..."
                                                               # dev-only: a supervised joystick walk (see DEV_ENTRIES)
+    .venv/bin/python scripts/android/runner.py run MaaNikki_AndroidCrystalRoute --purpose "..."
+                                                              # dev-only: 星海 bell + route 3 (always route 3)
 
 What it does, the way the client will (docs/android-support-plan.md, B6):
 - connects with the nikki_android controller of build/android/interface-overlay.json (input Maatouch and capture
@@ -143,11 +145,18 @@ def task_override(interface: dict, entry: str, chosen: dict[str, str]) -> list[d
 DEV_ENTRIES_ENV = "MAANIKKI_ANDROID_DEV_ENTRIES"
 WALK_PROBE = "MaaNikki_AndroidWalkProbe"
 WALK_OPTIONS = {"map": str, "hint": "point", "target": "point", "timeout": float, "leash": float, "radius": float}
+# The 星海 crystal route (host.android.crystal_route): no options; it always walks xinghai_crystal_3.
+CRYSTAL_ROUTE = "MaaNikki_AndroidCrystalRoute"
+RUNNER_DEV_ENTRIES = (WALK_PROBE, CRYSTAL_ROUTE)
 
 
 def dev_override(entry: str, chosen: dict[str, str]) -> list[dict]:
     """The pipeline override of a dev-only entry from its --option values (WALK_PROBE: map, hint=X,Y, target=X,Y,
-    timeout, leash, radius; hint and target required). The agent checks the ranges again."""
+    timeout, leash, radius; hint and target required; CRYSTAL_ROUTE: none). The agent checks the ranges again."""
+    if entry == CRYSTAL_ROUTE:
+        if chosen:
+            raise RunnerError(f"{entry} 没有选项（固定走 3 号路线）")
+        return [{entry: {"custom_action_param": {"kind": "android_crystal_route"}}}]
     if entry != WALK_PROBE:
         raise RunnerError(f"{entry} 不是开发用的入口")
     unknown = set(chosen) - set(WALK_OPTIONS)
@@ -316,7 +325,7 @@ def _run(args) -> int:
     controller_def = controller_definition(interface)
     input_mask, screencap_mask = masks(controller_def)
     chosen = dict(option.split("=", 1) for option in args.option)
-    dev_entry = args.entry if args.entry == WALK_PROBE else None
+    dev_entry = args.entry if args.entry in RUNNER_DEV_ENTRIES else None
     override = dev_override(args.entry, chosen) if dev_entry else task_override(interface, args.entry, chosen)
     started = dt.datetime.now().astimezone()
     log_dir = LOG_ROOT / started.strftime("%Y%m%d-%H%M%S")

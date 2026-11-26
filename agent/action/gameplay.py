@@ -36,6 +36,7 @@ class UIClickAction(CustomAction):
 
 ANDROID_CHECK_ENTRY = "MaaNikki_AndroidCheck"
 ANDROID_WALK_PROBE_ENTRY = "MaaNikki_AndroidWalkProbe"  # dev-only (host.android.walk_probe)
+ANDROID_CRYSTAL_ROUTE_ENTRY = "MaaNikki_AndroidCrystalRoute"  # dev-only (host.android.crystal_route)
 
 
 @agent_action("nikki.gameplay")
@@ -67,6 +68,16 @@ class GameplayAction(CustomAction):
                     return False
                 from host.android.walk_probe import run as walk
                 return walk(runtime, options) and not runtime.stopped
+            crystal_route = getattr(getattr(argv, "task_detail", None), "entry", None) == ANDROID_CRYSTAL_ROUTE_ENTRY
+            if crystal_route or kind == "android_crystal_route":
+                # Dev-only, Android only, gated exactly as the walk probe above.
+                from host import capabilities, game_backend
+                if not (crystal_route and kind == "android_crystal_route"
+                        and capabilities(game_backend()).touch_actions_only):
+                    runtime.log("星海结晶路线的任务入口、参数或系统不符，没有执行。")
+                    return False
+                from host.android.crystal_route import run as crystal
+                return crystal(runtime, options) and not runtime.stopped
             game = Gameplay(runtime)
             if kind == "weekly_shop":
                 from host import capabilities, game_backend

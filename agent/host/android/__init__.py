@@ -84,7 +84,8 @@ def task_tiers():
 # Dev-only entries (never in tasks.json, interface.json or an interface overlay): allowed only when the process's
 # environment names them in DEV_ENTRIES_ENV, which only scripts/android/runner.py sets, for that one run's agent.
 DEV_ENTRIES_ENV = "MAANIKKI_ANDROID_DEV_ENTRIES"
-DEV_ENTRIES = frozenset({"MaaNikki_AndroidWalkProbe"})  # host.android.walk_probe: supervised device walks
+# host.android.walk_probe: supervised device walks; host.android.crystal_route: the 星海 route 3 end to end.
+DEV_ENTRIES = frozenset({"MaaNikki_AndroidWalkProbe", "MaaNikki_AndroidCrystalRoute"})
 
 
 def dev_entries() -> frozenset[str]:
