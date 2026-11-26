@@ -164,7 +164,7 @@ class LookTests(unittest.TestCase):
     def test_a_clean_hud_frame_to_touch(self):
         reader = SimpleNamespace(present=lambda frame: frame != "no minimap")
 
-        def obs(kind="hud", regions=("登上鸣鸣列车",), frame="f", blocks=(("labels", 600, 1270, 75),)):
+        def obs(kind="hud", regions=("登上鸣鸣列车",), frame="f", blocks=(("labels", 600, 1270, 75, False),)):
             return move.Observation(frame, kind, 0.0, "提示" if kind != "hud" else "", regions=regions, blocks=blocks)
         first = obs()
         self.assertIsNone(teleport.hud_unclean(first, reader))
@@ -174,7 +174,7 @@ class LookTests(unittest.TestCase):
                               (obs(regions=()), None), (obs(regions=("登上鸣鸣列车", "点击继续")), None),
                               (obs(regions=("前往目标",)), None), (obs(regions=("登上鸣鸣列车", "#", "#")), None),
                               (obs(regions=("别的任务",)), first),
-                              (obs(blocks=(("labels", 600, 1270, 75), ("hearts", 520, 700, 680))), first)):
+                              (obs(blocks=(("labels", 600, 1270, 75, False), ("hearts", 300, 400, 680, False))), first)):
             with self.subTest(case=case.regions, kind=case.kind, against=against is not None):
                 self.assertIsNotNone(teleport.hud_unclean(case, reader, against))
 
@@ -364,7 +364,7 @@ class HudIo:
         frame = Frame(view=None, zoom=None, where="hud", index=len(self.frames))
         self.frames.append(frame)
         return move.Observation(frame, kind, time.monotonic(), "提示" if kind != "hud" else "", regions=region,
-                                blocks=(("labels", 600, 1270, 75),))
+                                blocks=(("labels", 600, 1270, 75, False),))
 
 
 READER = SimpleNamespace(present=lambda frame: True)
