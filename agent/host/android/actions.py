@@ -47,7 +47,13 @@ MINIMAP = [130, 75, 60, 60]
 HUD_SHORTCUTS = {"shop": "商城", "monthly": "奇迹之旅", "calendar": "奇想日历", "dress": "换装"}
 ACTIONS = frozenset({"menu", "leave", "map", *HUD_SHORTCUTS})
 ACTION_NAMES = {"menu": "打开美鸭梨菜单", "leave": "离开当前页面", "map": "地图", **HUD_SHORTCUTS}
-HUD_ROW_TEXT = "|".join(("商城", "共鸣", "奇迹之旅", "活动大厅", "奇想日历", "无限之心", "任务", "设计图", "换装"))
+# THE HUD label row: each label under the shortcut icons and its x centre on the 1280x720 frame, as on the saved frames
+# of the account they came from (single-label OCR boxes: 商城 656.5, 共鸣 727, 任务 1078, 设计图 1152, 换装 1222; the
+# middle four, always read as one row, at the same spacing). Another account's HUD may show other labels: this is the
+# one place to extend; HUD_ROW_TEXT, pages.HUD_LABELS and move.LABEL_CENTRES all come from it.
+HUD_LABEL_ROW = (("商城", 656.5), ("共鸣", 727.0), ("奇迹之旅", 797.0), ("活动大厅", 868.0), ("奇想日历", 938.0),
+                 ("无限之心", 1008.0), ("任务", 1078.0), ("设计图", 1152.0), ("换装", 1222.0))
+HUD_ROW_TEXT = "|".join(label for label, _x in HUD_LABEL_ROW)
 
 # The label row under the HUD shortcut icons. OCR reads the densely packed labels as one box, so each label is
 # looked for in narrow overlapping windows; the windows that read it must agree on where it is.

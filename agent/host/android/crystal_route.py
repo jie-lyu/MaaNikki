@@ -12,6 +12,11 @@ input, the map card read again for the 星光结晶 count and the map left by it
 character stays where the walk ended: on the route, on the ground). Success: the walk arrived, both counts read, the
 final HUD confirmed and no stop requested.
 
+The run starts from the open world with the quest tracker showing a name and its distance: before the map opens the
+map is not known, and a name-only tracker is accepted only on 星海 (move.first_frame_rule); after the teleports the
+map is 星海. Nothing on the route is a prompt to tap: route 3 has only plain points and one wait, and its crystals
+are collected by walking through them (as on PC, navigation.daily_route: crystal routes complete by traversal).
+
 This version always walks route 3 (PC picks one of eight routes from the crystal markers the bell reveals on the map;
 reading those markers on the phone is not done yet), so on a day the crystals lie on another route it collects
 little or nothing, which is expected.
@@ -37,7 +42,8 @@ import math
 from pathlib import Path
 
 from host.android import actions, pages
-from host.android.teleport import HUD_BELL, STARSEA, Stop, Teleport, guard, say, stopping
+from host.android.move import BELL_RADIUS_PX
+from host.android.teleport import HUD_BELL, STARSEA, STARSEA_MAP, Stop, Teleport, guard, say, stopping
 
 ENTRY = "MaaNikki_AndroidCrystalRoute"
 KIND = "android_crystal_route"
@@ -73,6 +79,12 @@ def checkpoint(name: str) -> dict:
     raise NavigationError(f"传送点资料里没有「{name}」。")
 
 
+def record_key(day) -> str:
+    """The key of a bell attempt in the record: the game day alone, for this data directory. The one place the key
+    is made: once the phone client's UID is read from the HUD, the account joins it here (per-account records)."""
+    return str(day)
+
+
 class RecordError(Exception):
     """The bell record cannot be read or written: nothing is pressed."""
 
@@ -97,7 +109,7 @@ class BellRecord:
         return data
 
     def attempt(self, day) -> dict | None:
-        return self.load()["attempts"].get(str(day))
+        return self.load()["attempts"].get(record_key(day))
 
     def _write(self, change):
         from file_io import exclusive_file_lock, write_json
@@ -114,11 +126,11 @@ class BellRecord:
     def mark(self, day, state):
         if state not in RECORD_STATES:
             raise ValueError(state)
-        self._write(lambda attempts: attempts.__setitem__(str(day), {
+        self._write(lambda attempts: attempts.__setitem__(record_key(day), {
             "state": state, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}))
 
     def clear(self, day):
-        self._write(lambda attempts: attempts.pop(str(day), None))
+        self._write(lambda attempts: attempts.pop(record_key(day), None))
 
 
 class Run:
@@ -185,7 +197,7 @@ class Run:
         if self.record.attempt(day) is not None:
             raise Stop(MANUAL, [])
         for _attempt in range(self.rt.TOUCH_KEY_ATTEMPTS):
-            pair = self.map.hud_pair("按铃", self.bell_target(hub))
+            pair = self.map.hud_pair("按铃", self.bell_target(hub), STARSEA_MAP, (BELL_POINT, BELL_RADIUS_PX))
             if pair is None:
                 return False
             _first, second, box = pair
@@ -218,9 +230,10 @@ class Run:
     def card(self):
         return self.map.card()
 
-    def open_card(self):
-        """The map opened from the HUD (its first frame carried into the region step) and the 星海 card read."""
-        entry = self.map.open_map()
+    def open_card(self, map_id):
+        """The map opened from the open world on ``map_id`` (None at the start: the map is not known yet) with its
+        first frame carried into the region step, and the 星海 card read."""
+        entry = self.map.open_map(map_id)
         if entry is None or not self.map.region(STARSEA, entry):
             return None
         return self.card()
@@ -233,7 +246,7 @@ class Run:
             raise NavigationError("读不出 3 号星光结晶路线，没有开始。")
         island = checkpoint((route.document.get("teleport") or {}).get("name", ""))
         hub = checkpoint(HUB)
-        card = self.open_card()
+        card = self.open_card(None)
         if card is None:
             return False
         day = game_day_now()  # the card's day: the record's key and the only day the press may happen on
@@ -246,7 +259,7 @@ class Run:
                 return False
             if self.map.await_hud("按铃之后", AFTER_BELL_WAIT) is None:
                 return False
-            card = self.open_card()
+            card = self.open_card(STARSEA_MAP)
             if card is None:
                 return False
             if game_day_now() != day:
@@ -293,7 +306,7 @@ class Run:
         screen. A screen that is not what must be there stops with that frame (open_map, leave)."""
         if result.outcome not in WALK_READ:
             return None
-        card = self.open_card()
+        card = self.open_card(STARSEA_MAP)
         if card is None:
             return None
         if card.kind != "rung":

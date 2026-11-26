@@ -49,6 +49,7 @@ from host.android import actions, pages
 
 MAP_TITLE = "地图"
 STARSEA = "星海"
+STARSEA_MAP = "starsea"  # the navigation map id of 星海 (move.NAME_ONLY_MAPS)
 REGION_NAME = "MaaNikki_Android_MapRegionName"
 CARD_TEXT = "MaaNikki_Android_MapCardText"
 REGION_MENU = "MaaNikki_Android_MapRegionMenu"
@@ -474,67 +475,24 @@ def province_header(box) -> bool:
     return 865 <= box[0] <= 915
 
 
-def tracker_parts(obs):
-    from host.android.move import TRACKER_DISTANCE
-    names = [entry for entry in obs.regions if entry != TRACKER_DISTANCE]
-    return names, len(obs.regions) - len(names)
+def minimap_disc():
+    from host.android.minimap import CENTER, RADIUS
+    return CENTER, RADIUS
 
 
-def first_shape(obs, reader):
-    """The walker's first-frame rule (move.Walker._first_look, the same order and checks) on one observation
-    (move.RuntimeIo.observe), for the frame that decides a touch on the HUD: ``("ok", "", shape)`` with shape
-    "distance" (one quest name and its distance) or "name_only" (one name of at least TRACKER_NAME_MIN_CJK CJK
-    characters with its distance row positively empty, Observation.name_only); ``("wait", reason, None)`` for a frame
-    the walker waits through (a blank capture, an ambient remark, a distance neither read nor shown absent);
-    ``("stop", reason, None)`` for one it refuses on (a misread before any clean frame, anything but the HUD, the
-    minimap chevron away from its default pivot, extra tracker text or a NARRATION_DENY word in it). Reasons are
-    fixed text."""
-    from host.android.move import NARRATION_DENY, TRACKER_NAME_MIN_CJK
-    if obs.kind == "blank":
-        return "wait", "没有拿到截图", None
-    if obs.kind == "misread":
-        return "stop", "大世界常驻界面的文字没有按原样读出", None
-    if obs.kind not in ("hud", "narration"):
-        return "stop", obs.reason or "不是干净的大世界", None
-    if not reader.present(obs.frame):
-        return "stop", "没有在默认位置认出小地图", None
-    names, distances = tracker_parts(obs)
-    if len(names) > 1 or distances > 1 or any(word in name for name in names for word in NARRATION_DENY):
-        return "stop", "任务栏的位置有多余的文字", None
-    if obs.kind == "hud" and len(names) == 1 and distances == 1:
-        return "ok", "", "distance"
-    if obs.kind == "hud" and len(names) == 1 and distances == 0 and obs.name_only \
-            and _cjk(names[0]) >= TRACKER_NAME_MIN_CJK:
-        return "ok", "", "name_only"
-    return "wait", "有旁白，或任务栏没有显示任务名和距离", None
-
-
-def confirm_shape(obs, first, shape, reader):
-    """The walker's later-frame rule (Walker._look) for the frame that confirms a touch decided on ``first``
-    (first_shape gave ``shape``): ``("ok", "")``; ``("restart", reason)`` for an ambient remark or a blank capture
-    (the decision pair starts again once it clears); ``("stop", reason)`` for anything else: not the HUD (a misread
-    included), the minimap chevron gone, another tracker name, a distance appearing on a name-only tracker or a
-    second one, a permanent-HUD text block where neither ``first`` nor the HUD's fixed slots have one."""
-    from host.android.move import same_blocks
-    if obs.kind in ("narration", "blank"):
-        return "restart", "有旁白或没有拿到截图"
-    if obs.kind != "hud":
-        return "stop", obs.reason or "不是干净的大世界"
-    if not reader.present(obs.frame):
-        return "stop", "没有在默认位置认出小地图"
-    names, distances = tracker_parts(obs)
-    if names != tracker_parts(first)[0] or distances > (0 if shape == "name_only" else 1):
-        return "stop", "任务栏的文字和判断时不一样"
-    if not same_blocks(obs.blocks, first.blocks):
-        return "stop", "大世界常驻界面上出现了判断时没有的文字块"
-    return "ok", ""
+def prompt_clear(obs, centre, radius) -> bool:
+    """No interaction prompt of a "hud_prompt" frame within move.CONTROL_CLEAR_PX of a target drawn as a disc of
+    ``radius`` around ``centre`` (move.clear_of: the walker's rule for its own controls)."""
+    from host.android.move import clear_of
+    return all(clear_of(extent, centre, radius) for extent in obs.prompts)
 
 
 def observation(look, verdict):
-    """A move.Observation of a Look classified by move.classify (for first_shape on frames the map flow captured)."""
+    """A move.Observation of a Look classified by move.classify (for move.first_frame_rule on frames the map flow
+    captured)."""
     from host.android.move import Observation
     return Observation(look.frame, verdict.kind, look.at, verdict.reason, regions=verdict.regions,
-                       blocks=verdict.blocks, name_only=verdict.name_only)
+                       blocks=verdict.blocks, name_only=verdict.name_only, prompts=verdict.prompts)
 
 
 def stopping(rt) -> bool:
@@ -693,37 +651,43 @@ class Teleport:
         raise Stop(f"连续 {self.rt.TOUCH_KEY_ATTEMPTS} 次没能在新的截图上及时确认{what}",
                    [last.frame] if last is not None else [])
 
-    def clean_hud(self, what, seconds=None):
-        """``(obs, shape)``: a frame to decide a touch on the HUD, by the walker's first-frame rule (first_shape):
-        frames it waits through are waited through without input up to move.STARTUP_WAIT_S; a frame it refuses
-        stops with that frame. None when the run stopped."""
-        from host.android.move import STARTUP_WAIT_S
+    def clean_hud(self, what, map_id, disc):
+        """``(obs, shape)``: a frame to decide a touch on the open world by the walker's first-frame rule
+        (move.first_frame_rule on ``map_id``: a name-only tracker only on 星海), with no interaction prompt near the
+        target (``disc``: its centre and radius; prompt_clear). Frames the rule waits through are waited through
+        without input up to move.STARTUP_WAIT_S; a frame it refuses, or a prompt near the target, stops with that
+        frame. None when the run stopped."""
+        from host.android.move import STARTUP_WAIT_S, first_frame_rule
         start = time.monotonic()
         while not self.rt.stopped:
             obs = self.io.observe()
             if obs is None:
                 return None
-            verdict, reason, shape = first_shape(obs, self.reader)
+            verdict, reason, shape = first_frame_rule(obs, self.reader, map_id)
+            if verdict == "ok" and not prompt_clear(obs, *disc):
+                raise Stop(f"要{what}时要点的地方旁边有交互提示，没有点", [obs.frame])
             if verdict == "ok":
                 return obs, shape
             if verdict == "stop":
-                raise Stop(f"要{what}时画面不是干净的大世界（{reason}），没有点", [obs.frame])
-            if time.monotonic() - start >= (STARTUP_WAIT_S if seconds is None else seconds):
-                raise Stop(f"要{what}时一直没有等到干净的大世界画面（{reason}），没有点", [obs.frame])
+                raise Stop(f"要{what}时画面不是干净的大世界（{reason}）", [obs.frame])
+            if time.monotonic() - start >= STARTUP_WAIT_S:
+                raise Stop(f"要{what}时一直没有等到干净的大世界画面，没有点", [obs.frame])
             if not self.rt.pause(STEP):
                 return None
         return None
 
-    def hud_pair(self, what, locate):
-        """A touch on the HUD decided on a frame that passes the walker's first-frame rule and confirmed on the next
-        by its later-frame rule against the first (confirm_shape): ``locate(obs)`` returns the target box (raising
-        Stop or GuardRefusal itself). Ambient narration (or a blank capture) on the confirming frame starts the pair
-        again once it clears, within move.NARRATION_MAX_S; any other confirming frame that fails stops with it.
-        Returns ``(first, second, target)``, the target as found on the second. None when the run stopped."""
-        from host.android.move import NARRATION_MAX_S
+    def hud_pair(self, what, locate, map_id, disc):
+        """A touch on the open world decided on a frame that passes the walker's first-frame rule (clean_hud) and
+        confirmed on the next by its later-frame rule against the first (move.later_frame_rule): a frame a step could
+        be decided on (MOVE_KINDS) with no prompt near the target confirms; ambient narration (or a blank capture)
+        starts the pair again once it clears, within move.NARRATION_MAX_S; anything else stops with that frame (a
+        misread included: a touch is never decided on its recapture). ``locate(obs)`` returns the target box (raising
+        Stop or GuardRefusal itself). Returns ``(first, second, target)``, the target as found on the second. None
+        when the run stopped."""
+        from host.android.move import MOVE_KINDS, NARRATION_MAX_S, later_frame_rule
         start = time.monotonic()
         while not self.rt.stopped:
-            found = self.clean_hud(what)
+            found = self.clean_hud(what, map_id, disc)
             if found is None:
                 return None
             first, shape = found
@@ -731,15 +695,19 @@ class Teleport:
             second = self.io.observe()
             if second is None:
                 return None
-            verdict, reason = confirm_shape(second, first, shape, self.reader)
-            if verdict == "restart":
+            verdict, reason = later_frame_rule(second, self.reader, shape)
+            if verdict == "stop":
+                raise Stop(f"确认{what}时画面变了（{reason}）", [second.frame])
+            if second.kind in ("narration", "blank"):
                 if time.monotonic() - start >= NARRATION_MAX_S:
                     raise Stop(f"确认{what}时旁白一直没有消失，没有点", [second.frame])
                 if not self.rt.pause(STEP):
                     return None
                 continue
-            if verdict == "stop":
-                raise Stop(f"确认{what}时画面变了（{reason}），没有点", [second.frame])
+            if second.kind not in MOVE_KINDS:
+                raise Stop(f"确认{what}时画面不是干净的大世界（{second.reason or '认不出的画面'}），没有点", [second.frame])
+            if not prompt_clear(second, *disc):
+                raise Stop(f"确认{what}时要点的地方旁边有交互提示，没有点", [second.frame])
             again = locate(second)
             if not actions._near(again, target):
                 raise Stop(f"确认{what}时目标的位置变了，没有点", [second.frame])
@@ -748,10 +716,12 @@ class Teleport:
 
     # -- open, region, zoom --
 
-    def open_map(self):
-        """From the HUD (both tap frames by the walker's rules, the minimap chevron at its default pivot so the
-        minimap is where its tap point is): one tap on the minimap, then the map. Returns the first Look of the map
-        page (the map or 地图切换), carried into the next step; None when the run stopped."""
+    def open_map(self, map_id=None):
+        """From the open world (both tap frames by the walker's rules on ``map_id``, None when the map is not known
+        yet: then the tracker must show its distance; the minimap chevron at its default pivot so the minimap is
+        where its tap point is; no interaction prompt near the minimap): one tap on the minimap, then the map.
+        Returns the first Look of the map page (the map or 地图切换), carried into the next step; None when the run
+        stopped."""
         from host.android import touch_point
         from host.android.gesture import DecisionExpired
         from host.android.move import MAX_DECISION_AGE_S
@@ -762,7 +732,7 @@ class Teleport:
             guard(self.rt._recognizer_on(obs.frame), box, obs.frame)
             return box
         for _attempt in range(self.rt.TOUCH_KEY_ATTEMPTS):
-            pair = self.hud_pair("点小地图打开大地图", minimap)
+            pair = self.hud_pair("点小地图打开大地图", minimap, map_id, minimap_disc())
             if pair is None:
                 return None
             first, second, box = pair
@@ -983,12 +953,12 @@ class Teleport:
     # -- arrival --
 
     def hud_verdict(self, look, what):
-        """A HUD Look judged by the walker: ``"ok"`` when it passes the walker's first-frame rule (classify with the
-        frame, then first_shape), ``"wait"`` for what the walker waits through; anything it refuses stops here with
+        """A HUD Look on 星海 judged by the walker: ``"ok"`` when it passes the walker's first-frame rule (classify with
+        the frame, then move.first_frame_rule on 星海), ``"wait"`` for what the walker waits through; anything it refuses stops here with
         that frame (a prompt, a tracker with 点击继续, a misread before a clean frame, ...)."""
-        from host.android.move import classify
-        verdict, reason, _shape = first_shape(observation(look, classify(look.screen, look.recognize, look.frame)),
-                                              self.reader)
+        from host.android.move import classify, first_frame_rule
+        verdict, reason, _shape = first_frame_rule(
+            observation(look, classify(look.screen, look.recognize, look.frame)), self.reader, STARSEA_MAP)
         if verdict == "stop":
             raise Stop(f"{what}大世界上{reason}", [look.frame])
         return verdict

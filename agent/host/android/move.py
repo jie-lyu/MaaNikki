@@ -67,6 +67,7 @@ import math
 import re
 import time
 
+from host.android.actions import HUD_LABEL_ROW
 from host.android.gesture import BELL_PRESS_MAX_S, DEFAULT_LAYOUT, GESTURE_MAX_S, DecisionExpired
 from navigation.geometry import segment_distance
 
@@ -235,8 +236,10 @@ class Walker:
     ``fix(frame, hint, search_radius)``)."""
 
     def __init__(self, io, reader, *, clock=time.monotonic, allow_bell: bool = False, allow_jump: bool = False,
-                 leash=None):
+                 leash=None, map_id=None):
         self.io, self.reader, self.clock = io, reader, clock
+        # the map walked on (a name-only tracker is accepted only on NAME_ONLY_MAPS): given, else the reader's
+        self.map_id = map_id if map_id is not None else getattr(reader, "map_id", None)
         self.allow_bell, self.allow_jump = allow_bell, allow_jump
         self.leash = leash  # (x, y, radius): every fix must stay inside, the dev walk's safety fence
         self.steps: list[dict] = []
@@ -488,22 +491,13 @@ class Walker:
                     self._fail("refused", "连续两次没有拿到可用的截图，没有开始移动", obs)
                 self._pause(POLL_S, obs)
                 continue
-            if obs.kind == "misread":  # no layout to compare with yet: a misread at the start is never waited through
-                self._fail("refused", "开始时大世界常驻界面的文字没有按原样读出，没有开始移动", obs)
-            if obs.kind not in (*MOVE_KINDS, "narration"):
-                self._fail("refused", f"开始时画面不是干净的大世界（{obs.reason or '认不出的画面'}），没有开始移动", obs)
-            if not self.reader.present(obs.frame):
-                self._fail("refused", "没有在默认位置认出小地图（界面布局可能改过，或被挡住了），没有开始移动", obs)
-            names, distances = self._tracker_parts(obs)
-            if len(names) > 1 or distances > 1 or any(word in name for name in names for word in NARRATION_DENY):
-                self._fail("refused", "开始时任务栏的位置有多余的文字，不是干净的大世界，没有开始移动", obs)
-            if obs.kind in MOVE_KINDS and len(names) == 1 and distances == 1:
-                self._regions, self._blocks = names[0], obs.blocks
-                return self._moving_on(obs)
-            if obs.kind in MOVE_KINDS and len(names) == 1 and distances == 0 and obs.name_only \
-                    and _cjk(names[0]) >= TRACKER_NAME_MIN_CJK:
-                self._regions, self._blocks, self._name_only = names[0], obs.blocks, True
-                self.io.log("任务栏只显示任务名、没有距离（追踪的任务不在这张地图），之后每张图都要保持这样。")
+            verdict, reason, shape = first_frame_rule(obs, self.reader, self.map_id)
+            if verdict == "stop":
+                self._fail("refused", reason, obs)
+            if verdict == "ok":
+                self._regions, self._blocks, self._name_only = shape.name, shape.blocks, shape.name_only
+                if shape.name_only:
+                    self.io.log("任务栏只显示任务名、没有距离（追踪的任务不在这张地图），之后每张图都要保持这样。")
                 return self._moving_on(obs)
             if obs.kind == "narration" and not logged:
                 logged = True
@@ -528,8 +522,7 @@ class Walker:
         """The quest tracker still shows the first frame's quest name exactly (after tracker_name's 呜/鸣 and
         punctuation), at most its distance besides (none at all when the first frame showed the name alone: a distance
         appearing is a change), nothing else."""
-        names, distances = self._tracker_parts(obs)
-        return names == [self._regions] and distances <= (0 if self._name_only else 1)
+        return tracker_kept(obs, Shape(self._regions, self._blocks or (), self._name_only))
 
     def _look(self) -> Observation:
         """A frame that is the open-world HUD and nothing else, or one with allowed narration waited through; any
@@ -540,13 +533,10 @@ class Walker:
             obs = self.io.observe()
             if obs is None:
                 raise Halt(WalkResult("stopped", STOPPED))
-            hud_like = obs.kind in (*MOVE_KINDS, "narration", "misread")
-            if hud_like and not self.reader.present(obs.frame):  # before any exception
-                self._fail("screen", "小地图上的位置标记不见了（可能有东西挡住了大世界），已停止所有输入", obs)
-            if hud_like and self._regions is not None and not self._tracker_kept(obs):
-                self._fail("screen", "大世界界面上的任务栏文字变了（可能出现了新的提示或任务），已停止所有输入", obs)
-            if hud_like and self._blocks is not None and not same_blocks(obs.blocks, self._blocks):
-                self._fail("screen", "大世界常驻界面上出现了开始时没有的文字块，已停止所有输入", obs)
+            shape = Shape(self._regions, self._blocks, self._name_only) if self._regions is not None else None
+            verdict, reason = later_frame_rule(obs, self.reader, shape)
+            if verdict == "stop":  # before any exception
+                self._fail("screen", reason, obs)
             if misread and obs.kind not in MOVE_KINDS:  # after a misread frame only a frame that passes fully goes on
                 self._fail("screen", "大世界常驻界面的文字连续两次没有按原样读出，已停止所有输入", obs)
             if obs.kind == "misread":
@@ -770,10 +760,9 @@ def counts_as_text(text: str) -> bool:
     return _glyph(text) or _cjk(text) >= 2 or _cjk(text) + _alnum(text) >= 3
 
 
-# The label row's labels and their x centres on the 1280x720 frame (single-label OCR boxes over the saved frames:
-# 商城 656.5, 共鸣 727, 任务 1078, 设计图 1152, 换装 1222; the middle four, always read as one row, at the same spacing).
-LABEL_CENTRES = (("商城", 656.5), ("共鸣", 727.0), ("奇迹之旅", 797.0), ("活动大厅", 868.0), ("奇想日历", 938.0),
-                 ("无限之心", 1008.0), ("任务", 1078.0), ("设计图", 1152.0), ("换装", 1222.0))
+# The label row's labels and their x centres on the 1280x720 frame: host.android.actions.HUD_LABEL_ROW, the one place
+# the HUD label set is kept (account-specific; extend it there).
+LABEL_CENTRES = HUD_LABEL_ROW
 LABEL_HALF_CHAR_PX = 9  # half a label character's width: a run spans its labels' centres +- this x their length
 LABEL_EDGE_PX = 40  # box edges vs. that span (saved rows: within -33..+30 px)
 MIN_LABELS = 7  # labels the full-frame pass must read in place (saved frames: 7-9 of 9, 466 of 492 all 9)
@@ -819,6 +808,7 @@ HUD_REGIONS = (
     ("hearts", (420, 630, 780, 720)),
     ("uid", (0, 660, 260, 720)),
 )
+TRACKER_AREA = dict(HUD_REGIONS)["tracker"]
 # Ambient narration on the saved frames (「暖暖」 over 「起风了——大喵小心，别被吹跑啦。」, m2-goto1; 「大喵」 over
 # 「暖暖，星之铃似乎在闪烁呢！摇动它试试吧？」, phase0/hud-1280x720.png): a known companion's label centred around
 # (638, 521) and one line centred around y 570, split by OCR at most into adjacent pieces.
@@ -880,6 +870,12 @@ def _rect_disk_distance(extent, centre) -> float:
     return math.hypot(dx, dy)
 
 
+def clear_of(extent, centre, radius) -> bool:
+    """Whether a prompt's ``extent`` (x0, y0, x1, y1) keeps CONTROL_CLEAR_PX away from a control drawn as a disc of
+    ``radius`` around ``centre`` (the same rule as controls_clear; host.android.teleport's minimap tap and bell)."""
+    return _rect_disk_distance(extent, centre) > radius + CONTROL_CLEAR_PX
+
+
 def controls_clear(extent, *, jump=False, bell=None, layout=DEFAULT_LAYOUT) -> bool:
     """Whether a prompt's ``extent`` (x0, y0, x1, y1) keeps CONTROL_CLEAR_PX away from every control a gesture
     touches: the joystick ring (its centre and every pushed point lie within Layout.ring of it), the jump button when
@@ -889,7 +885,7 @@ def controls_clear(extent, *, jump=False, bell=None, layout=DEFAULT_LAYOUT) -> b
         controls.append((layout.jump, JUMP_RADIUS_PX))
     if bell is not None:
         controls.append((tuple(bell), BELL_RADIUS_PX))
-    return all(_rect_disk_distance(extent, centre) > radius + CONTROL_CLEAR_PX for centre, radius in controls)
+    return all(clear_of(extent, centre, radius) for centre, radius in controls)
 
 
 def _usable(frame) -> bool:
@@ -1026,10 +1022,16 @@ def read_rows(result) -> Rows:
                 if score >= TEXT_SCORE:
                     outside.append((text, box))
                 continue
+            squashed = re.sub(r"\s", "", text)
+            # A short distance row in the tracker (1米, 3米: two characters, under counts_as_text's floor) is a
+            # distance, recognised before the noise filter drops it.
+            if "米" in squashed and _inside(box, TRACKER_AREA) and TRACKER_DISTANCE_FORM.fullmatch(squashed) \
+                    and score >= TEXT_SCORE:
+                tracker.append((box[1], box[0], TRACKER_DISTANCE))
+                continue
             if score < (TEXT_SCORE if _cjk(text) else ASCII_SCORE) or not counts_as_text(text):
                 continue
             region = next((name for name, area in HUD_REGIONS if _inside(box, area)), None)
-            squashed = re.sub(r"\s", "", text)
             if region is None:
                 (column if _inside(box, PROMPT_COLUMN) else outside).append((text, box))
                 continue
@@ -1124,11 +1126,87 @@ HUD_SLOTS = _slots()  # (region, x0, x1, cy, False): where the permanent text al
 
 def same_blocks(blocks, first) -> bool:
     """No block of ``blocks`` is new against ``first`` (the walk's first frame) and the fixed HUD_SLOTS: each
-    overlaps one of them in the same region and row (real overlap, see BLOCK_PX), or is the ping at its place."""
+    overlaps one of them in the same region and row (real overlap: the half-open x ranges [x0, x1) share at least one
+    pixel; see BLOCK_PX), or is the ping at its place."""
     allowed = tuple(first) + HUD_SLOTS
-    return all(ping or any(region == r and x0 <= fx1 and fx0 <= x1 and abs(y - fy) <= BLOCK_PX
+    return all(ping or any(region == r and x0 < fx1 and fx0 < x1 and abs(y - fy) <= BLOCK_PX
                            for r, fx0, fx1, fy, _ping in allowed) for region, x0, x1, y, ping in blocks)
 
+
+
+# ---- the walk's screen rules, shared with every touch decided on the open world (host.android.teleport) ----
+
+NAME_ONLY_MAPS = frozenset({"starsea"})  # maps where a name-only tracker may start a walk (route review round 2, 6)
+
+
+@dataclass(frozen=True)
+class Shape:
+    """What a walk's first frame fixed: the quest name, the permanent-HUD block layout, and whether the tracker
+    showed that name alone (its distance row positively empty)."""
+    name: str
+    blocks: tuple
+    name_only: bool = False
+
+
+def tracker_parts(obs):
+    """``(names, distances)`` of an observation's quest tracker rows."""
+    names = [entry for entry in obs.regions if entry != TRACKER_DISTANCE]
+    return names, len(obs.regions) - len(names)
+
+
+def tracker_kept(obs, shape) -> bool:
+    """The tracker still shows ``shape``'s name exactly, at most its distance besides (none on a name-only shape)."""
+    names, distances = tracker_parts(obs)
+    return names == [shape.name] and distances <= (0 if shape.name_only else 1)
+
+
+def first_frame_rule(obs, reader, map_id):
+    """Walker._first_look's decision on one observation (blank captures and the wait's deadline stay with the
+    caller): ``("ok", "", Shape)`` for a frame a walk (or a touch on the open world) may start on: the HUD (with at
+    most an allowed interaction prompt: MOVE_KINDS), the minimap chevron at its pivot, and the tracker showing one
+    quest name and its distance, or, on NAME_ONLY_MAPS only, one name of at least TRACKER_NAME_MIN_CJK characters
+    with its distance row positively empty (Observation.name_only); ``("wait", reason, None)`` for a frame the start
+    waits through (a blank capture, an ambient remark, a distance neither read nor shown absent, a name-only tracker
+    off NAME_ONLY_MAPS); ``("stop", reason, None)`` for one it refuses on (a misread before any clean frame, anything
+    else on screen, the chevron away, extra tracker text or a NARRATION_DENY word). Reasons are fixed text."""
+    if obs.kind == "blank":
+        return "wait", "没有拿到截图", None
+    if obs.kind == "misread":  # no layout to compare with yet: a misread at the start is never waited through
+        return "stop", "开始时大世界常驻界面的文字没有按原样读出，没有开始移动", None
+    if obs.kind not in (*MOVE_KINDS, "narration"):
+        return "stop", f"开始时画面不是干净的大世界（{obs.reason or '认不出的画面'}），没有开始移动", None
+    if not reader.present(obs.frame):
+        return "stop", "没有在默认位置认出小地图（界面布局可能改过，或被挡住了），没有开始移动", None
+    names, distances = tracker_parts(obs)
+    if len(names) > 1 or distances > 1 or any(word in name for name in names for word in NARRATION_DENY):
+        return "stop", "开始时任务栏的位置有多余的文字，不是干净的大世界，没有开始移动", None
+    if obs.kind in MOVE_KINDS and len(names) == 1 and distances == 1:
+        return "ok", "", Shape(names[0], obs.blocks, False)
+    if obs.kind in MOVE_KINDS and len(names) == 1 and distances == 0 and obs.name_only \
+            and _cjk(names[0]) >= TRACKER_NAME_MIN_CJK and map_id in NAME_ONLY_MAPS:
+        return "ok", "", Shape(names[0], obs.blocks, True)
+    return "wait", "开始时一直没有等到干净的大世界画面（任务栏没有显示任务名和距离，或旁白没有消失），没有开始移动", None
+
+
+def later_frame_rule(obs, reader, shape):
+    """What Walker._look stops on at first sight on a frame after the first (``shape``: first_frame_rule's; None
+    before there is one): ``("stop", reason)`` for an open-world frame (MOVE_KINDS, narration, misread) whose minimap
+    chevron is gone, whose tracker is not ``shape``'s any more (another name, a distance appearing on a name-only
+    shape, a second one), whose name-only evidence is gone on a frame a step could be decided on (the distance row no
+    longer positively empty), or with a permanent-HUD text block neither the first frame nor the HUD's slots have;
+    ``("ok", "")`` otherwise: the caller then goes by the frame's kind (move, wait through narration, recapture after
+    a misread, stop on anything else)."""
+    if obs.kind not in (*MOVE_KINDS, "narration", "misread"):
+        return "ok", ""
+    if not reader.present(obs.frame):
+        return "stop", "小地图上的位置标记不见了（可能有东西挡住了大世界），已停止所有输入"
+    if shape is not None and not tracker_kept(obs, shape):
+        return "stop", "大世界界面上的任务栏文字变了（可能出现了新的提示或任务），已停止所有输入"
+    if shape is not None and shape.name_only and obs.kind in MOVE_KINDS and not obs.name_only:
+        return "stop", "任务栏距离那一行不能再确认是空的（追踪的任务可能出现在这张地图上），已停止所有输入"
+    if shape is not None and shape.blocks is not None and not same_blocks(obs.blocks, shape.blocks):
+        return "stop", "大世界常驻界面上出现了开始时没有的文字块，已停止所有输入"
+    return "ok", ""
 
 def narration_verdict(rows) -> str:
     """"" when ``rows`` (text outside the HUD regions, at least one) are one ambient remark; otherwise why not (a fixed

@@ -170,36 +170,15 @@ class LookTests(unittest.TestCase):
         self.assertTrue(teleport.province_header([888, 100, 57, 32]))
         self.assertFalse(teleport.province_header([841, 161, 93, 32]))  # a region row (纪念山地)
 
-    def test_the_walkers_rules_for_a_touch_on_the_hud(self):
-        # Review round 2, finding 7: the walker's first-frame rule on the deciding frame (its startup refusal of a
-        # misread included), its later-frame rule on the confirming one.
-        reader = SimpleNamespace(present=lambda frame: frame != "no minimap")
-
-        def obs(kind="hud", regions=("登上鸣鸣列车",), frame="f", blocks=(("labels", 600, 1270, 75, False),),
-                name_only=True):
-            return move.Observation(frame, kind, 0.0, "提示" if kind != "hud" else "", regions=regions, blocks=blocks,
-                                    name_only=name_only)
-        self.assertEqual(teleport.first_shape(obs(), reader), ("ok", "", "name_only"))
-        self.assertEqual(teleport.first_shape(obs(regions=("登上鸣鸣列车", "#"), name_only=False), reader),
-                         ("ok", "", "distance"))
-        for case in (obs("narration"), obs(name_only=False), obs("blank"), obs(regions=("交谈",)),
-                     obs(regions=())):
-            with self.subTest(wait=case.kind, regions=case.regions):
-                self.assertEqual(teleport.first_shape(case, reader)[0], "wait")
-        for case in (obs("misread"), obs("other"), obs(frame="no minimap"), obs(regions=("登上鸣鸣列车", "#", "#")),
-                     obs(regions=("登上鸣鸣列车", "点击继续")), obs(regions=("前往目标",))):
-            with self.subTest(stop=case.kind, regions=case.regions):
-                self.assertEqual(teleport.first_shape(case, reader)[0], "stop")
-        first = obs()
-        self.assertEqual(teleport.confirm_shape(obs(), first, "name_only", reader), ("ok", ""))
-        self.assertEqual(teleport.confirm_shape(obs(regions=("登上鸣鸣列车",)), obs(regions=("登上鸣鸣列车", "#")),
-                                                "distance", reader), ("ok", ""))
-        self.assertEqual(teleport.confirm_shape(obs("narration"), first, "name_only", reader)[0], "restart")
-        for case in (obs("misread"), obs("other"), obs(frame="no minimap"), obs(regions=("别的任务",)),
-                     obs(regions=("登上鸣鸣列车", "#")),  # a distance appearing on a name-only tracker
-                     obs(blocks=(("labels", 600, 1270, 75, False), ("hearts", 300, 400, 680, False)))):
-            with self.subTest(confirm=case.kind, regions=case.regions):
-                self.assertEqual(teleport.confirm_shape(case, first, "name_only", reader)[0], "stop")
+    def test_touches_use_the_walkers_own_rules(self):
+        # Phase B: no copy of the walker's screen rules in teleport; the prompt rule for the minimap and the bell.
+        for name in ("first_shape", "confirm_shape", "hud_unclean", "tracker_parts"):
+            self.assertFalse(hasattr(teleport, name), name)
+        self.assertTrue(teleport.prompt_clear(SimpleNamespace(prompts=((737, 320, 1040, 366),)), (616, 613), 30))
+        self.assertFalse(teleport.prompt_clear(SimpleNamespace(prompts=((560, 560, 600, 600),)), (616, 613), 30))
+        self.assertTrue(teleport.prompt_clear(SimpleNamespace(prompts=()), (159.6, 110.8), 83.25))
+        centre, radius = teleport.minimap_disc()
+        self.assertFalse(teleport.prompt_clear(SimpleNamespace(prompts=((250, 120, 420, 160),)), centre, radius))
 
 
 # ---- the scripted map ----
@@ -389,19 +368,22 @@ class HudIo:
     """move.RuntimeIo stand-in: each observation a HUD frame of ``kinds`` (then clean HUD frames), stamped with the
     (patched) clock; ``regions``: the tracker each shows."""
 
-    def __init__(self, kinds=(), regions=None):
-        self.kinds, self.regions = list(kinds), list(regions or [])
+    def __init__(self, kinds=(), regions=None, prompts=None, name_only=None):
+        self.kinds, self.regions, self.prompts = list(kinds), list(regions or []), list(prompts or [])
+        self.name_only = list(name_only or [])  # per frame; default: a name-only tracker shows its evidence
         self.frames = []
 
     def observe(self):
         import time
         kind = self.kinds.pop(0) if self.kinds else "hud"
-        region = self.regions.pop(0) if self.regions else ("登上鸣鸣列车",)
+        region = self.regions.pop(0) if self.regions else ("登上鸣鸣列车", "#")
+        prompts = self.prompts.pop(0) if self.prompts else ()
+        evidence = self.name_only.pop(0) if self.name_only else region == ("登上鸣鸣列车",)
         frame = Frame(view=None, zoom=None, where="hud", index=len(self.frames))
         self.frames.append(frame)
         return move.Observation(frame, kind, time.monotonic(), "提示" if kind != "hud" else "", regions=region,
-                                blocks=(("labels", 600, 1270, 75, False),), name_only=kind == "hud" and
-                                region == ("登上鸣鸣列车",))
+                                blocks=(("labels", 600, 1270, 75, False),),
+                                name_only=kind in move.MOVE_KINDS and evidence, prompts=prompts)
 
 
 READER = SimpleNamespace(present=lambda frame: True)
@@ -605,22 +587,46 @@ class TeleportFlowTests(unittest.TestCase):
         self.assertIsInstance(error, Stop)
         self.assertNotIn("teleport", game.taps)
 
+    def open_on(self, io, map_id="starsea"):
+        game = Game()
+        rt = scripted_rt(game)
+        with patched(game):
+            try:
+                return teleporter(rt, io=io).open_map(map_id), game, None
+            except Stop as error:
+                return None, game, error
+
     def test_the_minimap_tap_follows_the_walkers_startup_and_confirmation_rules(self):
-        # Review round 2, findings 7 and 13.
-        for io in (HudIo(kinds=["misread", "hud", "hud"]),  # a misread before a clean frame: refused, not waited
-                   HudIo(regions=[("登上鸣鸣列车",), ("登上鸣鸣列车", "#")]),  # a distance appearing in between
-                   HudIo(kinds=["hud", "misread"])):
-            with self.subTest(kinds=io.kinds, regions=io.regions):
-                game = Game()
-                _result, _rt, error = transport(game, io=io)
+        # Review round 2, findings 7 and 13; phase B: the walker's own rules (move.first_frame_rule and
+        # later_frame_rule), the name-only tracker only on 星海.
+        alone = ("登上鸣鸣列车",)
+        for io, map_id in ((HudIo(kinds=["misread", "hud", "hud"]), "starsea"),  # a misread first: refused
+                           (HudIo(regions=[alone, ("登上鸣鸣列车", "#")]), "starsea"),  # a distance appearing
+                           (HudIo(regions=[alone, alone], name_only=[True, False]), "starsea"),  # evidence gone
+                           (HudIo(kinds=["hud", "misread"]), "starsea"),
+                           (HudIo(regions=[alone] * 30), None)):  # name-only with the map unknown: never starts
+            with self.subTest(kinds=io.kinds, regions=io.regions[:2], evidence=io.name_only, map_id=map_id):
+                _look, game, error = self.open_on(io, map_id)
                 self.assertIsInstance(error, Stop)
                 self.assertEqual(game.taps, [])
-        game = Game()
-        io = HudIo(kinds=["hud", "narration", "hud", "hud"])
-        _result, _rt, error = transport(game, io=io)
+        _look, game, error = self.open_on(HudIo(regions=[alone] * 4))
+        self.assertIsNone(error)  # a name-only tracker on 星海, its evidence on both frames
+        self.assertEqual(game.taps, ["minimap"])
+        _look, game, error = self.open_on(HudIo(kinds=["hud", "narration", "hud", "hud"]), None)
         self.assertIsNone(error)
-        self.assertEqual(game.taps[0], "minimap")
         self.assertEqual(game.calls[0]["source"].index, 3)
+
+    def test_a_prompt_near_the_minimap_blocks_its_tap_one_elsewhere_does_not(self):
+        # Phase B: hud_prompt is fine for the tap unless the prompt lies within 40 px + the minimap's radius.
+        near, column = ((250, 120, 420, 160),), ((737, 320, 1040, 366),)  # extents x0, y0, x1, y1
+        _look, game, error = self.open_on(HudIo(kinds=["hud_prompt", "hud_prompt"], prompts=[column, column]), None)
+        self.assertIsNone(error)
+        self.assertEqual(game.taps, ["minimap"])
+        for prompts in ([near, near], [column, near]):
+            with self.subTest(prompts=prompts):
+                _look, game, error = self.open_on(HudIo(kinds=["hud_prompt", "hud_prompt"], prompts=prompts), None)
+                self.assertIsInstance(error, Stop)
+                self.assertEqual(game.taps, [])
 
     def test_the_first_frame_of_each_phase_is_judged_and_kept(self):
         # Review round 2, finding 9: a popup at the start, a wrong panel for one frame after the pillar.
@@ -697,8 +703,8 @@ class FakeMap:
         self.cards, self.calls, self.card_frame = list(cards), [], "card frame"
         self._leave, self.transports_ok = leave, transports_ok
 
-    def open_map(self):
-        self.calls.append("open")
+    def open_map(self, map_id=None):
+        self.calls.append(f"open {map_id}" if map_id else "open")
         return "map look"
 
     def region(self, name="星海", entry=None):
@@ -772,8 +778,8 @@ class RouteTests(unittest.TestCase):
         result, rt, calls, rings = route_run([Card("not_rung"), RUNG4, RUNG9])
         self.assertTrue(result, rt.logs)
         self.assertEqual(rings, ["无界枢纽"])
-        self.assertEqual(calls, ["open", "region", "card", "transport 无界枢纽", "await", "open", "region", "card",
-                                 "transport 星梦群屿·主岛", "open", "region", "card", "leave"])
+        self.assertEqual(calls, ["open", "region", "card", "transport 无界枢纽", "await", "open starsea", "region",
+                                 "card", "transport 星梦群屿·主岛", "open starsea", "region", "card", "leave"])
         self.assertIn(crystal_route.NOTICE, rt.logs)
         self.assertIn("星光结晶：路线前 4/30，路线后 9/30（本趟 +5）。", rt.logs)
 
@@ -901,7 +907,7 @@ class BellTests(unittest.TestCase):
     and kept unless the device input count shows nothing went down (review round 2, findings 1 and 2)."""
 
     def ring(self, kinds=(), regions=None, *, at_hub=True, bell_box=(593, 590, 47, 47), outcomes=(True,),
-             record=None, clock=None, day=DAY):
+             record=None, clock=None, day=DAY, prompts=None):
         from host import UnsupportedInput
         from host.android import gesture
         rt = SimpleNamespace(stopped=False, logs=[], pause=Mock(return_value=True), TOUCH_KEY_ATTEMPTS=3,
@@ -913,7 +919,7 @@ class BellTests(unittest.TestCase):
         reader.present.return_value = True
         reader.fix.return_value = SimpleNamespace(x=HUB["x"] + (0 if at_hub else 30), y=HUB["y"], reliable=True)
         record = record or crystal_route.BellRecord(tempfile.mkdtemp())
-        io = HudIo(kinds=kinds, regions=regions)
+        io = HudIo(kinds=kinds, regions=regions, prompts=prompts)
         run = crystal_route.Run(rt, reader=reader, world=FakeWorld(), io=io, record=record)
         calls, states, outcomes = [], [], list(outcomes)
         device = SimpleNamespace(inputs=0)
@@ -1003,6 +1009,29 @@ class BellTests(unittest.TestCase):
             clock=[SAFE_NOON, dt.datetime(2026, 11, 26, 20, 0, tzinfo=utc)])
         self.assertIsInstance(error, Stop)
         self.assertEqual((calls, final), ([], None))
+
+    def test_a_prompt_near_the_bell_blocks_the_press_one_elsewhere_does_not(self):
+        # Phase B: hud_prompt (movement allowed, never tapped) is fine for the bell unless the prompt lies within
+        # 40 px + the bell's radius on either frame; the route never taps a prompt.
+        column, near = ((737, 320, 1040, 366),), ((560, 540, 600, 580),)
+        result, calls, error, _states, _final = self.ring(kinds=["hud_prompt", "hud_prompt"],
+                                                           prompts=[column, column])
+        self.assertEqual((result, error, len(calls)), (True, None, 1))
+        for prompts in ([near, near], [column, near]):
+            with self.subTest(prompts=prompts):
+                _result, calls, error, _states, final = self.ring(kinds=["hud_prompt", "hud_prompt"], prompts=prompts)
+                self.assertIsInstance(error, Stop)
+                self.assertEqual((calls, final), ([], None))
+
+    def test_the_record_key_is_made_in_one_place(self):
+        # Per-account records later (the UID read from the HUD): every read and write goes through record_key.
+        record = crystal_route.BellRecord(tempfile.mkdtemp())
+        with patch.object(crystal_route, "record_key", side_effect=lambda day: f"account-1/{day}"):
+            record.mark(DAY, "pressed")
+            self.assertEqual(record.attempt(DAY)["state"], "pressed")
+            self.assertEqual(list(record.load()["attempts"]), [f"account-1/{DAY}"])
+            record.clear(DAY)
+            self.assertIsNone(record.attempt(DAY))
 
     def test_a_broken_record_blocks_the_press(self):
         record = crystal_route.BellRecord(tempfile.mkdtemp())
