@@ -584,6 +584,11 @@
   "test_android_replay.py": {
    "tests": [
     "FrameworkTests.test_one_recognizer_sees_each_frame_and_is_freed",
+    "GuardCoverageTests.test_a_caller_that_breaks_early_is_checked_on_exit",
+    "GuardCoverageTests.test_a_run_inside_a_callback_is_refused",
+    "GuardCoverageTests.test_a_second_run_while_one_is_suspended_is_refused",
+    "GuardCoverageTests.test_an_iterator_is_refused_after_its_block_ends",
+    "GuardCoverageTests.test_failed_attempts_count_toward_the_limits",
     "LimitTests.test_a_replay_over_more_frames_than_the_limit_is_refused_before_any_frame",
     "LimitTests.test_current_rss_reads_this_process",
     "LimitTests.test_limits_must_be_finite_and_above_zero",
@@ -595,6 +600,8 @@
     "LimitTests.test_the_reported_peak_includes_the_high_water_mark",
     "LimitTests.test_the_wall_time_is_checked_after_each_callback",
     "LimitTests.test_the_wall_time_starts_before_setup",
+    "MeasurePassTests.test_an_over_budget_process_stops_after_the_reader_setup_before_any_fix",
+    "MeasurePassTests.test_the_log_is_streamed_under_the_guard",
     "MeasurePassTests.test_the_measurement_pass_runs_under_the_replay_limits",
     "OneRecognizerTests.test_accept_skips_frames_without_a_callback",
     "OneRecognizerTests.test_an_open_replay_cannot_be_entered_again",

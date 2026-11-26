@@ -272,7 +272,7 @@ class LimitTests(unittest.TestCase):
             with Fakes():
                 with replay.Replay(rss=rss, limits=replay.Limits(rss_every=2)) as session:
                     self.assertEqual(list(session.run(paths, lambda *a: self.fail("ran"), accept=hd)), [])
-            self.assertEqual(len(reads), 1 + 3 + 1)  # setup, every 2 attempted decodes, the end
+            self.assertEqual(len(reads), 1 + 3 + 1 + 1)  # setup, every 2 attempted decodes, the run's end, the exit
             with Fakes():
                 with self.assertRaises(replay.ReplayLimit):  # an iterator of skipped frames is still stopped
                     replay.replay_frames(iter(paths), lambda *a: self.fail("ran"), accept=hd, rss=no_rss,
@@ -390,7 +390,7 @@ class MeasurePassTests(unittest.TestCase):
                 reads.clear()
                 report = move_frames.measure(build, replay.Limits(rss_every=2))
                 self.assertEqual(report["fixes"]["n"], 6)
-                self.assertEqual(len(reads), 3 + 1)  # every 2 frames read, then the end
+                self.assertEqual(len(reads), 1 + 3 + 1)  # after the reader's setup, every 2 frames read, the end
                 with patch.object(sys, "argv", ["move_frames.py", "--build", str(build), "--no-screens",
                                                 "--max-frames", "1"]), \
                         contextlib.redirect_stdout(io.StringIO()) as out, \
@@ -398,6 +398,118 @@ class MeasurePassTests(unittest.TestCase):
                     self.assertEqual(move_frames.main(), 2)  # --no-screens is still under the limits
         self.assertEqual(out.getvalue(), "")
         self.assertIn("1-frame limit", err.getvalue())
+
+    def test_an_over_budget_process_stops_after_the_reader_setup_before_any_fix(self):
+        import move_frames
+        fixes = []
+        reader = SimpleNamespace(fix=lambda *a: fixes.append(1))
+        with tempfile.TemporaryDirectory() as folder:
+            build = self.build(folder, 3)
+            with patch("host.android.minimap.MinimapReader", lambda *a: reader), \
+                    patch.object(replay, "current_rss", lambda: 4 * replay.GB):
+                with self.assertRaises(replay.ReplayLimit) as caught:
+                    move_frames.measure(build)
+        self.assertEqual(fixes, [])
+        self.assertIn("after 0 frames", str(caught.exception))
+
+    def test_the_log_is_streamed_under_the_guard(self):
+        import move_frames
+        with tempfile.TemporaryDirectory() as folder:
+            build = self.build(folder, 3)
+            log = build / "phase-e-measure" / "m2-test" / "results.jsonl"
+            with log.open("a", encoding="utf-8") as handle:
+                handle.write("not json: never parsed when the limit stops the pass first\n")
+            with patch("host.android.minimap.MinimapReader", self.reader), patch.object(replay, "current_rss", no_rss):
+                with self.assertRaises(replay.ReplayLimit):  # the 5th frame, before the bad line is read
+                    move_frames.measure(build, replay.Limits(max_frames=4))
+                with self.assertRaises(json.JSONDecodeError):  # without the limit the pass does reach it
+                    move_frames.measure(build)
+
+
+class GuardCoverageTests(unittest.TestCase):
+    """The limits also hold for a caller that stops early, catches errors per frame or mixes iterators."""
+
+    def test_a_caller_that_breaks_early_is_checked_on_exit(self):
+        reads = iter([100, 5000])  # after setup, then on the successful exit
+        with Fakes() as fakes:
+            with self.assertRaises(replay.ReplayLimit) as caught:
+                with replay.Replay(rss=lambda: next(reads), limits=replay.Limits(max_rss_bytes=3000)) as session:
+                    for _ in session.run(frames(10), lambda *a: "found"):
+                        break  # the first match is enough
+        self.assertIn("after 1 frames", str(caught.exception))
+        self.assertEqual(fakes.events, ["release recognizer", "destroy Controller"])  # freed after the check
+
+    def test_failed_attempts_count_toward_the_limits(self):
+        def fails(recognizer, path, image):
+            raise ValueError("ocr post-processing failed")
+
+        def unreadable(path):
+            raise probe.ProbeError("unreadable")
+
+        def bad_accept(image):
+            raise ValueError("accept failed")
+
+        for case in ("callback", "decode", "accept"):
+            with self.subTest(case=case):
+                reads, outcomes = [], []
+                with Fakes(), contextlib.ExitStack() as stack:
+                    if case == "decode":
+                        stack.enter_context(patch.object(probe, "read_frame", unreadable))
+                    with replay.Replay(rss=lambda: reads.append(1) or 1,
+                                       limits=replay.Limits(max_frames=1, rss_every=1)) as session:
+                        for path in frames(3):  # one session, an error caught per frame
+                            try:
+                                list(session.run([path], fails if case == "callback" else lambda *a: None,
+                                                 accept=bad_accept if case == "accept" else None))
+                            except replay.ReplayLimit:
+                                outcomes.append("limit")
+                            except (ValueError, probe.ProbeError):
+                                outcomes.append("error")
+                        self.assertEqual(session.guard.attempts, 1)
+                self.assertEqual(outcomes, ["error", "limit", "limit"])
+                self.assertEqual(len(reads), 1 + 1 + 1)  # setup, the failed attempt, the exit
+
+    def test_a_run_inside_a_callback_is_refused(self):
+        with Fakes() as fakes:
+            with replay.Replay(rss=no_rss) as session:
+                def nested(recognizer, path, image):
+                    list(session.run(frames(1), lambda *a: None))  # would show another frame mid-judgement
+
+                with self.assertRaises(RuntimeError) as caught:
+                    list(session.run(frames(2), nested))
+                self.assertIn("in progress", str(caught.exception))
+                self.assertEqual(fakes.controllers[0].shown, ["pixels of frame-000.png"])
+                self.assertEqual([p for p, _ in session.run(frames(1), lambda *a: None)], frames(1))  # freed again
+
+    def test_a_second_run_while_one_is_suspended_is_refused(self):
+        with Fakes():
+            with replay.Replay(rss=no_rss) as session:
+                first = session.run(frames(3), lambda *a: None)
+                next(first)
+                with self.assertRaises(RuntimeError):
+                    next(session.run(frames(1), lambda *a: None))
+                first.close()  # closing the first iterator ends its run
+                self.assertEqual(len(list(session.run(frames(1), lambda *a: None))), 1)
+
+    def test_an_iterator_is_refused_after_its_block_ends(self):
+        with Fakes():
+            session = replay.Replay(rss=no_rss, limits=replay.Limits(max_frames=2))
+            with session:
+                old = session.run(iter(frames(5)), lambda *a: None)
+                next(old)
+            with self.assertRaises(RuntimeError):  # closed
+                next(old)
+            with session:
+                old2 = session.run(iter(frames(5)), lambda *a: None)
+                next(old2)
+                old2_guard = session.guard
+            with session:  # reopened: the old iterator may not charge or use the new block
+                with self.assertRaises(RuntimeError) as caught:
+                    next(old2)
+                self.assertIn("ended", str(caught.exception))
+                self.assertEqual(session.guard.attempts, 0)
+                self.assertIsNot(session.guard, old2_guard)
+                self.assertEqual(len(list(session.run(frames(2), lambda *a: None))), 2)
 
 
 class ReleaseTests(unittest.TestCase):

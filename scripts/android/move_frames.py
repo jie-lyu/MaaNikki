@@ -38,8 +38,16 @@ sys.path.insert(0, str(ROOT / "scripts" / "android"))
 
 
 def runs(build: Path):
+    """(run folder, its records), the records read one line at a time (never a whole log in memory)."""
     for path in sorted((build / "phase-e-measure").glob("m*/results.jsonl")):
-        yield path.parent, [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+        yield path.parent, records(path)
+
+
+def records(path: Path):
+    with path.open(encoding="utf-8") as lines:
+        for line in lines:
+            if line.strip():
+                yield json.loads(line)
 
 
 def main() -> int:
@@ -72,9 +80,11 @@ def measure(build: Path, limits=None) -> dict:
 
     guard = replay.Guard(limits or replay.Limits()).start()
     reader = MinimapReader("miraland", ROOT / "resource")
+    guard.check_memory()  # after the reader's setup, before the first record
     deviations, scores, timings, gates, ratios, lags, angle_errors = [], [], [], [0, 0], [], [], []
-    for folder, records in runs(build):
-        for record in records:
+    for folder, log in runs(build):
+        for record in log:
+            guard.check_time()
             if record.get("kind") not in ("gesture", "goto", "camera"):
                 continue
             before = record["before"]

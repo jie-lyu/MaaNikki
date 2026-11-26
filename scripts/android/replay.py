@@ -143,11 +143,12 @@ class Guard:
     """The frame, wall-time and memory limits of one pass over saved frames, without a recognizer.
 
         guard = Guard(limits).start(len(paths))
+        ...                                       # setup, then guard.check_memory()
         for path in paths:
             guard.before_decode()
             image = cv2.imread(str(path))
             ...                                   # the work on that frame
-            guard.after_frame()
+            guard.after_frame()                   # also when that work raised
         guard.finish()
     """
 
@@ -180,13 +181,14 @@ class Guard:
                               f"above the {self.limits.max_rss_bytes / GB:.2f} GB limit (frames are not being freed?)")
 
     def before_decode(self) -> None:
+        """Reserve one attempt (it counts even if the decode or the work on the frame then fails)."""
         self.check_time()
         if self.attempts >= self.limits.max_frames:
             raise ReplayLimit(f"stopped at the {self.limits.max_frames}-frame limit")
+        self.attempts += 1
 
     def after_frame(self) -> None:
-        """After a decode and whatever was done with it (nothing, for a skipped frame)."""
-        self.attempts += 1
+        """After a decode and whatever was done with it (nothing for a skipped frame), also when that failed."""
         self.check_time()
         if self.attempts % self.limits.rss_every == 0:
             self.check_memory()
@@ -210,6 +212,8 @@ class Replay:
         self.recognizer = None
         self.frames = 0          # frames shown so far
         self._open = False
+        self._generation = 0     # one per with block: an iterator of an earlier block is refused
+        self._running = None     # the token of the run() iterator in progress
 
     @property
     def peak_rss(self) -> int:
@@ -219,6 +223,8 @@ class Replay:
         if self._open:
             raise RuntimeError("this Replay is already open: one recognizer per replay, never a second one")
         self._open = True
+        self._generation += 1
+        self._running = None
         self.guard, self.frames = Guard(self.limits, rss=self._rss, peak=self._peak), 0
         try:
             self.guard.start()  # setup counts toward the wall time
@@ -231,8 +237,12 @@ class Replay:
             raise
         return self
 
-    def __exit__(self, *exc) -> None:
-        self.close()
+    def __exit__(self, exc_type, *exc) -> None:
+        try:
+            if exc_type is None:  # a caller that stopped early (break) is checked too, before anything is freed
+                self.guard.finish()
+        finally:
+            self.close()
 
     def close(self) -> None:
         """Free the tasker, the resource and the controller (in that order). Safe to call twice."""
@@ -246,38 +256,66 @@ class Replay:
                 if controller is not None:
                     probe.destroy_native(controller)
             finally:
-                self._open = False
+                self._open, self._running = False, None
 
     def run(self, paths: Iterable[Path], callback: Callable[[Any, Path, Any], Any], *,
             accept: Callable[[Any], bool] | None = None) -> Iterator[tuple[Path, Any]]:
         """Yield (path, callback(recognizer, path, image)) for each frame, in order, on the one recognizer.
 
         Without `accept`, a frame that cannot be read or is not 16:9 raises probe.ProbeError. With it, each frame is
-        read with cv2.imread and skipped (no callback) unless accept(image) is true; image may be None. A skipped
-        frame still counts toward the frame limit and the memory reads.
+        read with cv2.imread and skipped (no callback) unless accept(image) is true; image may be None. Every attempt
+        counts toward the frame limit and the memory reads: skipped frames, and frames whose decode, accept or
+        callback raised. One run at a time: a second run() while one is in progress (started and neither finished
+        nor closed), or an iterator resumed after its with block ended, raises RuntimeError.
         """
         if self.recognizer is None:
             raise RuntimeError("Replay.run outside its with block")
-        guard = self.guard
-        if hasattr(paths, "__len__") and len(paths) > self.limits.max_frames:
-            raise ReplayLimit(f"replay refused: {len(paths)} frames, above the {self.limits.max_frames}-frame limit "
-                              f"(raise it explicitly, e.g. --max-frames, if this is intended)")
-        for path in paths:
-            guard.before_decode()
-            if accept is None:
-                image = probe.read_frame(path)
-            else:
-                import cv2
-                image = cv2.imread(str(path))
-                if not accept(image):
-                    guard.after_frame()
+        return self._run(self._generation, paths, callback, accept)
+
+    def _check_current(self, generation: int, token) -> None:
+        if not self._open or self._generation != generation:
+            raise RuntimeError("this run() belongs to a Replay block that has ended")
+        if self._running is not token:
+            raise RuntimeError("another run() of this Replay is in progress")
+
+    def _run(self, generation, paths, callback, accept):
+        token = object()
+        if self._running is not None:
+            raise RuntimeError("another run() of this Replay is in progress: finish or close it first")
+        self._check_current(generation, None)
+        self._running = token
+        try:
+            guard = self.guard
+            if hasattr(paths, "__len__") and len(paths) > self.limits.max_frames:
+                raise ReplayLimit(f"replay refused: {len(paths)} frames, above the {self.limits.max_frames}-frame "
+                                  f"limit (raise it explicitly, e.g. --max-frames, if this is intended)")
+            for path in paths:
+                self._check_current(generation, token)
+                guard.before_decode()
+                skipped = False
+                try:
+                    if accept is None:
+                        image = probe.read_frame(path)
+                    else:
+                        import cv2
+                        image = cv2.imread(str(path))
+                        skipped = not accept(image)
+                    if not skipped:
+                        self.controller.show(image)
+                        result = callback(self.recognizer, path, image)
+                        self.frames += 1
+                except BaseException:
+                    guard.after_frame()  # the failed attempt is counted and checked (a limit hit replaces the error)
+                    raise
+                guard.after_frame()
+                if skipped:
                     continue
-            self.controller.show(image)
-            result = callback(self.recognizer, path, image)
-            self.frames += 1
-            guard.after_frame()
-            yield path, result
-        guard.finish()
+                yield path, result
+            self._check_current(generation, token)
+            guard.finish()
+        finally:
+            if self._running is token:
+                self._running = None
 
 
 def replay_frames(paths: Iterable[Path], callback: Callable[[Any, Path, Any], Any], *, android_layer: bool = True,
