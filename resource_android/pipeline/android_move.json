@@ -1,0 +1,9 @@
+{
+  "MaaNikki_Android_Narration": {
+    "recognition": "OCR",
+    "roi": [240, 500, 800, 95],
+    "expected": ".+",
+    "threshold": 0.8,
+    "action": "DoNothing"
+  }
+}

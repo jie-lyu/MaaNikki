@@ -881,7 +881,7 @@ class ResourceTests(unittest.TestCase):
         price = re.compile(nodes[shop.PRICE_GUARD]["expected"])
         for text in ("¥6", "￥396¥298", "¥61¥6", "8060", "18560", "100", "免费", "购买", "4365"):
             self.assertTrue(price.search(text), text)
-        for text in ("本周限购0/1", "剩余限购1/1", "虹迹赠礼", "x80", "X10000", "-25%", "4日", "甄选礼包", "UID 117297341"):
+        for text in ("本周限购0/1", "剩余限购1/1", "虹迹赠礼", "x80", "X10000", "-25%", "4日", "甄选礼包", "UID 123456789"):
             self.assertFalse(price.search(text), text)
         limit = re.compile(nodes[shop.WEEKLY_LIMIT]["expected"])
         self.assertTrue(limit.search("本周限购0/1") and limit.search("本周限购 10/10"))
