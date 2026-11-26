@@ -120,7 +120,10 @@ def run(rt, options: dict) -> bool:
             return False
         text = f"走路探针：{decided[1]}（发出 {result.attempted} 步，完成 {result.confirmed} 步）"
         if _write == 0:
-            rt.log(text, detail=True)  # the message file's copy (blocking I/O), not shown yet
+            # The message file's copy (blocking I/O), not shown yet. Not Runtime.log: when its file append fails it
+            # displays the text at once; here a failed append is followed by the same rechecks before any display.
+            from message_log import write_message
+            write_message(text, None)
     _show(rt, text)  # shown only now: both rechecks passed immediately before it
     return decided[0] == "arrived" and not io.stopped()
 

@@ -960,9 +960,12 @@ class ReviewRound3Tests(unittest.TestCase):
 
     def test_5_the_bell_cannot_end_past_the_deadline(self):
         walk, io = walker(World((0, 0), yaw=90.0), allow_bell=True)
-        result = walk.walk([Goal(0.5, 0, 1.2, action="bell")], (0, 0), 6.5)
-        self.assertTrue(result.ok, result.message)
-        self.assertLessEqual(io.not_afters[-1] + FakeIo.BELL_S + move.LIFT_MARGIN_S, 100 + 6.5 + 1e-9)
+        # 5 s budget: the frame's own expiry (capture request + 1.2 s) would let a 4 s press end at 105.4 > 105.0;
+        # only the deadline cutoff (deadline - press - lift margin) keeps it inside: removing it fails this test
+        walk.walk([Goal(0.5, 0, 1.2, action="bell")], (0, 0), 5.0)
+        self.assertEqual(len(io.not_afters), 1)
+        self.assertLess(io.not_afters[0], io.started[1] + move.MAX_DECISION_AGE_S)
+        self.assertLessEqual(io.not_afters[0] + FakeIo.BELL_S + move.LIFT_MARGIN_S, 100 + 5.0 + 1e-9)
 
     def test_5_runtime_io_pause_is_bounded_wall_time_not_runtime_pause(self):
         import time as real_time
@@ -1005,15 +1008,29 @@ class ReviewRound3Tests(unittest.TestCase):
         self.assertEqual(io.steps[0]["jump_at"], move.JUMP_AT_S)  # unshortened, it still jumps
 
     # 12: the probe's fix prints no OCR text
-    def test_12_the_probe_prints_tracker_rows_opaquely(self):
+    def test_12_the_probe_fix_command_prints_no_ocr_text(self):
+        import contextlib
+        import io as text_io
+        from types import SimpleNamespace
+        from unittest.mock import patch
         sys.path.insert(0, str(ROOT / "scripts" / "android"))
         import probe
-        out = probe._opaque("登上鸣鸣列车")
-        self.assertEqual(set(out), {"length", "sha1"})
-        self.assertNotIn("登", json.dumps(out, ensure_ascii=False))
+        verdict = move.Verdict("hud", "", ("登上鸣鸣列车", move.TRACKER_DISTANCE), ())
+        recognizer = SimpleNamespace(on_one_frame=lambda function: verdict, last_frame=object())
+        reader = SimpleNamespace(fix=lambda *a: Fix(1, 2, 0.8, 10.0, 1.0, True), present=lambda frame: True)
+        out = text_io.StringIO()
+        with patch.object(probe, "Recognizer", return_value=recognizer), \
+                patch.object(probe, "frame_controller", return_value=object()), \
+                patch("host.android.minimap.MinimapReader", return_value=reader), contextlib.redirect_stdout(out):
+            self.assertEqual(probe.main(["fix", "--map", "miraland", "--hint", "1", "2", "--frame", "f.png"]), 0)
+        printed = out.getvalue()
+        self.assertIn('"tracker"', printed)
+        self.assertFalse(any("一" <= ch <= "鿿" for ch in printed), printed)  # no OCR-derived text
 
 
-HUD_BLOCKS = (("hearts", 520.0, 720.0, 679.0), ("labels", 638.0, 676.0, 73.0), ("uid", 0.0, 90.0, 709.0))
+HUD_BLOCKS = (("hearts", 520.0, 720.0, 679.0, False), ("labels", 638.0, 676.0, 73.0, False),
+              ("uid", 0.0, 90.0, 709.0, False))
+PING = ("uid", 141.0, 168.0, 709.0, True)  # 46ms where c01--100-b read it
 
 
 class MisreadRuleTests(unittest.TestCase):
@@ -1055,9 +1072,9 @@ class MisreadRuleTests(unittest.TestCase):
                 self.assertEqual((result.outcome, len(io.steps), io.observed), ("screen", 1, 3))
 
     def test_an_added_or_moved_block_stops_at_once(self):
-        for name, layout in (("added", HUD_BLOCKS + (("uid", 140.0, 180.0, 709.0),)),
-                             ("moved", (("hearts", 520.0, 720.0, 679.0), ("labels", 900.0, 960.0, 73.0),
-                                        ("uid", 0.0, 90.0, 709.0)))):
+        for name, layout in (("added", HUD_BLOCKS + (("uid", 140.0, 180.0, 709.0, False),)),  # not a ping there
+                             ("moved", (("hearts", 520.0, 720.0, 679.0, False), ("labels", 560.0, 600.0, 73.0, False),
+                                        ("uid", 0.0, 90.0, 709.0, False)))):
             with self.subTest(name):
                 walk, io = self.walker(["hud", ("misread", "读错"), "hud"],
                                        blocks=lambda n, layout=layout: HUD_BLOCKS if n == 1 else layout)
@@ -1074,10 +1091,86 @@ class MisreadRuleTests(unittest.TestCase):
 
     def test_same_blocks(self):
         self.assertTrue(move.same_blocks(HUD_BLOCKS, HUD_BLOCKS))
-        self.assertTrue(move.same_blocks((("hearts", 520.0, 600.0, 679.0),) + HUD_BLOCKS[1:], HUD_BLOCKS))  # 心誓5
+        self.assertTrue(move.same_blocks((("hearts", 520.0, 600.0, 679.0, False),) + HUD_BLOCKS[1:], HUD_BLOCKS))
         self.assertTrue(move.same_blocks(HUD_BLOCKS[:2], HUD_BLOCKS))  # a block not read this time is no new block
-        self.assertFalse(move.same_blocks((("uid", 638.0, 676.0, 73.0),) + HUD_BLOCKS[::2], HUD_BLOCKS))
-        self.assertFalse(move.same_blocks(HUD_BLOCKS + (("labels", 900.0, 960.0, 73.0),), HUD_BLOCKS[:1]))
+        self.assertTrue(move.same_blocks(HUD_BLOCKS + (PING,), HUD_BLOCKS))  # the ping may appear later
+        self.assertFalse(move.same_blocks((("uid", 638.0, 676.0, 73.0, False),) + HUD_BLOCKS[::2], HUD_BLOCKS))
+        self.assertFalse(move.same_blocks(HUD_BLOCKS + (("labels", 560.0, 600.0, 73.0, False),), HUD_BLOCKS[:1]))
+        self.assertFalse(move.same_blocks((("hearts", 740.0, 775.0, 679.0, False),), HUD_BLOCKS))  # past the bar
+        # one frame's incomplete read: a label or the bar's ×1 the first frame missed is in its slot, not new
+        self.assertTrue(move.same_blocks((("labels", 1204.0, 1241.0, 73.0, False),
+                                          ("hearts", 573.0, 688.0, 679.0, False)), HUD_BLOCKS[2:]))
+        # real overlap: a block starting 10 px after the first frame's ended is a new block (review round 4, 4)
+        self.assertFalse(move.same_blocks((("uid", 100.0, 110.0, 709.0, False),), HUD_BLOCKS))
+
+
+class ReviewRound4Tests(unittest.TestCase):
+    """Movement review round 4: each finding's scenario, replayed."""
+
+    def test_1_a_misread_at_the_start_is_saved_and_refused(self):
+        walk, io = walker(World((0, 0)), kinds=[("misread", "读错"), ("misread", "读错"), "hud"])  # c05 a, b, b-hud
+        result = walk.walk([Goal(0, -6)], (0, 0), 60)
+        self.assertEqual((result.outcome, io.steps, io.observed), ("refused", [], 1))
+        self.assertEqual(io.saved[0][2].number, 1)
+
+    def _blocks_walker(self, layout):
+        walk, io = walker(World((0, 0), yaw=0.0))
+        original = io.observe
+
+        def observe():
+            obs = original()
+            obs.blocks = layout(obs.frame.number)
+            return obs
+        io.observe = observe
+        return walk, io
+
+    def test_2_the_ping_appearing_later_goes_on_but_another_new_block_stops_on_any_frame(self):
+        walk, io = self._blocks_walker(lambda n: HUD_BLOCKS if n == 1 else HUD_BLOCKS + (PING,))  # c01-a, c01-b
+        self.assertTrue(walk.walk([Goal(0, -12)], (0, 0), 60).ok)
+        walk, io = self._blocks_walker(
+            lambda n: HUD_BLOCKS if n == 1 else HUD_BLOCKS + (("uid", 100.0, 108.0, 709.0, False),))
+        result = walk.walk([Goal(0, -20)], (0, 0), 60)  # a plain hud frame with a new block: stop on it
+        self.assertEqual((result.outcome, len(io.steps), io.observed), ("screen", 1, 2))
+        self.assertEqual(io.saved[0][2].number, 2)
+
+    def test_3_the_recapture_after_a_misread_must_have_a_trusted_fix(self):
+        world = World((0, 0), yaw=0.0)
+        weak = Fix(0, -7.44, 0.22, 0.0, 1.0, False)
+        walk, io = walker(world, kinds=["hud", ("misread", "读错"), "hud"], reader=FakeReader(world, bad={3: weak}))
+        result = walk.walk([Goal(0, -20)], (0, 0), 60)
+        self.assertEqual((result.outcome, len(io.steps), io.observed), ("lost", 1, 3))
+
+    def test_5_a_misread_frame_that_cannot_be_saved_stops(self):
+        walk, io = walker(World((0, 0)), kinds=["hud", ("misread", "读错"), "hud"])
+        original = io.save
+        io.save = lambda stage, reason, frame, details=None: (original(stage, reason, frame, details),
+                                                              stage != "android_move_misread")[1]
+        result = walk.walk([Goal(0, -20)], (0, 0), 60)
+        self.assertEqual((result.outcome, len(io.steps), io.observed), ("screen", 1, 2))
+        self.assertFalse(any("frame saved" in text for _detail, text in io.logs))
+
+    def test_capture_age_counts_from_the_real_timestamp_source(self):
+        import numpy as np
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from host.android.actions import Screen
+        from host.android.target import TouchSnapshot
+        clock = Clock()
+        frame = np.zeros((720, 1280, 3), np.uint8)
+
+        def capture():  # the reading, the screencap and a slow post-capture focus query: 2 s inside the call
+            clock.t += 2.0
+            return frame
+        rt = SimpleNamespace(stopped=False, _fresh_device_frame=capture, _frame_still_valid=lambda f: True,
+                             _recognizer_on=lambda f: (lambda node, override=None: Ocr([Row(*r) for r in HUD_TEXT])))
+        with patch("host.device_input", return_value=SimpleNamespace(touch_of=lambda f: TouchSnapshot("none", 1, 1))), \
+                patch("host.android_user_stop", return_value=False), \
+                patch("host.android.actions.read_screen", return_value=Screen("hud", {"duck": [30, 18, 54, 54]})):
+            obs = move.RuntimeIo(rt, clock=clock).observe()
+        self.assertEqual((obs.at, obs.captured), (100.0, 102.0))  # the expiry base is before the capture request
+        walk = Walker(FakeIo(World((0, 0)), clock), FakeReader(World((0, 0))), clock=clock)
+        walk.deadline = 1000
+        self.assertEqual(walk._not_after(obs, 1.0), 100.0 + move.MAX_DECISION_AGE_S)  # already expired at 102
 
 
 def _frame(name):
@@ -1301,7 +1394,7 @@ class DevEntryTests(unittest.TestCase):
             self.assertFalse(walk_probe.run(rt, {"map": "miraland", "hint": [1, 2], "target": [3, 4]}))
         rt.log.assert_not_called()
 
-    def _probe_run(self, *, record_hook=None, log_hook=None, deadline_in=None, stop=lambda: False):
+    def _probe_run(self, *, record_hook=None, log_hook=None, deadline_in=None, stop=lambda: False, write_ok=True):
         """walk_probe.run with an arrived walk; returns (result, rt, the walk.jsonl lines)."""
         import time as real_time
         from types import SimpleNamespace
@@ -1324,8 +1417,11 @@ class DevEntryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, patch("app_paths.DATA_ROOT", Path(folder)), \
                 patch("host.game_backend", return_value="android"), patch("host.android.minimap.MinimapReader"), \
                 patch.object(move.Walker, "walk", fake_walk), patch.object(walk_probe.DiagnosticIo, "record", record), \
-                patch("host.android_user_stop", side_effect=lambda *a, **k: stop()):
+                patch("host.android_user_stop", side_effect=lambda *a, **k: stop()), \
+                patch("message_log.write_message", side_effect=lambda *a, **k: (log_hook and log_hook(), write_ok)[1]) \
+                as written:
             result = walk_probe.run(rt, {"map": "miraland", "hint": [1, 2], "target": [3, 4]})
+            rt.written = written
             lines = [json.loads(line) for line in next(Path(folder).rglob("walk.jsonl")).read_text(
                 encoding="utf-8").splitlines()]
         return result, rt, lines
@@ -1356,7 +1452,32 @@ class DevEntryTests(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(lines[-1]["outcome"], "arrived")
         rt.context.run_task.assert_called_once()
-        self.assertEqual(rt.log.call_args.kwargs, {"detail": True})  # the file copy, not a second display
+        rt.log.assert_not_called()  # the file copy went straight to the message file: no Runtime.log fallback
+        self.assertIsNone(rt.written.call_args.args[1])  # written as a file-only message
+
+    def test_6_a_failed_message_file_append_with_a_stop_shows_nothing(self):
+        flag = {"stop": False}
+        result, rt, lines = self._probe_run(log_hook=lambda: flag.update(stop=True), stop=lambda: flag["stop"],
+                                            write_ok=False)
+        self.assertFalse(result)
+        rt.context.run_task.assert_not_called()
+        self.assertEqual(lines[-1]["outcome"], "stopped")
+
+    def test_6_expiry_inside_the_post_write_stop_query_is_no_arrival(self):
+        import time as real_time
+        calls = {"n": 0}
+
+        def slow_stop_query():  # the stop query asked after the result write outlasts the deadline
+            calls["n"] += 1
+            if calls["n"] == 2:
+                end = real_time.monotonic() + 0.1
+                while real_time.monotonic() < end:
+                    pass
+            return False
+        result, rt, lines = self._probe_run(deadline_in=0.05, stop=slow_stop_query)
+        self.assertFalse(result)
+        self.assertEqual(lines[-1]["outcome"], "timeout")
+        self.assertNotIn("已到达", str(rt.context.run_task.call_args))
 
     def test_bad_runner_options_are_reported_in_chinese(self):
         sys.path.insert(0, str(ROOT / "scripts"))

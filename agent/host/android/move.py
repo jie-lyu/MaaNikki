@@ -229,6 +229,7 @@ class Walker:
         self._start = (None, None)  # (first goal, start radius) for the guard before the first gesture
         self._regions = None  # the first frame's quest name (Verdict.regions)
         self._blocks = None  # the first frame's permanent-HUD text block layout (Verdict.blocks)
+        self._after_misread = False  # the frame just returned follows a misread one: its fix must hold, no retry
 
     # -- entry --
 
@@ -438,7 +439,9 @@ class Walker:
                     self._fail("refused", "连续两次没有拿到可用的截图，没有开始移动", obs)
                 self._pause(POLL_S, obs)
                 continue
-            if obs.kind not in ("hud", "narration", "misread"):
+            if obs.kind == "misread":  # no layout to compare with yet: a misread at the start is never waited through
+                self._fail("refused", "开始时大世界常驻界面的文字没有按原样读出，没有开始移动", obs)
+            if obs.kind not in ("hud", "narration"):
                 self._fail("refused", f"开始时画面不是干净的大世界（{obs.reason or '认不出的画面'}），没有开始移动", obs)
             if not self.reader.present(obs.frame):
                 self._fail("refused", "没有在默认位置认出小地图（界面布局可能改过，或被挡住了），没有开始移动", obs)
@@ -481,16 +484,22 @@ class Walker:
                 self._fail("screen", "小地图上的位置标记不见了（可能有东西挡住了大世界），已停止所有输入", obs)
             if hud_like and self._regions is not None and not self._tracker_kept(obs):
                 self._fail("screen", "大世界界面上的任务栏文字变了（可能出现了新的提示或任务），已停止所有输入", obs)
+            if hud_like and self._blocks is not None and not same_blocks(obs.blocks, self._blocks):
+                self._fail("screen", "大世界常驻界面上出现了开始时没有的文字块，已停止所有输入", obs)
             if misread and obs.kind != "hud":  # after a misread frame only a frame that passes fully goes on
                 self._fail("screen", "大世界常驻界面的文字连续两次没有按原样读出，已停止所有输入", obs)
             if obs.kind == "misread":
-                # Only a permanent-HUD block's string differs, its blocks exactly where the first frame had them:
-                # an OCR misread. The frame is kept, nothing is decided on it, and one fresh frame must pass fully.
-                if self._blocks is None or not same_blocks(obs.blocks, self._blocks):
-                    self._fail("screen", "大世界常驻界面的文字和开始时不一样，已停止所有输入", obs)
+                # Only a permanent-HUD block's string differs, its blocks where the first frame had them: an OCR
+                # misread. The frame is kept, nothing is decided on it, and one fresh frame must pass fully (its fix
+                # included: self._after_misread). Without the saved frame there is no recapture.
+                if self._blocks is None:
+                    self._fail("screen", "大世界常驻界面的文字没有按原样读出，已停止所有输入", obs)
                 misread = True
-                self.io.save("android_move_misread", "大世界常驻界面的文字没有按原样读出，不在这张图上走，重新截一张", obs.frame,
-                             {"position": self.position, "steps": len(self.steps)})
+                saved = self.io.save("android_move_misread", "大世界常驻界面的文字没有按原样读出，不在这张图上走，重新截一张",
+                                     obs.frame, {"position": self.position, "steps": len(self.steps)})
+                self._check_stop()
+                if not saved:
+                    self._fail("screen", "大世界常驻界面的文字没有按原样读出，截图也没能保存，已停止所有输入", obs)
                 self._detail("a permanent-HUD text block misread: frame saved, captured once more")
                 self._check_deadline(obs)
                 self._pause(POLL_S, obs)
@@ -498,6 +507,7 @@ class Walker:
             if obs.kind == "hud":
                 if narration_since is not None:
                     self.io.log("环境旁白已消失，继续移动。")
+                self._after_misread = misread
                 return obs
             if obs.kind == "blank":
                 blanks += 1
@@ -571,8 +581,11 @@ class Walker:
             predicted = anchor
         self._require_minimap(obs)
         fix = self.reader.fix(obs.frame, predicted, TRACK_SEARCH)
+        after_misread, self._after_misread = self._after_misread, False
         if self._good(fix, origin, seconds, anchor):
             return self._accept(obs, fix)
+        if after_misread:  # the recapture after a misread must pass fully: no second chance for its fix either
+            self._fail("lost", "重新截的图上小地图定位不可信，已停止", obs, details={"fix": fix.log()})
         self._detail(f"bad fix {fix.log()} near {predicted}; one wider retry")
         if self._lift_at is not None:
             self._pause(SETTLE_S - (self.clock() - self._lift_at), obs)
@@ -767,11 +780,17 @@ def _inside(box, region) -> bool:
     return region[0] <= cx < region[2] and region[1] <= cy < region[3]
 
 
-# A permanent-HUD text block of a misread frame is no new block when it overlaps one of the first frame's blocks in the
-# same region (x ranges overlapping within BLOCK_PX, centres within BLOCK_PX vertically). Overlap, not equal count
-# and centre: OCR splits and merges the label row differently from frame to frame (共鸣 apart or joined to the next
-# labels), and the 心誓 block's width changes with ×1 read or not; a block where the first frame had none stops.
+# Every frame's permanent-HUD text blocks must lie where the walk's first frame had a block, or in that region's own
+# fixed slot (HUD_SLOTS: each label's place, the 心誓 bar, the UID text): each overlaps one of those in the same region
+# (x ranges sharing at least a pixel, centres within BLOCK_PX vertically). The ping in the UID corner, read on only
+# some frames, may appear at its place (PING_PLACE) in its observed forms only (46ms, 47m, 45mm). Any other block
+# stops the walk. Why the slots and not the first frame's blocks alone: one frame reads the permanent text
+# incompletely (a label, the 心誓 bar's ×1, the ping missing), and on the saved sequences (397 frames after their
+# run's first clean one) the first frame's blocks alone stopped 23 clean frames, with the label and 心誓 slots 10
+# (all pings read as 47m or 45mm), with the observed ping forms too 0.
 BLOCK_PX = 12
+PING_FORM = re.compile(r"\d{1,4}m{1,2}s?")
+PING_PLACE = (110, 192, 700, 716)  # its box's left edge >= 110, right edge <= 192, centre y 700-716 (saved: 118-184)
 BLOCK_REGIONS = ("labels", "hearts", "uid")  # the regions whose block layout a misread frame must keep
 
 
@@ -780,7 +799,7 @@ class Rows:
     outside: list  # [(text, box)] judged as overlay text (glyph rows among them, on their raw text)
     regions: tuple  # the quest tracker's rows (Verdict.regions)
     labels: int  # labels read in place, plus those a misread label-row block covers (see misread)
-    blocks: tuple  # ((region, x0, x1, cy), ...) of every counted block in BLOCK_REGIONS, matching or misread
+    blocks: tuple  # ((region, x0, x1, cy, ping), ...) of every counted block in BLOCK_REGIONS, matching or misread
     misread: int  # blocks in BLOCK_REGIONS whose text is not that region's exact form
 
 
@@ -814,7 +833,10 @@ def read_rows(result) -> Rows:
                 distance = TRACKER_DISTANCE_FORM.fullmatch(squashed)
                 tracker.append((box[1], box[0], TRACKER_DISTANCE if distance else tracker_name(text)))
                 continue
-            blocks.append((region, box[0], box[0] + box[2], box[1] + box[3] / 2))
+            cy = box[1] + box[3] / 2
+            ping = region == "uid" and bool(PING_FORM.fullmatch(text.strip())) and box[0] >= PING_PLACE[0] \
+                and box[0] + box[2] <= PING_PLACE[1] and PING_PLACE[2] <= cy <= PING_PLACE[3]
+            blocks.append((region, box[0], box[0] + box[2], cy, ping))
             if region == "labels" and label_run(text, box):
                 labels += label_run(text, box)
             elif (region == "hearts" and HEARTS_FORM.fullmatch(squashed)) or (
@@ -828,11 +850,21 @@ def read_rows(result) -> Rows:
                 tuple(sorted(blocks)), misread)
 
 
+def _slots():
+    labels = tuple(("labels", x - len(label) * LABEL_HALF_CHAR_PX - BLOCK_PX, x + len(label) * LABEL_HALF_CHAR_PX
+                    + BLOCK_PX, 73.5, False) for label, x in LABEL_CENTRES)
+    return labels + (("hearts", 500, 735, 679.0, False), ("uid", 0, 92, 708.0, False))
+
+
+HUD_SLOTS = _slots()  # (region, x0, x1, cy, False): where the permanent text always is on the saved frames
+
+
 def same_blocks(blocks, first) -> bool:
-    """No block of ``blocks`` is new against ``first`` (the walk's first frame): each overlaps one of first's blocks
-    in the same region and row (see BLOCK_PX)."""
-    return all(any(region == r and x0 <= fx1 + BLOCK_PX and fx0 <= x1 + BLOCK_PX and abs(y - fy) <= BLOCK_PX
-                   for r, fx0, fx1, fy in first) for region, x0, x1, y in blocks)
+    """No block of ``blocks`` is new against ``first`` (the walk's first frame) and the fixed HUD_SLOTS: each
+    overlaps one of them in the same region and row (real overlap, see BLOCK_PX), or is the ping at its place."""
+    allowed = tuple(first) + HUD_SLOTS
+    return all(ping or any(region == r and x0 <= fx1 and fx0 <= x1 and abs(y - fy) <= BLOCK_PX
+                           for r, fx0, fx1, fy, _ping in allowed) for region, x0, x1, y, ping in blocks)
 
 
 def narration_verdict(rows) -> str:
