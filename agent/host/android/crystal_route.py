@@ -219,7 +219,7 @@ class Run:
             raise Stop(MANUAL, [])
         for _attempt in range(self.rt.TOUCH_KEY_ATTEMPTS):
             pair = self.map.hud_pair("按铃", self.bell_target(hub), STARSEA_MAP, (BELL_POINT, BELL_RADIUS_PX),
-                                     contact=True)
+                                     contact="bell")
             if pair is None:
                 return False
             first, second, box = pair

@@ -423,6 +423,7 @@
     "PromptColumnTests.test_single_characters_near_a_contact_are_text_there",
     "PromptColumnTests.test_text_outside_the_column_still_stops",
     "PromptColumnTests.test_the_column_is_clear_of_every_movement_control",
+    "PromptColumnTests.test_the_controls_own_readings_are_not_text_by_them",
     "PromptColumnTests.test_the_saved_lines_are_thin_and_the_saved_icons_hexagons",
     "PromptColumnTests.test_the_saved_prompts_allow_movement",
     "PromptColumnTests.test_the_walker_stops_on_text_by_a_contact_it_would_touch",

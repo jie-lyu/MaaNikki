@@ -444,7 +444,7 @@ class Walker:
                        details={"prompts": [list(extent) for extent in obs.prompts]})
         if not contacts_clear(obs, jump=jump, bell=bell):
             self._fail("screen", "移动要用的按键上或旁边有文字（可能是弹窗或按钮），已停止所有输入", obs,
-                       details={"fragments": [list(extent) for extent in obs.fragments]})
+                       details={"fragments": [list(extent) for extent, _text in obs.fragments]})
 
     def _not_after(self, obs, hold) -> float:
         """The latest contact-down for a gesture of ``hold`` seconds decided on ``obs``: within the frame's age limit
@@ -899,30 +899,78 @@ def controls_clear(extent, *, jump=False, bell=None, layout=DEFAULT_LAYOUT) -> b
     return all(clear_of(extent, centre, radius) for centre, radius in controls)
 
 
-def merge_fragments(boxes) -> tuple:
-    """OCR boxes [x, y, w, h] as extents (x0, y0, x1, y1), adjacent ones judged together: boxes on one line (their
-    rows overlap) with at most LINE_GAP_PX between them merge into one extent (确 + 认 over a button: one block)."""
-    extents = sorted((b[0], b[1], b[0] + b[2], b[1] + b[3]) for b in boxes if len(b) == 4)
+def merge_fragments(rows) -> tuple:
+    """OCR rows [(text, [x, y, w, h])] as ((x0, y0, x1, y1), text) groups, adjacent ones judged together: rows on one
+    line (their boxes' rows overlap) with at most LINE_GAP_PX between them merge into one extent, their texts joined
+    left to right (确 + 认 over a button: one group reading 确认)."""
+    pieces = sorted(((b[0], b[1], b[0] + b[2], b[1] + b[3]), re.sub(r"\s", "", text))
+                    for text, b in rows if len(b) == 4)
     merged = []
-    for extent in extents:
-        for index, other in enumerate(merged):
+    for extent, text in pieces:
+        for index, (other, joined) in enumerate(merged):
             if extent[1] < other[3] and other[1] < extent[3] and extent[0] - other[2] <= LINE_GAP_PX \
                     and other[0] - extent[2] <= LINE_GAP_PX:
-                merged[index] = (min(other[0], extent[0]), min(other[1], extent[1]), max(other[2], extent[2]),
-                                 max(other[3], extent[3]))
+                merged[index] = ((min(other[0], extent[0]), min(other[1], extent[1]), max(other[2], extent[2]),
+                                  max(other[3], extent[3])), joined + text)
                 break
         else:
-            merged.append(extent)
+            merged.append((extent, text))
     return tuple(merged)
 
 
+# The HUD's control icons, where full-frame OCR reads noise on the saved frames (dropped by the noise filters): on the
+# jump button's figure 2, 2A1, 245, 2AF, 7, L, 口, 以, 之 and on the gold diamond badge on its rim (m2-fb05) L, 7, 口; on
+# the bell Q, A, +, X, 口; on the sprint button's shoe right of the jump button K (move_frames.py --all-frames,
+# text_by_a_contact: 175 of the 483 hud/hud_prompt frames before these). A dropped group lying inside one of these
+# boxes with at most ICON_NOISE_MAX_CJK CJK character is taken for the icon's own reading; two or more (确认: a button
+# over the control) stop, and so does anything elsewhere in a contact's clearance. x0, y0, x1, y1.
+HUD_ICONS = {"jump": ((925, 478, 1005, 597), (893, 481, 937, 525)), "bell": ((586, 582, 647, 643),),
+             "sprint": ((1050, 565, 1125, 650),)}
+ICON_NOISE_MAX_CJK = 1
+
+
+def _within(extent, area) -> bool:
+    return area[0] <= extent[0] and area[1] <= extent[1] and extent[2] <= area[2] and extent[3] <= area[3]
+
+
+def in_hearts_slot(extent) -> bool:
+    """A dropped piece of the 心誓 bar: in its fixed slot (HUD_SLOTS' hearts row, centre within BLOCK_PX of it); on
+    the saved frames OCR drops 3, 33, 333 and ×1 there, next to the bell's clearance."""
+    _region, x0, x1, cy, _ping = next(slot for slot in HUD_SLOTS if slot[0] == "hearts")
+    return x0 <= extent[0] and extent[2] <= x1 and abs((extent[1] + extent[3]) / 2 - cy) <= BLOCK_PX
+
+
+def icon_reading(extent, text) -> bool:
+    """A dropped group that is a HUD icon's own reading: inside one of HUD_ICONS' boxes, at most ICON_NOISE_MAX_CJK
+    CJK character."""
+    return _cjk(text) <= ICON_NOISE_MAX_CJK and any(_within(extent, box) for boxes in HUD_ICONS.values()
+                                                    for box in boxes)
+
+
+def fragments_clear(fragments, controls) -> bool:
+    """Whether no dropped text group (Observation.fragments: (extent, text)) lies within CONTROL_CLEAR_PX of a
+    control in ``controls`` ((centre, radius)), except the 心誓 bar's own pieces (in_hearts_slot) and the HUD icons'
+    own readings (icon_reading)."""
+    for extent, text in fragments:
+        if in_hearts_slot(extent) or icon_reading(extent, text):
+            continue
+        if not all(clear_of(extent, centre, radius) for centre, radius in controls):
+            return False
+    return True
+
+
 def contacts_clear(obs, *, jump=False, bell=None, layout=DEFAULT_LAYOUT) -> bool:
-    """Whether nothing on ``obs`` lies on or next to a control the gesture touches (controls_clear): neither an
-    interaction prompt (Observation.prompts) nor any text the noise filters dropped (Observation.fragments: single
-    characters and low-score rows, adjacent ones merged; route review round 3, finding 2: 「确」「认」 over the jump
-    button were dropped one by one). Any text there stops."""
-    return all(controls_clear(extent, jump=jump, bell=bell, layout=layout)
-               for extent in (*obs.prompts, *getattr(obs, "fragments", ())))
+    """Whether nothing on ``obs`` lies on or next to a control the gesture touches (controls_clear): no interaction
+    prompt (Observation.prompts), and no text the noise filters dropped (Observation.fragments: single characters
+    and low-score rows, adjacent ones judged together; route review round 3, finding 2: 「确」「认」 over the jump
+    button were dropped one by one) beyond the HUD's own readings there (fragments_clear)."""
+    controls = [(layout.joystick, layout.ring)]
+    if jump:
+        controls.append((layout.jump, JUMP_RADIUS_PX))
+    if bell is not None:
+        controls.append((tuple(bell), BELL_RADIUS_PX))
+    return all(controls_clear(extent, jump=jump, bell=bell, layout=layout) for extent in obs.prompts) \
+        and fragments_clear(getattr(obs, "fragments", ()), controls)
 
 
 def _usable(frame) -> bool:
@@ -1074,7 +1122,7 @@ class Rows:
     misread: int  # blocks in BLOCK_REGIONS whose text is not that region's exact form
     raw: tuple = ()  # every OCR row with a box, at any score, before any filtering: (text, box)
     column: tuple = ()  # [(text, box)] counted rows centred in PROMPT_COLUMN (judged by prompt_verdict)
-    fragments: tuple = ()  # extents (x0, y0, x1, y1) of the rows the noise filters dropped, adjacent ones merged
+    fragments: tuple = ()  # ((x0, y0, x1, y1), text) of the rows the noise filters dropped, adjacent ones merged
 
 
 def read_rows(result) -> Rows:
@@ -1097,7 +1145,7 @@ def read_rows(result) -> Rows:
                 if score >= TEXT_SCORE:
                     outside.append((text, box))
                 else:
-                    dropped.append(box)
+                    dropped.append((text, box))
                 continue
             squashed = re.sub(r"\s", "", text)
             # A distance row in the tracker with its 米 (1米, 3米: two characters, under counts_as_text's floor) is
@@ -1108,7 +1156,7 @@ def read_rows(result) -> Rows:
                 continue
             if score < (TEXT_SCORE if _cjk(text) else ASCII_SCORE) or not counts_as_text(text):
                 if text.strip():
-                    dropped.append(box)  # never dropped near a gesture contact (fragments, contacts_clear)
+                    dropped.append((text, box))  # never dropped near a gesture contact (fragments, contacts_clear)
                 continue
             region = next((name for name, area in HUD_REGIONS if _inside(box, area)), None)
             if region is None:

@@ -1201,14 +1201,18 @@ class BellTests(unittest.TestCase):
 
     def test_text_by_the_bell_blocks_the_press(self):
         # Route review round 3, finding 2: any text the noise filters dropped near the bell (a gesture contact).
-        near = ((600, 560, 640, 580),)
+        near = (((560, 560, 580, 580), "好"),)
         for fragments in ([near, ()], [(), near]):
             with self.subTest(fragments=fragments):
                 _result, calls, error, _states, final = self.ring(fragments=fragments)
                 self.assertIsInstance(error, Stop)
                 self.assertEqual((calls, final), ([], None))
-        result, calls, _error, _states, _final = self.ring(fragments=[((100, 100, 120, 120),)] * 2)
-        self.assertTrue(result)
+        # far away, the bell's own reading (Q) and a dropped piece of the 心誓 bar: pressed
+        for fragments in ((((100, 100, 120, 120), "丶"),), (((598, 595, 628, 630), "Q"),),
+                          (((598, 672, 630, 686), "3"),)):
+            with self.subTest(allowed=fragments):
+                result, calls, _error, _states, _final = self.ring(fragments=[fragments] * 2)
+                self.assertTrue(result)
 
     def test_future_dated_records_are_refused_and_the_reserved_day_is_never_pruned(self):
         # Route review round 3, finding 8.

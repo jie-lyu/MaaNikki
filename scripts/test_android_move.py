@@ -1865,7 +1865,7 @@ class PromptColumnTests(unittest.TestCase):
         frame = _prompt_frame(0)
         verdict = frame_verdict(frame, PROMPT_ROWS[0], ("确", [940, 525, 22, 24], 0.97), ("认", [964, 525, 22, 24], 0.97))
         self.assertEqual(verdict.kind, "hud_prompt")  # still too short to count as text on its own
-        self.assertEqual(verdict.fragments, ((940, 525, 986, 549),))  # judged together
+        self.assertEqual(verdict.fragments, (((940, 525, 986, 549), "确认"),))  # judged together
         obs = move.Observation(frame, verdict.kind, 0.0, prompts=verdict.prompts, fragments=verdict.fragments)
         self.assertFalse(move.contacts_clear(obs, jump=True))
         self.assertTrue(move.contacts_clear(obs, jump=False))  # far from the joystick and the bell
@@ -1876,20 +1876,48 @@ class PromptColumnTests(unittest.TestCase):
         self.assertTrue(move.contacts_clear(move.Observation(frame, far.kind, 0.0, fragments=far.fragments),
                                             jump=True, bell=move.RuntimeIo.BELL_POINT))
 
+    def test_the_controls_own_readings_are_not_text_by_them(self):
+        # The saved frames (move_frames.py --all-frames, text_by_a_contact): OCR reads noise on the jump figure (2A1,
+        # 以, ...), on the bell (Q, 口, ...) and drops pieces of the 心誓 bar next to the bell; 175 of 483 movable
+        # frames would have stopped. Those are the HUD's own readings; two CJK characters on an icon, or anything
+        # elsewhere in a clearance, still stop.
+        def clear(rows, **contacts):
+            verdict = frame_verdict(_prompt_frame(0), *rows)
+            return move.contacts_clear(move.Observation(None, verdict.kind, 0.0, fragments=verdict.fragments),
+                                       **contacts)
+        bell = {"bell": move.RuntimeIo.BELL_POINT}
+        for rows, contacts in (((("2A1", [941, 493, 53, 80], 0.3),), {"jump": True}),  # m2-rl10 t04-b
+                               ((("以", [942, 497, 50, 65], 0.6),), {"jump": True}),
+                               ((("Q", [598, 595, 30, 35], 0.5),), bell),  # m2-fb10 t00-b
+                               ((("口", [592, 591, 46, 46], 0.4),), bell),
+                               ((("3", [598, 672, 32, 14], 0.4),), bell),  # the 心誓 bar's dropped piece
+                               ((("33", [570, 668, 40, 22], 0.4),), bell),
+                               ((("口", [897, 485, 35, 35], 0.9),), {"jump": True}),  # the jump badge (m2-fb05 t16)
+                               ((("K", [1056, 571, 62, 73], 0.88),), {"jump": True})):  # the sprint shoe (t01-a)
+            with self.subTest(rows=rows):
+                self.assertTrue(clear(rows, **contacts))
+        for rows, contacts in (((("确", [940, 525, 22, 24], 0.97), ("认", [964, 525, 22, 24], 0.97)), {"jump": True}),
+                               ((("确定", [596, 600, 40, 24], 0.3),), bell),  # two CJK on the bell icon
+                               ((("口", [870, 560, 20, 20], 0.5),), {"jump": True}),  # in its ring, off every icon
+                               ((("好", [560, 560, 20, 20], 0.9),), bell),  # by the bell, off its icon
+                               ((("1", [300, 600, 10, 20], 0.9),), {})):  # by the joystick (never read there)
+            with self.subTest(stop=rows):
+                self.assertFalse(clear(rows, **contacts))
+
     def test_the_walker_stops_on_text_by_a_contact_it_would_touch(self):
-        for name, extent, goal, options in (
-                ("确认 over the jump button, the step jumps", (940, 525, 986, 549), Goal(0, -5, jump=True),
+        for name, fragment, goal, options in (
+                ("确认 over the jump button, the step jumps", ((940, 525, 986, 549), "确认"), Goal(0, -5, jump=True),
                  {"allow_jump": True}),
-                ("a character by the joystick", (300, 600, 312, 620), Goal(0, -12), {})):
+                ("a character by the joystick", ((300, 600, 312, 620), "1"), Goal(0, -12), {})):
             with self.subTest(name):
                 walk, io = walker(World((0, 0), yaw=0.0), **options)
-                io.fragments = lambda n, extent=extent: (extent,)
+                io.fragments = lambda n, fragment=fragment: (fragment,)
                 result = walk.walk([goal], (0, 0), 60)
                 self.assertEqual((result.outcome, io.steps), ("screen", []))
                 self.assertEqual(io.saved[0][2].number, 1)
                 self.assertIn("文字", result.message)
         walk, io = walker(World((0, 0), yaw=0.0))
-        io.fragments = lambda n: ((940, 525, 986, 549),)  # by the jump button, and the step does not jump
+        io.fragments = lambda n: (((940, 525, 986, 549), "确认"),)  # by the jump button, the step does not jump
         self.assertTrue(walk.walk([Goal(0, -5)], (0, 0), 60).ok)
 
     def test_nothing_in_the_walk_taps(self):

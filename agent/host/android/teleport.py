@@ -499,14 +499,15 @@ def minimap_disc():
     return tuple(touch_point(list(actions.MINIMAP))), RADIUS
 
 
-def prompt_clear(obs, centre, radius, *, contact=False) -> bool:
+def prompt_clear(obs, centre, radius, *, contact=None) -> bool:
     """No interaction prompt of a "hud_prompt" frame within move.CONTROL_CLEAR_PX of a target drawn as a disc of
-    ``radius`` around ``centre`` (move.clear_of: the walker's rule for its own controls); with ``contact`` (a
-    gesture's contact: the bell), no text the noise filters dropped there either (Observation.fragments, as
-    move.contacts_clear)."""
-    from host.android.move import clear_of
-    extents = (*obs.prompts, *(getattr(obs, "fragments", ()) if contact else ()))
-    return all(clear_of(extent, centre, radius) for extent in extents)
+    ``radius`` around ``centre`` (move.clear_of: the walker's rule for its own controls); with ``contact`` (the name
+    of the gesture's control: "bell"), no text the noise filters dropped there either beyond the
+    HUD's own readings (move.fragments_clear, as move.contacts_clear)."""
+    from host.android.move import clear_of, fragments_clear
+    if not all(clear_of(extent, centre, radius) for extent in obs.prompts):
+        return False
+    return contact is None or fragments_clear(getattr(obs, "fragments", ()), [(centre, radius)])
 
 
 def observation(look, verdict):
@@ -714,13 +715,13 @@ class Teleport:
         raise Stop(f"连续 {self.rt.TOUCH_KEY_ATTEMPTS} 次没能在新的截图上及时确认{what}",
                    [last.frame] if last is not None else [])
 
-    def clean_hud(self, what, map_id, disc, *, map_unknown_ok=False, contact=False):
+    def clean_hud(self, what, map_id, disc, *, map_unknown_ok=False, contact=None):
         """``(obs, shape)``: a frame to decide a touch on the open world by the walker's first-frame rule
         (move.first_frame_rule on ``map_id``: a name-only tracker only on 星海), with no interaction prompt near the
         target (``disc``: its centre and radius; prompt_clear). Frames the rule waits through are waited through
         without input up to move.STARTUP_WAIT_S; a frame it refuses, or a prompt near the target, stops with that
-        frame. ``map_unknown_ok``: move.first_frame_rule's (open_map only); ``contact``: the target is held by a
-        gesture (the bell): no text at all near it either (prompt_clear). None when the run stopped."""
+        frame. ``map_unknown_ok``: move.first_frame_rule's (open_map only); ``contact``: the target is a gesture's
+        control ("bell"): no dropped text near it either beyond its own icon's reading (prompt_clear). None when the run stopped."""
         from host.android.move import STARTUP_WAIT_S, first_frame_rule
         start = time.monotonic()
         while not self.rt.stopped:
@@ -740,7 +741,7 @@ class Teleport:
                 return None
         return None
 
-    def hud_pair(self, what, locate, map_id, disc, *, map_unknown_ok=False, contact=False):
+    def hud_pair(self, what, locate, map_id, disc, *, map_unknown_ok=False, contact=None):
         """A touch on the open world decided on a frame that passes the walker's first-frame rule (clean_hud) and
         confirmed on the next by its later-frame rule against the first (move.later_frame_rule): a frame a step could
         be decided on (MOVE_KINDS) with no prompt near the target confirms; ambient narration (or a blank capture)

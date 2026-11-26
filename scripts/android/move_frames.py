@@ -15,7 +15,9 @@ DIR defaults to .build/android. Reported, per measured run in DIR/phase-e-measur
     「起风了」 narration frames, "hud_prompt" for the 查看/拾取 interaction prompts) through the real nodes and on the
     frame's own pixels, as the walk does. With --all-frames: every 1280x720 PNG under DIR (not reviews/ or the later
     walk runs and investigations: phase-e-walk*, heading-investigation) whose screen read_screen calls the HUD (the
-    495 frames of the 2026-11-26 replay: 473 hud, 4 narration, 8 misread, and the 10 prompt frames).
+    495 frames of the 2026-11-26 replay: 473 hud, 4 narration, 8 misread, and the 10 prompt frames). Also listed: each
+    hud/hud_prompt frame with text the noise filters dropped near a gesture contact (move.contacts_clear: joystick,
+    jump, bell), on which a step using that contact would stop.
 The screens run on one recognizer through scripts/android/replay.py (its frame, wall-time and memory limits; the
 --all-frames set needs no raised limit). Run it in the foreground and never two at once.
 """
@@ -105,14 +107,14 @@ def main() -> int:
     return 0
 
 
-LATER = ("reviews", "phase-e-walk", "phase-e-walk2", "heading-investigation")  # not in the --all-frames set
+LATER = ("reviews", "phase-e-walk", "heading-investigation")  # not in the --all-frames set (prefixes: every walk run)
 
 
 def screens(build: Path, all_frames: bool = False, limits=None):
     import replay
     from host.android import actions, move
     if all_frames:
-        frames = sorted(p for p in build.glob("*/**/*.png") if p.relative_to(build).parts[0] not in LATER)
+        frames = sorted(p for p in build.glob("*/**/*.png") if not p.relative_to(build).parts[0].startswith(LATER))
     else:
         frames = sorted((build / "phase-e-measure").glob("m*/*-hud.png")) + \
             sorted(p for p in (build / "phase-e-measure").glob("m*/*.png") if not p.name.endswith("-hud.png"))[::6]
@@ -122,22 +124,53 @@ def screens(build: Path, all_frames: bool = False, limits=None):
             screen = actions.read_screen(recognize)
             if all_frames and screen.kind != "hud":
                 return None  # not an open-world frame: outside this set
-            return move.classify(screen, recognize, image)
+            seen = {}
+
+            def kept(node, override=None):  # the full-frame OCR result classify reads, kept for the report
+                result = recognize(node, override)
+                if node == move.SCREEN_TEXT:
+                    seen["text"] = result
+                return result
+            verdict = move.classify(screen, kept, image)
+            return verdict, contact_rows(seen.get("text"))
         return recognizer.on_one_frame(judge)
 
-    counts, odd = {}, []
+    def contact_rows(result):
+        """Every OCR row (text, box, score) within a gesture contact's clearance (move.controls_clear)."""
+        from host.android import pages
+        rows = []
+        for row in pages._rows(result) if result is not None and actions._hit(result) else ():
+            box = getattr(row, "box", None) if row is not None else None
+            if box is None:
+                continue
+            x, y, w, h = (int(v) for v in box)
+            extent = (x, y, x + w, y + h)
+            if not move.controls_clear(extent, jump=True, bell=move.RuntimeIo.BELL_POINT):
+                rows.append([str(getattr(row, "text", "")), [x, y, w, h], round(float(getattr(row, "score", 0) or 0), 3)])
+        return rows
+
+    counts, odd, near = {}, [], []
     # one recognizer for every frame, under the replay's frame, time and memory limits
     with replay.Replay(limits=limits or replay.Limits()) as session:
         for path, verdict in session.run(frames, judge_frame,
                                          accept=lambda image: image is not None and image.shape[:2] == (720, 1280)):
             if verdict is None:
                 continue
+            verdict, by_contacts = verdict
             kind, reason = verdict.kind, verdict.reason
             counts[kind] = counts.get(kind, 0) + 1
             if kind != "hud":
                 odd.append([str(path.relative_to(build)), kind, reason])
+            if kind in move.MOVE_KINDS and verdict.fragments:  # dropped text a gesture contact would refuse on
+                obs = move.Observation(None, kind, 0.0, prompts=verdict.prompts, fragments=verdict.fragments)
+                blocked = [name for name, options in (("joystick", {}), ("jump", {"jump": True}),
+                                                      ("bell", {"bell": move.RuntimeIo.BELL_POINT}))
+                           if not move.contacts_clear(obs, **options)]
+                if blocked:
+                    near.append([str(path.relative_to(build)), blocked,
+                                 [[list(e), text] for e, text in verdict.fragments], by_contacts])
         print(f"replay: {session.frames} frames, peak RSS {session.peak_rss / 2 ** 20:.0f} MB", file=sys.stderr)
-    print(json.dumps({"screens": counts, "not_hud": odd}, ensure_ascii=False, indent=1))
+    print(json.dumps({"screens": counts, "not_hud": odd, "text_by_a_contact": near}, ensure_ascii=False, indent=1))
 
 
 if __name__ == "__main__":
