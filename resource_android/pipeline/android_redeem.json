@@ -1,0 +1,65 @@
+{
+  "MaaNikki_Android_MenuSettings": {
+    "recognition": "TemplateMatch",
+    "template": "android/menu_settings.png",
+    "roi": [560, 610, 150, 110],
+    "threshold": 0.8,
+    "green_mask": true,
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_SettingsOtherTab": {
+    "recognition": "OCR",
+    "roi": [40, 570, 150, 70],
+    "expected": "^其他$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_SettingsImageContent": {
+    "recognition": "OCR",
+    "roi": [260, 70, 180, 60],
+    "expected": "^基础设置$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_RedeemRowLabel": {
+    "recognition": "OCR",
+    "roi": [260, 80, 160, 560],
+    "expected": "^兑换码$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_RedeemRowUse": {
+    "recognition": "OCR",
+    "roi": [900, 80, 180, 560],
+    "expected": "^使用$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_RedeemPlaceholder": {
+    "recognition": "OCR",
+    "roi": [395, 318, 385, 50],
+    "expected": "^点击此处输入兑换码$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_RedeemField": {
+    "recognition": "OCR",
+    "roi": [395, 318, 385, 50],
+    "expected": ".+",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_RedeemClear": {
+    "recognition": "TemplateMatch",
+    "template": "android/redeem_clear.png",
+    "roi": [760, 312, 80, 60],
+    "threshold": 0.85,
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_RedeemUse": {
+    "recognition": "OCR",
+    "roi": [530, 470, 220, 65],
+    "expected": "^使用$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_RedeemBanner": {
+    "recognition": "OCR",
+    "roi": [300, 175, 680, 75],
+    "expected": ".+",
+    "action": "DoNothing"
+  }
+}

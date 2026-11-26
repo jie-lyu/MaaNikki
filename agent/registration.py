@@ -4,12 +4,14 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from collections import deque
 from threading import Event, Lock
+import sys
 import traceback
 from performance import action_profile
 from game_view import ALLOWED_FRAME_SIZES, is_clipped_game_frame
-from host import capabilities, platform_backend, task_entry_supported, task_refusal_reason, task_start_notice
+from host import (android_user_stop, capabilities, game_backend, task_entry_supported, task_refusal_reason,
+                  task_start_notice)
 from message_log import message_scope
-from task_control import TaskStopped, task_session
+from task_control import TaskStopped, message_override, task_session
 
 from maa.agent.agent_server import AgentServer
 
@@ -58,10 +60,29 @@ def local_registration(resource):
         _LOCAL_REGISTRATION.reset(token)
 
 
+def _print_exc():
+    """traceback.print_exc(), with UID-like text masked on the Android target (message_log.redact); the desktop calls
+    traceback.print_exc() itself, as before."""
+    if game_backend() != "android":
+        traceback.print_exc()
+        return
+    from message_log import redact
+    sys.stderr.write(redact(traceback.format_exc()))
+
+
+def _android_redacted(text):
+    """``text`` with UID-like text masked on the Android target (message_log.redact), for what goes to the UI through
+    message_override; the desktop gets ``text`` itself, as before."""
+    if game_backend() != "android":
+        return text
+    from message_log import redact
+    return redact(text)
+
+
 def _write_start_notice(context, task_id, entry):
     """Before the task's first action: macOS experimental tasks say so in their own instance's log, so a
     scheduled run or a background instance shows it as well. Never raises into the action."""
-    if platform_backend() != "macos":
+    if game_backend() not in ("macos", "android"):
         return  # Win32: no tiers, nothing to record or lock
     key = (task_id, entry)
     with _START_NOTICES_LOCK:
@@ -71,10 +92,18 @@ def _write_start_notice(context, task_id, entry):
     try:
         notice = task_start_notice(entry)
         if notice:
-            context.run_task("MaaNikki_Daily_Message", {
-                "MaaNikki_Daily_Message": {"focus": {"Node.Action.Starting": notice}}})
+            context.run_task("MaaNikki_Daily_Message", message_override({"Node.Action.Starting": notice}))
     except Exception:
-        traceback.print_exc()
+        _print_exc()
+
+
+def _android_stopped(error=None):
+    """Android only: the user stopped this run, so a failed or raising action ends as stopped (no failure scene, no
+    未完成); except while this process holds an unconfirmed touch, which is always reported."""
+    if not android_user_stop():
+        return False  # always on Windows and native Mac
+    from host import InputUnconfirmed, device_input
+    return not isinstance(error, InputUnconfirmed) and not device_input().halted
 
 
 def agent_action(name, *, stop_on_failure=False):
@@ -92,11 +121,10 @@ def agent_action(name, *, stop_on_failure=False):
                 # Before any task code, input or capture: a saved preset, a schedule or a feature
                 # entry may ask for a task this desktop's backend does not support yet.
                 try:
-                    context.run_task("MaaNikki_Daily_Message", {
-                        "MaaNikki_Daily_Message": {"focus": {
-                            "Node.Action.Starting": f"{entry} 不在当前系统开放：{task_refusal_reason(entry)}"}}})
+                    context.run_task("MaaNikki_Daily_Message", message_override({
+                        "Node.Action.Starting": f"{entry} 不在当前系统开放：{task_refusal_reason(entry)}"}))
                 except Exception:
-                    traceback.print_exc()
+                    _print_exc()
                 return False
             if detail is not None:
                 _write_start_notice(context, task_id, entry)
@@ -110,15 +138,20 @@ def agent_action(name, *, stop_on_failure=False):
                         except TaskStopped:
                             raise
                         except Exception as error:
+                            if _android_stopped(error):
+                                raise TaskStopped("任务已停止。") from error
                             if session:
                                 session.evidence.save("action_exception", str(error), details={
                                     "node": argv.node_name, "action": name,
                                     "traceback": traceback.format_exc()[-3000:]},
                                     generation=session.generation)
                             raise
+                        # A completed result stands; after an Android user stop a failed one is no failure scene
+                        # (checked last, right before the save).
                         if (session and not result and not session.stopped()
                                 and session.evidence.saved == saved
-                                and name not in {"nikki.daily_config", "nikki.feature_settings"}):
+                                and name not in {"nikki.daily_config", "nikki.feature_settings"}
+                                and not _android_stopped()):
                             session.evidence.save("action_failed", "动作返回失败", details={
                                 "node": argv.node_name, "action": name,
                                 "phase": "after_action_return"}, generation=session.generation)
@@ -133,11 +166,12 @@ def agent_action(name, *, stop_on_failure=False):
                     # its undefined return value can otherwise look successful.
                     if profile is not None:
                         profile.succeeded = False
-                    traceback.print_exc()
+                    _print_exc()
+                    if _android_stopped(error):
+                        return False  # Android: published during the action's own handling (never an unconfirmed touch)
                     try:
-                        context.run_task("MaaNikki_Daily_Message", {
-                            "MaaNikki_Daily_Message": {"focus": {
-                                "Node.Action.Starting": f"{argv.node_name} 未完成：{error}。"}}})
+                        context.run_task("MaaNikki_Daily_Message", message_override({
+                            "Node.Action.Starting": _android_redacted(f"{argv.node_name} 未完成：{error}。")}))
                     except Exception:
                         pass
                     return False
@@ -148,7 +182,7 @@ def agent_action(name, *, stop_on_failure=False):
                         try:
                             context.tasker.post_stop()
                         except Exception:
-                            traceback.print_exc()
+                            _print_exc()
 
         cls.run = guarded
         _ACTION_TYPES[name] = cls
@@ -183,7 +217,7 @@ def agent_recognition(name):
                             if (
                                 (argv.image.shape[1], argv.image.shape[0]) not in ALLOWED_FRAME_SIZES
                                 or is_clipped_game_frame(argv.image)
-                            ) and capabilities(platform_backend()).tall_window:
+                            ) and capabilities(game_backend()).tall_window:
                                 from tall_window import ensure_16_9_window
                                 adjusted = ensure_16_9_window(
                                     session.controller,
@@ -221,7 +255,7 @@ def agent_recognition(name):
             except Exception:
                 # Recognition callbacks must also return a defined result if
                 # the window/Agent channel closes during a foreground wait.
-                traceback.print_exc()
+                _print_exc()
                 return None
 
         cls.analyze = guarded

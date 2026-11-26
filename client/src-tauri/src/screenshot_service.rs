@@ -190,6 +190,12 @@ fn capture_loop(
                 break;
             }
 
+            // 安卓运行期间（这个实例的安卓运行槽忙）不主动截图：agent 可能正按着触点，订阅者拿缓存的图。
+            // 在拿实例锁之前查（锁的顺序：先槽，后实例）。
+            #[cfg(target_os = "macos")]
+            let should_screencap = should_screencap
+                && !crate::commands::android_run::screencap_held(&maa_state, &instance_id);
+
             // 3. 需要截图时，重新加锁获取 Controller 引用并调用 post_screencap
             //    MutexGuard 及 Controller 引用均在块末尾 drop，不跨越 .await
             if should_screencap {

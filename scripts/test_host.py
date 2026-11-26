@@ -31,8 +31,11 @@ def backend(name):
     import registration
     import tall_window
     with ExitStack() as stack:
+        # The game-target modules call host.game_backend, which follows host.platform_backend when no controller
+        # was submitted; pin both so a PI_CONTROLLER in the environment cannot change the outcome.
+        stack.enter_context(patch.object(host, "platform_backend", return_value=name))
         for module in (host, daily.runtime, registration, tall_window):
-            stack.enter_context(patch.object(module, "platform_backend", return_value=name))
+            stack.enter_context(patch.object(module, "game_backend", return_value=name))
         yield
 
 
@@ -81,7 +84,7 @@ class CaptureBoundsTests(unittest.TestCase):
     def setUp(self):
         import tall_window
         self.tall_window = tall_window
-        patcher = patch.object(tall_window, "platform_backend", return_value=None)
+        patcher = patch.object(tall_window, "game_backend", return_value=None)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -117,7 +120,7 @@ class CaptureBoundsTests(unittest.TestCase):
         tw = self.tall_window
         layout = Mock()
         layout.is_capture_point_safe.return_value = "safe"
-        with patch.object(tw, "platform_backend", return_value="win32"), \
+        with patch.object(tw, "game_backend", return_value="win32"), \
                 patch.dict(sys.modules, {"host.win32.window_layout": layout}), \
                 patch("host.win32.window_layout", layout, create=True):
             self.assertEqual(tw.is_capture_point_safe(7, [1, 2], margin_px=4, require_work_area=True), "safe")
@@ -1093,14 +1096,14 @@ class MacTextInputTests(unittest.TestCase):
 
     def test_mac_sends_one_character_per_request(self):
         rt, state = self.runtime()
-        with patch("daily.runtime.platform_backend", return_value="macos"), \
+        with patch("daily.runtime.game_backend", return_value="macos"), \
                 patch("daily.runtime.active_session", return_value=None):
             self.assertTrue(rt.input_text("b1星"))
         self.assertEqual(state["sent"], ["b", "1", "星"])
 
     def test_a_stop_ends_mac_text_at_the_next_character(self):
         rt, state = self.runtime(stop_after=1)
-        with patch("daily.runtime.platform_backend", return_value="macos"), \
+        with patch("daily.runtime.game_backend", return_value="macos"), \
                 patch("daily.runtime.active_session", return_value=None):
             self.assertFalse(rt.input_text("abcdef"))
         self.assertEqual(state["sent"], ["a"])
@@ -1109,7 +1112,7 @@ class MacTextInputTests(unittest.TestCase):
         rt, state = self.runtime()
         rt.log = Mock()
         rt.check_focus = Mock(side_effect=lambda: len(state["sent"]) == 1)  # lost and back after the first character
-        with patch("daily.runtime.platform_backend", return_value="macos"), \
+        with patch("daily.runtime.game_backend", return_value="macos"), \
                 patch("daily.runtime.active_session", return_value=None):
             self.assertFalse(rt.input_text("abc"))
         self.assertEqual(state["sent"], ["a"])
@@ -1134,7 +1137,7 @@ class MacTextInputTests(unittest.TestCase):
                     rt.check_focus = resumed_once(rt)
                 else:
                     rt.ensure_frame = Mock(side_effect=lambda: setattr(rt, "_focus_generation", 5) or True)
-                with patch("daily.runtime.platform_backend", return_value="macos"), \
+                with patch("daily.runtime.game_backend", return_value="macos"), \
                         patch("daily.runtime.active_session", return_value=None):
                     self.assertFalse(rt.input_text("abc"))
                 self.assertEqual(state["sent"], [])
@@ -1142,14 +1145,14 @@ class MacTextInputTests(unittest.TestCase):
         rt, state = self.runtime()
         rt._focus_generation = 4
         rt.check_focus = resumed_once(rt)
-        with patch("daily.runtime.platform_backend", return_value="win32"), \
+        with patch("daily.runtime.game_backend", return_value="win32"), \
                 patch("daily.runtime.active_session", return_value=None):
             self.assertTrue(rt.input_text("abc"))  # Windows: unchanged
         self.assertEqual(state["sent"], ["abc"])
 
     def test_windows_still_sends_the_whole_string_at_once(self):
         rt, state = self.runtime()
-        with patch("daily.runtime.platform_backend", return_value="win32"), \
+        with patch("daily.runtime.game_backend", return_value="win32"), \
                 patch("daily.runtime.active_session", return_value=None):
             self.assertTrue(rt.input_text("abc"))
         self.assertEqual(state["sent"], ["abc"])
@@ -1304,8 +1307,8 @@ class MacTextGateTests(unittest.TestCase):
             rt, session = runtime()
             with self.subTest(platform=platform), \
                     patch("daily.runtime.active_session", return_value=session), \
-                    patch("daily.runtime.platform_backend", return_value=platform), \
-                    patch("daily.runtime.capabilities", return_value=SimpleNamespace(pointer_hover=False)), \
+                    patch("daily.runtime.game_backend", return_value=platform), \
+                    patch("daily.runtime.capabilities", return_value=host.Capabilities(platform, pointer_hover=False)), \
                     patch("daily.runtime.native_key_fields", side_effect=lambda action, fields: fields), \
                     patch.object(Runtime, "pause", return_value=True), \
                     patch.object(Runtime, "ui", SimpleNamespace(unhover=lambda: True), create=True):

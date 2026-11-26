@@ -77,9 +77,9 @@ def ability_matches(runtime, node):
         template = template[0] if template else ""
     if not template:
         return False
-    root = (runtime.ui.resource / "image").resolve()
-    path = (root / template).resolve()
-    if not path.is_relative_to(root):
+    from app_paths import resolve_resource_image
+    path = resolve_resource_image(template, runtime.ui.resource)
+    if path is None:
         return False
     image, frame = read_image(path), runtime.capture()
     if image is None or frame is None:

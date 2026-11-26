@@ -1,0 +1,27 @@
+{
+  "comment": "Android emulator controller and its read-only check task, applied on top of interface.json by scripts/android_interface.py for the Android development home (scripts/android_dev_home.py). No package uses it yet (phase F); the Windows package copies interface.json unchanged. Input is Maatouch only and capture RawWithGzip only (docs/android-support-plan.md decision 5); the client applies these instead of the device discovery's masks (phase B5b).",
+  "controller": [
+    {
+      "name": "nikki_android",
+      "label": "无限暖暖（安卓模拟器，开发中）",
+      "description": "连接安卓模拟器里的无限暖暖（预览，仅 macOS）。可以运行安卓任务清单里列出的预览任务：「安卓检查」只截图和识别；「邮件」等任务会向游戏发送触摸。同一时间只有一个安卓实例在运行；运行中和停止后的收尾期间不能追加任务、修改选项、重新连接或更换控制器，收尾结束（agent 退出）之后才能再开始。运行期间，Mac 不会因闲置而睡眠，显示器仍可按系统设置关闭；合盖后如果 Mac 进入睡眠，任务就会暂停。",
+      "type": "Adb",
+      "display_short_side": 720,
+      "attach_resource_path": ["./resource_android"],
+      "adb": {
+        "input": "Maatouch",
+        "screencap": "RawWithGzip"
+      }
+    }
+  ],
+  "task": [
+    {
+      "name": "android_check",
+      "label": "安卓检查（只读）",
+      "entry": "MaaNikki_AndroidCheck",
+      "controller": ["nikki_android"],
+      "default_check": false,
+      "description": "确认游戏在模拟器前台后截一张图，报告认出的画面和各个动作此刻会点哪里；只截图和识别，不向游戏发送任何输入。"
+    }
+  ]
+}

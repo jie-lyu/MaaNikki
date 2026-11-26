@@ -71,6 +71,12 @@ image = { version = "=0.25.9", default-features = false, features = ["png"] }
 # 保留调试符号以生成 PDB 文件，便于崩溃分析
 debug = true
 
+# The Android run's App Nap guard (src/commands/android_run/activity.rs). Both crates are already in the macOS build
+# through tauri/wry; only the NSProcessInfo and NSString bindings are used.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSProcessInfo", "NSString"] }
+
 [target.'cfg(windows)'.dependencies]
 libloading = "=0.8.9"
 winsafe = { version = "0.0.28", features = [

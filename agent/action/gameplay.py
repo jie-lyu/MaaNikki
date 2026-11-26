@@ -34,15 +34,59 @@ class UIClickAction(CustomAction):
             return False
 
 
+ANDROID_CHECK_ENTRY = "MaaNikki_AndroidCheck"
+ANDROID_WALK_PROBE_ENTRY = "MaaNikki_AndroidWalkProbe"  # dev-only (host.android.walk_probe)
+ANDROID_CRYSTAL_ROUTE_ENTRY = "MaaNikki_AndroidCrystalRoute"  # dev-only (host.android.crystal_route)
+
+
 @agent_action("nikki.gameplay")
 class GameplayAction(CustomAction):
     def run(self, context, argv):
         runtime = Executors(context)
+        kind = None
+        # The read-only Android check is bound to its task entry, not to a parameter: whatever the parameter says,
+        # that task runs the check or nothing, and never the recovery below (which can tap).
+        read_only = getattr(getattr(argv, "task_detail", None), "entry", None) == ANDROID_CHECK_ENTRY
         try:
             options = parse_custom_param(argv.custom_action_param)
             kind = options["kind"]
+            if read_only or kind == "android_check":
+                if not (read_only and kind == "android_check"):
+                    runtime.log("安卓检查的任务入口和参数不一致，没有执行。")
+                    return False
+                # Android only (its entry node is in resource_android/): one frame, no input, no recovery.
+                from host.android.check import check
+                return check(runtime)
+            walk_probe = getattr(getattr(argv, "task_detail", None), "entry", None) == ANDROID_WALK_PROBE_ENTRY
+            if walk_probe or kind == "android_walk_probe":
+                # Dev-only, Android only (entry node in resource_android/, allowed only when the runner enables it):
+                # bound to its entry like the check above; refused before importing host.android elsewhere.
+                from host import capabilities, game_backend
+                if not (walk_probe and kind == "android_walk_probe"
+                        and capabilities(game_backend()).touch_actions_only):
+                    runtime.log("走路探针的任务入口、参数或系统不符，没有执行。")
+                    return False
+                from host.android.walk_probe import run as walk
+                return walk(runtime, options) and not runtime.stopped
+            crystal_route = getattr(getattr(argv, "task_detail", None), "entry", None) == ANDROID_CRYSTAL_ROUTE_ENTRY
+            if crystal_route or kind == "android_crystal_route":
+                # Dev-only, Android only, gated exactly as the walk probe above.
+                from host import capabilities, game_backend
+                if not (crystal_route and kind == "android_crystal_route"
+                        and capabilities(game_backend()).touch_actions_only):
+                    runtime.log("星海结晶路线的任务入口、参数或系统不符，没有执行。")
+                    return False
+                from host.android.crystal_route import run as crystal
+                return crystal(runtime, options) and not runtime.stopped
             game = Gameplay(runtime)
             if kind == "weekly_shop":
+                from host import capabilities, game_backend
+                if capabilities(game_backend()).touch_actions_only:
+                    # The phone layout has its own flow and taps (Windows does not ship it). It branches before
+                    # WeeklyShop is built: that reads the UID (its fallback navigates the PC way) for the weekly
+                    # record, which the phone flow does not keep (it only reports, nothing is claimed).
+                    from host.android import shop
+                    return shop.run(runtime) and not runtime.stopped
                 from daily.shop import WeeklyShop
                 return WeeklyShop(runtime).run()
             if kind == "monthly_exchange":
@@ -52,6 +96,13 @@ class GameplayAction(CustomAction):
                 from daily.mailbox import Mailbox
                 return Mailbox(runtime).run()
             if kind == "redeem_codes":
+                from host import capabilities, game_backend
+                if capabilities(game_backend()).touch_actions_only:
+                    # The phone layout has its own flow, record and text input (Windows does not ship it). It
+                    # branches before RedeemCodes is built: that reads the UID the PC way (the HUD footer, then
+                    # ui.main()) for the account record, and its run() reads and writes the host clipboard.
+                    from host.android import redeem
+                    return redeem.run(runtime) and not runtime.stopped
                 from daily.redeem_codes import RedeemCodes
                 return RedeemCodes(runtime).run()
             if kind == "home":
@@ -71,7 +122,12 @@ class GameplayAction(CustomAction):
         except TaskStopped:
             raise
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, cv2.error) as error:
+            from host import android_user_stop
+            if android_user_stop():
+                return False  # Android: a user stop is no failure (always False on the desktop)
             runtime.log(f"任务未完成：{error}。")
-            if not runtime.stopped:
-                runtime.main()
+            if not runtime.stopped and not read_only and kind != "android_check":  # the check never sends input
+                from host import capabilities, game_backend
+                if not capabilities(game_backend()).touch_actions_only:  # Android flows return to the HUD themselves
+                    runtime.main()
             return False

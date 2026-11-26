@@ -24,15 +24,32 @@ def message_scope(action):
         _ACTION.reset(token)
 
 
-def write_message(text, display):
+def redact(value):
+    """``value`` with every UID-like text masked on the Android target (host.android.account.scrub), unchanged on
+    the desktop: what Android writes to the message log, shows, or keeps in a failure scene never holds the UID. The
+    desktop never imports the Android package (Windows does not ship it)."""
+    from host import game_backend
+    if game_backend() != "android":
+        return value
+    from host.android.account import scrub
+    return scrub(value)
+
+
+def write_message(text, display, *, report=None):
     """Append before UI delivery, including file-only and stopped-task messages.
+
+    ``report``: a result written before its display (Android: the text is displayed only after the stop is asked
+    again), kept as its own field so tools can show it; None (every other caller) adds nothing to the record.
 
     Return False on an IO failure so the caller can keep detail visible rather
     than silently discarding the only human-readable copy.
     """
+    text, display, report = redact(text), redact(display), redact(report)
     now = datetime.now().astimezone()
     record = {"timestamp": now.isoformat(timespec="milliseconds"), "pid": os.getpid(),
               "action": _ACTION.get(), "message": text, "display": display}
+    if report is not None:
+        record["report"] = report
     try:
         with _LOCK:
             _DIRECTORY.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,38 @@
+{
+  "MaaNikki_Android_ShopGiftsTab": {
+    "recognition": "OCR",
+    "roi": [20, 100, 220, 575],
+    "expected": "^甄\\s*选\\s*礼\\s*包$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_ShopGiftTitle": {
+    "recognition": "OCR",
+    "roi": [260, 60, 990, 650],
+    "expected": "^(虹迹赠礼|芳馨赠礼|星实置业之礼)$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_ShopCardText": {
+    "recognition": "OCR",
+    "roi": [260, 60, 990, 650],
+    "expected": ".+",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_ShopSoldOut": {
+    "recognition": "OCR",
+    "roi": [260, 60, 990, 650],
+    "expected": "^已售罄$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_ShopWeeklyLimit": {
+    "recognition": "OCR",
+    "roi": [260, 60, 990, 650],
+    "expected": "^本周限购\\s*\\d+\\s*/\\s*\\d+$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_ShopPriceGuard": {
+    "recognition": "OCR",
+    "roi": [0, 0, 1280, 720],
+    "expected": "^\\s*[¥￥]|^[\\d\\s]+$|^免费$|购买",
+    "action": "DoNothing"
+  }
+}

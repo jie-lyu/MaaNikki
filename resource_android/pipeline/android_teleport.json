@@ -1,0 +1,96 @@
+{
+  "MaaNikki_Android_MapRegionName": {
+    "recognition": "OCR",
+    "roi": [1000, 74, 190, 46],
+    "expected": ".+",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_MapCardDropdown": {
+    "recognition": "TemplateMatch",
+    "template": "android/map_card_dropdown.png",
+    "roi": [1180, 78, 60, 46],
+    "threshold": 0.85,
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_MapCardText": {
+    "recognition": "OCR",
+    "roi": [992, 116, 248, 96],
+    "expected": ".+",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_MapRegionMenu": {
+    "recognition": "OCR",
+    "roi": [800, 6, 170, 52],
+    "expected": "^地图切换$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_MapMenuStarsea": {
+    "recognition": "OCR",
+    "roi": [830, 72, 300, 610],
+    "expected": "^星海$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_MapMenuCollapse": {
+    "recognition": "TemplateMatch",
+    "template": "android/map_menu_collapse.png",
+    "roi": [1185, 72, 70, 610],
+    "threshold": 0.85,
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_MapZoomIn": {
+    "recognition": "TemplateMatch",
+    "template": "android/map_zoom_in.png",
+    "roi": [330, 635, 70, 66],
+    "threshold": 0.9,
+    "action": "DoNothing",
+    "green_mask": true
+  },
+  "MaaNikki_Android_MapPillar": {
+    "recognition": "TemplateMatch",
+    "template": "android/map_pillar.png",
+    "roi": [0, 0, 1280, 720],
+    "threshold": 0.8,
+    "action": "DoNothing",
+    "green_mask": true
+  },
+  "MaaNikki_Android_MapPanelTitle": {
+    "recognition": "OCR",
+    "roi": [140, 466, 480, 48],
+    "expected": ".+",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_MapPanelButtons": {
+    "recognition": "OCR",
+    "roi": [100, 612, 1100, 92],
+    "expected": ".+",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_MapTeleport": {
+    "recognition": "OCR",
+    "roi": [900, 615, 280, 85],
+    "expected": "^传送$",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_MapPanelClose": {
+    "recognition": "TemplateMatch",
+    "template": "android/map_panel_close.png",
+    "roi": [1020, 420, 150, 140],
+    "threshold": 0.85,
+    "action": "DoNothing",
+    "green_mask": true
+  },
+  "MaaNikki_Android_MapWords": {
+    "recognition": "OCR",
+    "roi": [0, 0, 1280, 720],
+    "expected": "前往|追踪|导航|解锁|购买|确认|领取|兑换|消耗|花费",
+    "action": "DoNothing"
+  },
+  "MaaNikki_Android_HudBell": {
+    "recognition": "TemplateMatch",
+    "template": ["android/hud_bell.png", "android/hud_bell_dark.png"],
+    "roi": [576, 572, 80, 80],
+    "threshold": 0.8,
+    "action": "DoNothing",
+    "green_mask": true
+  }
+}

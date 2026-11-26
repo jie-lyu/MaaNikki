@@ -24,8 +24,8 @@ import {
   addTaskPanelResizeStep,
 } from '@/types/config';
 import { Tooltip } from './ui/Tooltip';
-import { MacTaskBadge, macTaskHint, macTaskNoteLine } from './MacTaskMarks';
-import { macExcludedText, macTaskMark, type MacTaskMark } from '@/utils/macTaskTiers';
+import { MacTaskBadge, macTaskHint, macTaskNoteLine, useInstanceTaskTiers } from './MacTaskMarks';
+import { taskExcludedText, taskMarkFor, type TaskMark } from '@/utils/taskTiers';
 import type { TaskItem, ActionConfig, GroupItem, PretaskItem } from '@/types/interface';
 import type { MxuSpecialTaskDefinition } from '@/types/specialTasks';
 import {
@@ -70,7 +70,7 @@ function TaskButton({
   incompatibleReason?: string;
   supportedControllerHint?: string;
   /** Mac tier mark (macOS only; null on Windows). */
-  macMark?: MacTaskMark | null;
+  macMark?: TaskMark | null;
   onClick: () => void;
 }) {
   const { t } = useTranslation();
@@ -209,7 +209,6 @@ export function AddTaskPanel() {
     resolveI18nText,
     language,
     basePath,
-    macTaskTiers,
     registerTaskIdName,
     // 新增任务标记
     newTaskNames,
@@ -231,6 +230,8 @@ export function AddTaskPanel() {
 
   const instance = getActiveInstance();
   const langKey = getInterfaceLangKey(language);
+  // 当前实例选的控制器对应的任务档位：Adb（安卓模拟器）用安卓档位，其他用 Mac 档位；Windows 上为 null
+  const { platform: tierPlatform, tiers: taskTiers } = useInstanceTaskTiers(instance?.id);
 
   // 统计每个任务被添加的次数
   const taskCounts = useMemo(() => {
@@ -573,8 +574,8 @@ export function AddTaskPanel() {
     const isNew = newTaskNames.includes(task.name);
     const { isIncompatible, reason, supportedControllerHint } = getTaskCompatibility(task);
     // macOS：不开放的任务禁用并写明原因；Windows 上没有档位，macMark 为 null
-    const macMark = macTaskMark(macTaskTiers, task.entry);
-    const macExcluded = macExcludedText(macMark);
+    const macMark = taskMarkFor(tierPlatform, taskTiers, task.entry);
+    const macExcluded = taskExcludedText(macMark);
 
     return (
       <TaskButton
@@ -602,8 +603,8 @@ export function AddTaskPanel() {
     const label = resolveI18nText(item.label, langKey) || item.name || item.exec;
     const { isIncompatible, reason, supportedControllerHint } = getTaskCompatibility(taskDef);
     // macOS：声明了任务入口的前置任务（如启动游戏）按入口标记，显示清单里的原因；没有入口的不标记
-    const macMark = item.entry ? macTaskMark(macTaskTiers, item.entry) : null;
-    const macExcluded = macExcludedText(macMark);
+    const macMark = item.entry ? taskMarkFor(tierPlatform, taskTiers, item.entry) : null;
+    const macExcluded = taskExcludedText(macMark);
 
     return (
       <TaskButton
@@ -841,11 +842,11 @@ export function AddTaskPanel() {
         </div>
       </div>
 
-      {/* Mac 任务清单读不出来时的提示（仅 macOS；此时所有任务都会在下发前被拒绝） */}
-      {macTaskTiers?.error && (
+      {/* 当前实例的任务清单（Mac 或安卓）读不出来时的提示（仅 macOS；此时所有任务都会在下发前被拒绝） */}
+      {taskTiers?.error && (
         <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-border text-xs text-warning">
           <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-          <span>{macTaskTiers.error}</span>
+          <span>{taskTiers.error}</span>
         </div>
       )}
 
@@ -940,7 +941,7 @@ export function AddTaskPanel() {
                     {/* 动态渲染所有注册的特殊任务按钮 */}
                     {specialTasks.map((specialTask) => {
                       // macOS 不运行 MXU 内置任务（不在 Mac 任务清单中），禁用并写明原因；Windows 不变
-                      const macExcluded = macExcludedText(macTaskMark(macTaskTiers, specialTask.entry));
+                      const macExcluded = taskExcludedText(taskMarkFor(tierPlatform, taskTiers, specialTask.entry));
                       return (
                         <button
                           key={specialTask.taskName}

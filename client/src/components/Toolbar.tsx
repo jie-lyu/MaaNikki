@@ -16,6 +16,7 @@ import {
 import { toast } from 'sonner';
 import { useAppStore } from '@/stores/appStore';
 import { macStartBlockedReason } from '@/utils/macTaskTiers';
+import { startBlockedReasonFor, usesAndroidTiers } from '@/utils/taskTiers';
 import { useShallow } from 'zustand/react/shallow';
 import { isControllerAllowed, isResourceAllowed, isTaskCompatible } from '@/stores/helpers';
 import { maaService } from '@/services/maaService';
@@ -66,7 +67,7 @@ import {
   waitForResResult,
 } from '@/components/connection/callbackCache';
 import { scheduleService } from '@/services/scheduleService';
-import { stopInstanceTasks } from '@/services/taskStopService';
+import { stopGeneration, stopInstanceTasks } from '@/services/taskStopService';
 import {
   taskStartService,
   type TaskStartOptions,
@@ -400,7 +401,14 @@ export function Toolbar({ showAddPanel, onToggleAddPanel, className }: ToolbarPr
       if (wardrobeBusy()) return failStart('衣柜正在读取，请先停止衣柜读取。');
       if (fishingBusy()) return failStart('正在钓鱼，请先停止钓鱼。');
       // macOS：任务档位与说明读到之前不开始（定时运行同样），读取失败时也不开始；其他系统为空字符串。
-      const macBlocked = macStartBlockedReason(useAppStore.getState().backendOS, useAppStore.getState().macTaskTiers);
+      // 档位按这次要连接的控制器（与下面取控制器的方式相同）：Adb 查安卓档位，其他控制器仍查 Mac 档位。
+      const tierState = useAppStore.getState();
+      const gateControllerName = selectedController[targetId] || projectInterface?.controller[0]?.name;
+      const gateControllerType = projectInterface?.controller.find((c) => c.name === gateControllerName)?.type;
+      // Only an Adb start on macOS reads the Android tiers; every other start is the Mac check, unchanged.
+      const macBlocked = usesAndroidTiers(tierState.backendOS, gateControllerType)
+        ? startBlockedReasonFor(tierState.backendOS, gateControllerType, tierState.macTaskTiers, tierState.androidTaskTiers)
+        : macStartBlockedReason(tierState.backendOS, tierState.macTaskTiers);
       if (macBlocked) return failStart(macBlocked);
 
       // UID is confirmed inside the game task before consulting period state.
@@ -1326,6 +1334,14 @@ export function Toolbar({ showAddPanel, onToggleAddPanel, className }: ToolbarPr
             })
           : undefined;
 
+        // 安卓模拟器：从这里起界面已经能按「停止」，但后端的安卓运行槽要等开始请求到了才取得。期间按下的停止
+        // 让这次开始不再提交（提交前核对）；请求已经发出时，后端返回后再停一次（提交后核对）。
+        // The controller this start connects with (the target instance's), as the start gate uses.
+        const androidStart = controller?.type === 'Adb';
+        // Win32 and native Mac starts never read the Android stop bookkeeping.
+        const stopsBeforeStart = androidStart ? stopGeneration(targetId) : 0;
+        const stoppedSinceStart = () => androidStart && stopGeneration(targetId) !== stopsBeforeStart;
+
         updateInstance(targetId, { isRunning: true });
         setInstanceTaskStatus(targetId, 'Running');
         setShowAddTaskPanel(false);
@@ -1357,12 +1373,23 @@ export function Toolbar({ showAddPanel, onToggleAddPanel, className }: ToolbarPr
             useAppStore.getState().globalOptionValues,
             projectInterface?.option ?? {},
           ),
+          androidStart
+            ? () => {
+                if (stoppedSinceStart()) throw new Error(PRE_ACTION_CANCELLED_ERROR);
+              }
+            : undefined,
         );
+        if (stoppedSinceStart()) {
+          log.info(`实例 ${targetInstance.name}: 开始请求发出后按了停止，停止这一轮安卓任务`);
+          // A fresh backend stop, never joining the earlier one: it may have reached the backend before this run
+          // claimed its slot, with its reply still pending.
+          void stopInstanceTasks(targetId, { fresh: true });
+        }
 
-        // macOS 会跳过测试预览版未开放的任务，返回的 ID 不再与提交顺序一一对应：按后端记录的
+        // macOS 和安卓模拟器会跳过未开放的任务，返回的 ID 不再与提交顺序一一对应：按后端记录的
         // 「任务 ID → 选中任务」对应关系取名称。Windows 不会跳过任务，仍按顺序对应。
         const macosController =
-          projectInterface?.controller.find((c) => c.name === currentControllerName)?.type === 'MacOS';
+          projectInterface?.controller.find((c) => c.name === currentControllerName)?.type === 'MacOS' || androidStart;
         const mappings = macosController
           ? (await maaService.getAllStates().catch(() => null))?.instances[targetId]?.taskRunState.mappings
           : undefined;

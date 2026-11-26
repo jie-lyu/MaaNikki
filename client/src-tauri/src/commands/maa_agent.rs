@@ -359,7 +359,7 @@ fn agent_spawn_hint_tag(error: &std::io::Error) -> Option<&'static str> {
 }
 
 /// 启动单个 Agent 子进程并完成连接
-async fn start_single_agent(
+pub(super) async fn start_single_agent(
     app: tauri::AppHandle,
     agent: AgentConfig,
     agent_index: usize,
@@ -455,9 +455,18 @@ async fn start_single_agent(
             cmd.env("MAANIKKI_MOUSE_GUARD_CHANNEL", guard_channel);
         }
 
+        // 本次运行的控制器只能来自这次提交：客户端自身环境里继承来的 PI_CONTROLLER 不传给 agent。
+        cmd.env_remove("PI_CONTROLLER");
+
         // PI v2.5.0: 仅允许注入 PI_* 环境变量，避免覆盖宿主进程关键环境。
         let mut injected_count = 0usize;
         for (key, value) in pi_envs.iter() {
+            // Windows 的环境变量名不分大小写：大小写不同的 PI_CONTROLLER 会被 agent 当作它，而准入只认
+            // 精确的名字，两边会不一致。
+            if key != "PI_CONTROLLER" && key.eq_ignore_ascii_case("PI_CONTROLLER") {
+                warn!("[agent#{}] Skipping {}: only PI_CONTROLLER names the run's controller", agent_index, key);
+                continue;
+            }
             if !key.starts_with("PI_") {
                 warn!(
                     "[agent#{}] Skipping non-PI_ env key from pi_envs: {}",
@@ -637,10 +646,47 @@ pub async fn start_tasks_impl(
     // 在重新连接或启动 agent 之前按当前系统筛掉不能运行的任务：全部被拒绝时直接返回原因；
     // 部分被拒绝时，交给 agent 的运行计划只列出会执行的任务，避免被跳过的任务影响其余任务的行为。
     // Windows 上没有任务被拒绝，不做任何改动。
-    let refusals: Vec<Option<String>> = tasks
-        .iter()
-        .map(|task| super::utils::platform_refuses_task(&task.entry))
-        .collect();
+    // 按已连接的控制器决定游戏目标，并核对它与本次提交的控制器一致（与 agent 的 host.game_backend 相同）；
+    // 两者都没有时按当前系统。控制器本身不能运行时整批拒绝，即使没有任务。
+    let connected = {
+        let instances = maa_state.instances.lock().map_err(|e| e.to_string())?;
+        super::utils::ControllerKind::of_instance(
+            instances.get(&instance_id).and_then(|inst| inst.controller_config.as_ref()),
+        )
+    };
+    let submitted = super::utils::submitted_controller_kind(
+        pi_envs.as_ref(),
+        controller_info.as_ref().and_then(|info| info.type_name.as_deref()),
+    );
+    let entries: Vec<&str> = tasks.iter().map(|task| task.entry.as_str()).collect();
+    let refusals = match super::utils::admit_tasks(connected.as_ref(), submitted.as_ref(), &entries) {
+        Ok(refusals) => refusals,
+        Err(reason) => {
+            emit_agent_output(&app, &instance_id, "stderr", &reason);
+            return Err(reason);
+        }
+    };
+    // 安卓模拟器：通过准入之后才查的开始条件（客户端放开 Adb 准入之前不会走到这里）。
+    if super::utils::targets_android(connected.as_ref(), submitted.as_ref()) {
+        let has_agent = agent_configs.as_ref().is_some_and(|configs| !configs.is_empty());
+        if let Some(reason) =
+            super::utils::android_start_refusal(reset_state, pi_envs.as_ref(), tasks.len(), has_agent)
+        {
+            emit_agent_output(&app, &instance_id, "stderr", &reason);
+            return Err(reason);
+        }
+        // 安卓模拟器（只在 macOS 上开放）：这一轮由 android_run 独占，不走下面的共用流程。
+        #[cfg(target_os = "macos")]
+        return super::android_run::start(
+            app, maa_state, instance_id, tasks, agent_configs, cwd, tcp_compat_mode, pi_envs, reset_state,
+            controller_info, refusals,
+        )
+        .await;
+    }
+    // 绑定控制器之前按新的连接重新准入时用（见下方）。
+    let admitted_names: Vec<String> = entries.iter().map(|e| e.to_string()).collect();
+    let admitted_entries: Vec<&str> = admitted_names.iter().map(String::as_str).collect();
+    let admitted_refusals = refusals.clone();
     if refusals.iter().any(Option::is_some) {
         if refusals.iter().all(Option::is_some) {
             let reason = refusals.into_iter().flatten().next().unwrap_or_default();
@@ -741,6 +787,16 @@ pub async fn start_tasks_impl(
             .ok_or("Controller not connected")?
             .clone();
         debug!("[start_tasks] Controller acquired");
+
+        // 准入看的是开始时的连接；在绑定控制器、改动任何状态之前，在这把锁里核对：连接变了就按新的连接
+        // 重新准入，结果相同才继续（同一份配置的刷新、准入后才完成的第一次 Win32 连接都照常运行）。
+        super::utils::readmit_on_connection(
+            connected.as_ref(),
+            instance.controller_config.as_ref(),
+            submitted.as_ref(),
+            &admitted_entries,
+            &admitted_refusals,
+        )?;
 
         // Mac：重连期间用户已停止这次启动，不能清掉停止标记把新的代数当作自己的。
         if mac_token.is_some_and(|token| !super::mac_connection::start_owned(instance.macos_run, token)) {
@@ -1276,6 +1332,11 @@ pub async fn maa_start_tasks(
 /// 返回是否真的停止了（Mac 这一轮仍在进行、它的 agent 留给它自己时返回 false，调用方也不应释放连接）。
 pub fn stop_agent_impl(maa_state: &Arc<MaaState>, instance_id: &str) -> Result<bool, String> {
     info!("stop_agent_impl called for instance: {}", instance_id);
+    // 安卓模拟器：这个实例有安卓运行时由它自己停止和收尾（它的 agent 不在实例上）。
+    #[cfg(target_os = "macos")]
+    if let Some(result) = super::android_run::stop_if_busy(maa_state, instance_id) {
+        return result.map(|()| false);
+    }
 
     let (clients, children) = {
         let mut instances = maa_state.instances.lock().map_err(|e| e.to_string())?;

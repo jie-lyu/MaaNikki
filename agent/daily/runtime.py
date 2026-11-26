@@ -19,7 +19,7 @@ from game_keys import GameKeys
 from performance import count, measure
 from message_log import write_message
 from game_view import ALLOWED_FRAME_SIZES, is_clipped_game_frame, require_game_frame
-from host import capabilities, native_key, platform_backend
+from host import capabilities, device_input, native_key, game_backend
 
 
 RESOURCE = RESOURCE_ROOT / "resource"
@@ -33,6 +33,21 @@ def native_key_fields(action, fields):
         return fields
     key = fields["key"]
     return {**fields, "key": [native_key(item) for item in key] if isinstance(key, list) else native_key(key)}
+
+
+
+
+def _android_dispatch(context, action, fields):
+    """Send a validated tap or swipe with every parameter spelled out, through run_action_direct: no pipeline node
+    is involved, so nothing an earlier override set on one can be inherited (offsets, contact, hover-only)."""
+    from maa.pipeline import JClick, JSwipe
+    if action == "Click":
+        return context.run_action_direct("Click", JClick(
+            target=list(fields["target"]), target_offset=(0, 0, 0, 0), contact=0, pressure=1))
+    return context.run_action_direct("Swipe", JSwipe(
+        starting=0, begin=list(fields["begin"]), begin_offset=(0, 0, 0, 0), end=[list(fields["end"])],
+        end_offset=[(0, 0, 0, 0)], end_hold=[0], duration=[fields.get("duration", 200)], only_hover=False,
+        contact=0, pressure=1))
 
 
 class Runtime:
@@ -69,8 +84,17 @@ class Runtime:
     def stopped(self):
         if self.navigation_halted:
             return True
+        if capabilities(game_backend()).touch_actions_only and device_input().halted:
+            return True
         session = active_session()
         return session.stopped() if session else self.context.tasker.stopping
+
+    def _stopped_now(self):
+        """Like ``stopped`` but asks the tasker afresh instead of reusing a recent answer."""
+        if self.navigation_halted or device_input().halted:
+            return True
+        session = active_session()
+        return session.stopped(fresh=True) if session else bool(self.context.tasker.stopping)
 
     def background_mode(self):
         session = active_session()
@@ -232,14 +256,16 @@ class Runtime:
         return state["image"]
 
     def log(self, text, *, detail=False, ui_text=None):
+        from message_log import redact  # Android: no UID in what is written or shown (desktop: unchanged)
+        text, ui_text = redact(text), redact(ui_text)
         stopped = self.stopped
         display = None if detail or stopped else (text if ui_text is None else ui_text)
         saved = write_message(text, display)
         # A failed detail file must not silently swallow diagnostic messages.
         if not stopped and (display or not saved):
-            self.context.run_task("MaaNikki_Daily_Message", {
-                "MaaNikki_Daily_Message": {"focus": {
-                    "Node.Action.Starting": display if saved else text}}})
+            from task_control import message_override
+            self.context.run_task("MaaNikki_Daily_Message", message_override({
+                "Node.Action.Starting": display if saved else text}))
         session = active_session()
         if session is not None and not detail and not stopped and display:
             clean = display.strip()
@@ -259,6 +285,9 @@ class Runtime:
         return self._evidence
 
     def diagnostic(self, stage, reason, *, image=None, details=None):
+        from host import android_user_stop
+        if android_user_stop():
+            return None  # Android: after a user stop a frame is no failure scene (False on the desktop)
         return self.evidence.save(stage, reason, image=image, details=details,
                                   generation=self._focus_generation)
 
@@ -298,7 +327,7 @@ class Runtime:
         return hwnd, cap_size
 
     def _validate_pointer_targets(self, action, fields, inputs=None, *, require_work_area=None):
-        from host import capabilities, platform_backend
+        from host import capabilities, game_backend
         from tall_window import (
             BASE_CAPTURE_HEIGHT,
             BASE_CAPTURE_WIDTH,
@@ -326,7 +355,7 @@ class Runtime:
                 not safe
                 and not tried_adjust
                 and cap_size == (BASE_CAPTURE_WIDTH, BASE_CAPTURE_HEIGHT)
-                and capabilities(platform_backend()).tall_window
+                and capabilities(game_backend()).tall_window
                 and is_auto_adjust_resolution_enabled(self.context)
             ):
                 tried_adjust = True
@@ -382,7 +411,27 @@ class Runtime:
                     fields.get("begin"), fields.get("end"), fields.get("duration", 300), capture_size=cap_size))
         return None
 
-    def action(self, action, *, ui_click=True, focus_generation=None, **fields):
+    def action(self, action, *, ui_click=True, focus_generation=None, source_frame=None, **fields):
+        touch_only = capabilities(game_backend()).touch_actions_only
+        movement, not_after = False, None
+        if touch_only:
+            # host.android.gesture.camera_drag: a movement swipe, with the gesture freshness rule (_dispatch_touch)
+            movement = bool(fields.pop("_movement", False))
+            # Android only, with _movement: the deciding frame's expiry (time.monotonic), checked by _dispatch_touch
+            # right before the input is submitted, as a gesture's not_after (host.android.teleport's map input).
+            not_after = fields.pop("_not_after", None)
+            if not_after is not None and (not movement or type(not_after) not in (int, float)
+                                          or not math.isfinite(not_after)):
+                from host import UnsupportedInput
+                raise UnsupportedInput("安卓模拟器上的点击的截止时间无效，没有发送。")
+            from host.android import check_touch_fields
+            check_touch_fields(action, {k: v for k, v in fields.items() if k != "window_cursor_pos"})
+            if source_frame is None:
+                from host import UnsupportedInput
+                raise UnsupportedInput("安卓模拟器上的点击必须说明它依据的是哪一张截图，这一步暂不支持。")
+            from host.android import touch_point
+            fields = {**fields, **{name: touch_point(fields[name]) for name in ("target", "begin", "end")
+                                   if name in fields}}
         if self.stopped:
             return False
         self.check_focus()
@@ -422,7 +471,7 @@ class Runtime:
                 inputs, action, fields, cap_size=cap_size, window_cursor_pos=window_cursor_pos)
             if dispatched is not None:
                 return dispatched
-        hover = capabilities(platform_backend()).pointer_hover
+        hover = capabilities(game_backend()).pointer_hover
         if action == "Click" and ui_click and hover:
             point = self._target_point(fields.get("target"), "界面点击目标")
             # Maa's rectangular Click target is random inside the box. UI
@@ -444,7 +493,7 @@ class Runtime:
         inputs = self._active_inputs()
         if inputs is not None:
             inputs.check()
-            if focus_generation is not None and platform_backend() == "macos":
+            if focus_generation is not None and game_backend() == "macos":
                 # inputs.check() may have waited for the game to come back: a click checked on an older frame is
                 # cancelled here, right before dispatch. Win32 keeps its existing order.
                 self.check_focus()
@@ -462,6 +511,11 @@ class Runtime:
         if window_only and not inputs.foreground():
             # Never dispatch fallback Seize actions when the game is unfocused.
             inputs.check(require_foreground=True)
+        if touch_only:
+            if movement:
+                return self._dispatch_touch(action, fields, focus_generation, source_frame, movement=True,
+                                            not_after=not_after)
+            return self._dispatch_touch(action, fields, focus_generation, source_frame)
         fields = native_key_fields(action, fields)
         with measure("input.action"):
             result = self.context.run_action("MaaNikki_Daily_Action", pipeline_override={
@@ -471,11 +525,389 @@ class Runtime:
             return self.pause(.1) and self.ui.unhover()
         return succeeded
 
+    def _dispatch_touch(self, action, fields, focus_generation, source_frame, send=None, movement=False,
+                        not_after=None):
+        """Android: the last checks and the dispatch of a validated tap or swipe decided on ``source_frame``; with
+        ``send``, a gesture (Runtime.gesture) is sent by calling it instead, under the same reservation, intent log,
+        checks and device lift confirmation. ``send`` returns host.android.gesture's DONE, ABORTED (a stop seen during
+        the gesture: it lifted early, and once that lift is confirmed this returns False), FAILED or OVERRUN (both
+        unconfirmed). A gesture (and a ``movement`` swipe, camera_drag) needs a source frame captured after every
+        earlier input and counts as a gesture; any input needs one captured after the latest gesture
+        (DeviceInputState.inputs); a gesture or movement swipe also needs the latest completed capture
+        (DeviceInputState.captures), and its device confirmation ends by a wall-clock deadline.
+        Every touch is confirmed by an UP newer than its frame's baseline and the last UP that confirmed a touch.
+        ``not_after`` (a gesture's, or a movement tap's or swipe's from Runtime.action's _not_after;
+        wall_time.monotonic): past it at the very last check before sending, host.android.gesture.DecisionExpired,
+        nothing sent, nothing halted."""
+        from task_control import ForegroundChanged
+        if send is not None:
+            from host.android.gesture import ABORTED, DONE, EXPIRED, OVERRUN
+        self.check_focus()
+        if focus_generation is not None and self._focus_generation != focus_generation:
+            raise ForegroundChanged("前台切换后已取消本次输入，等待重新核对")
+        # The frame the decision was made on must have been captured with device focus confirmed, and no focus loss
+        # may have been observed since (by any Runtime), nor a session resume.
+        if device_input().marks_of(source_frame) != (self._focus_generation, device_input().epoch):
+            raise ForegroundChanged("依据的截图已经过时（之后焦点变过），已取消本次输入，等待重新核对")
+        state = device_input()
+        with state.lock:
+            if state.halted or self.stopped:
+                return False
+            # A frame captured before an earlier gesture (or, for a gesture, before any earlier input) shows a screen
+            # that input may have changed, and its touch reading predates that input's lift: nothing is sent.
+            fresh = send is not None or movement
+            if state.predates_input(source_frame, gesture=fresh):
+                from host import UnsupportedInput
+                raise UnsupportedInput(f"安卓模拟器上的「{action}」依据的截图是在上一次输入之前截的，画面可能已经变了，"
+                                       "没有发送；手势前后都要重新截图再判断。")
+            # A gesture or camera drag delayed behind another capture (any Runtime) decides again on the newer pixels.
+            if fresh and state.superseded(source_frame):
+                from host import UnsupportedInput
+                raise UnsupportedInput(f"安卓模拟器上的「{action}」依据的截图之后又截过新图，画面可能已经变了，没有发送；"
+                                       "要在最新的截图上重新判断。")
+            target = self._sessionless_target()
+            # The device reading kept with the source frame (no device I/O between the decision and the send): the
+            # touch state and baseline below, and the guest the reservation names.
+            before = state.touch_of(source_frame)
+            booted = getattr(before, "boot_id", None)
+            try:
+                state.begin_touch({"serial": target.serial, "boot_id": booted} if booted else None)
+            except BaseException:
+                if state.halted:
+                    self._halt_unconfirmed()
+                raise
+            sent = intent = cut_short = False
+            try:
+                # The intent is logged first (file I/O), so every check below comes after all the I/O: another caller
+                # may have halted input, the run may be stopping, or the player may have switched apps meanwhile.
+                if not state.record_touch(action, fields, "sending"):
+                    from host import UnsupportedInput
+                    raise UnsupportedInput("无法写入安卓模拟器的输入记录，这一步暂不发送。")
+                intent = True
+                # Nothing may have been held when the source frame was captured (a contact left by anything earlier
+                # stops all input), and the dispatcher's latest event then is the baseline this touch's own lift
+                # must come after. A contact seen held is reported first, whatever else happened meanwhile.
+                if before is not None and before.state != "none":
+                    self._report_held_contact()
+                if state.halted or self.stopped:
+                    return False
+                # A source frame whose touch reading was unreadable, with the user's stop seen here (e.g. requested
+                # during the intent write): the unsent touch is cancelled as a stop.
+                from host import android_user_stop
+                if before is None and android_user_stop(ask_tasker=False):
+                    return False
+                if before is None:
+                    self._report_held_contact()
+                # A stop published by now (or the cached stop) frees the reservation before any focus/ADB I/O.
+                if state.halted or self.stopped or android_user_stop(ask_tasker=False):
+                    return False
+                if not self._device_focus_now():
+                    raise ForegroundChanged("设备上游戏不在前台，已取消本次输入，等待重新核对")
+                if state.marks_of(source_frame) != (self._focus_generation, state.epoch):
+                    raise ForegroundChanged("依据的截图已经过时（之后焦点变过），已取消本次输入，等待重新核对")
+                if self._stopped_now():  # Stop may have been pressed during the focus query
+                    return False
+                # A stopper's request, checked with this touch reserved (see DeviceInputState.stop_requested): the
+                # framework's stop could otherwise cut into the gesture and leave its contact held.
+                if state.stop_requested():
+                    return False
+                # The deciding frame's expiry (gestures only): the last check, so no I/O above can outlast it.
+                if not_after is not None and wall_time.monotonic() > not_after:
+                    from host.android.gesture import DecisionExpired
+                    raise DecisionExpired(f"安卓模拟器上的「{action}」依据的截图已经超过了有效时间，没有发送；要在新截图上重新判断。")
+                sent = True
+                state.sent_input(gesture=fresh)
+                expired = False
+                try:
+                    with measure("input.action"):
+                        if send is None:
+                            result = _android_dispatch(self.context, action, fields)
+                            succeeded = result is not None and bool(result.success)
+                        else:
+                            performed = send()  # every contact it put down is lifted before it returns or raises
+                            succeeded, cut_short = performed in (DONE, ABORTED), performed == ABORTED
+                            # the frame's not_after passed right before the first down: nothing was posted
+                            expired = performed == EXPIRED
+                    if expired:
+                        sent = False  # definitely unsent: cancelled and released below, nothing halted
+                    outcome = "unconfirmed: overran its time cap" if send is not None and performed == OVERRUN \
+                        else "unconfirmed"
+                    if succeeded:
+                        # The framework reports a lift as done once it is written to MaaTouch, even when MaaTouch
+                        # is gone (measured 2026-11-26): only the device showing this touch's UP, after the
+                        # baseline, with nothing held confirms it.
+                        timing = None
+                        if fresh:  # a gesture or camera drag: confirmed by a wall-clock deadline (stop window)
+                            from host.android.gesture import confirmation_clock
+                            timing = confirmation_clock()
+                        after = self._device_touch_released(target, before.latest, timing)
+                        succeeded = after is True
+                        if not succeeded:
+                            why = "nothing readable" if after is None else \
+                                after.state if after.state != "none" else "no new lift"
+                            outcome = f"unconfirmed: device reports {why}"
+                        else:
+                            outcome = "stopped early: confirmed" if cut_short else "confirmed"
+                except BaseException as error:
+                    state.record_touch(action, fields, f"raised {type(error).__name__}")
+                    self._halt_unconfirmed()
+                    if not isinstance(error, Exception):
+                        raise
+                    # Always reported as an unconfirmed touch, whatever was raised: no handler that turns an ordinary
+                    # error into a failure result or a quiet stop may hide a touch that may be held.
+                    from host import InputUnconfirmed
+                    raise InputUnconfirmed(f"安卓模拟器上的「{action}」发出后没能确认完成（{type(error).__name__}: {error}），"
+                                           "可能留下按住的触点，已停止所有输入；请检查模拟器后重新启动 MaaNikki。") from error
+                if not expired:
+                    state.record_touch(action, fields, outcome)
+            finally:
+                if not sent:
+                    if intent:
+                        state.record_touch(action, fields, "cancelled")  # logged as not sent
+                    self._release_touch(state)
+            if expired:
+                from host.android.gesture import DecisionExpired
+                raise DecisionExpired(f"安卓模拟器上的「{action}」依据的截图在第一个触点按下之前超过了有效时间，没有发送；"
+                                      "要在新截图上重新判断。")
+            if succeeded:
+                self._release_touch(state)
+            else:
+                self._halt_unconfirmed()
+                from host import InputUnconfirmed
+                raise InputUnconfirmed(f"安卓模拟器上的「{action}」没有确认完成（可能留下按住的触点），已停止所有输入；"
+                                       "请检查模拟器后重新启动 MaaNikki。")
+        if cut_short:
+            return False
+        if action == "Click":
+            return self.pause(.1) and self.ui.unhover()
+        return True
+
+    def gesture(self, gesture, *, source_frame, not_after=None):
+        """Android only: send a scripted multi-contact gesture (host.android.gesture: joystick steps, the bell press)
+        decided on ``source_frame``, a current frame captured with device focus confirmed. The script is checked
+        first (contacts 0 and 1, points inside the frame, its time cap); then it takes the tap's path: refused on a
+        stop, a halt or a contact held when the frame was captured, the touch marker held and the intent logged before
+        the first down, every contact lifted in ``finally``, and the device must show the final lift with nothing held
+        before this returns, so no capture or decision happens during the gesture or before its lift is confirmed
+        (Android capture waits for the input lock the gesture holds). ``source_frame`` must have been captured after
+        every earlier Android input (UnsupportedInput otherwise, nothing sent), and no later input may use a frame
+        captured before this gesture. True when it ran whole and its lift was confirmed; False on a stop (before it
+        started, or seen while it held a contact: it then lifts early). A failed call, an overrun of its time limits
+        or a lift not confirmed raises InputUnconfirmed (input halted, marker kept). ``not_after`` (time.monotonic):
+        the deciding frame's expiry, checked right before the first contact goes down, after every other check;
+        past it, host.android.gesture.DecisionExpired and nothing sent (the caller decides again on a new frame).
+        Every other backend raises UnsupportedInput, as ``hold`` does on Android."""
+        from host import UnsupportedInput
+        if not capabilities(game_backend()).touch_actions_only:
+            raise UnsupportedInput("多触点手势只在安卓模拟器上使用，这里不发送。")
+        from host.android.gesture import check_gesture, perform
+        check_gesture(gesture)
+        if not_after is not None and (type(not_after) not in (int, float) or not math.isfinite(not_after)):
+            raise UnsupportedInput("安卓模拟器上的手势的截止时间无效，没有发送。")
+        if source_frame is None:
+            raise UnsupportedInput("安卓模拟器上的手势必须说明它依据的是哪一张截图，这一步暂不支持。")
+        if self.stopped:
+            return False
+        self.check_focus()
+        if not self.ensure_frame():
+            return False
+        self.invalidate_frame()
+        fields = gesture.log_fields()
+        self.evidence.observe("input", action=self.GESTURE_ACTION, fields=fields)
+        inputs = self._active_inputs()
+        if inputs is not None:
+            inputs.check()
+        state = device_input()
+
+        def abort():  # local checks only (no IPC or device read while a contact is held): a halt, the stop request
+            return state.halted or self.navigation_halted or state.stop_requested()
+
+        def keep_queue():  # a lift is still queued behind a pending job: the tasker must not be stopped (it clears it)
+            state.lifts_outstanding = True
+        return self._dispatch_touch(self.GESTURE_ACTION, fields, None, source_frame,
+                                    send=lambda: perform(self.controller, gesture, abort, keep_queue,
+                                                         not_after),
+                                    not_after=not_after)
+
+    GESTURE_ACTION = "Gesture"
+    TOUCH_KEY_ATTEMPTS = 3
+    RELEASE_READS = 6
+    MIN_READ_S = .2  # the shortest timeout a gesture's confirmation read gets, even past its deadline
+
+    def _device_touch_released(self, target, baseline, timing=None):
+        """Android: True once the device shows an injected UP newer than ``baseline`` and than the UP that confirmed
+        the latest touch (DeviceInputState.last_lift: no two touches share a lift), with no contact held; otherwise
+        the last snapshot (None when unreadable). Taps and swipes: RELEASE_READS short reads. A gesture
+        (``timing``: now, sleep and deadline from host.android.gesture.confirmation_clock): reads until the
+        deadline, each read's own timeout capped by the time left, so device reads count against it too."""
+        state = device_input()
+
+        def released(snapshot):
+            if snapshot is None:
+                return False
+            floor = state.lift_floor(snapshot.boot_id)
+            if not snapshot.released_after(baseline if floor is None else max(baseline, floor)):
+                return False
+            state.consumed_lift(snapshot)
+            return True
+        snapshot = None
+        if timing is None:
+            for attempt in range(self.RELEASE_READS):
+                if attempt:
+                    wall_time.sleep(.15)
+                snapshot = target.touch_snapshot()
+                if released(snapshot):
+                    return True
+            return snapshot
+        now, sleep, deadline = timing
+        while True:
+            snapshot = target.touch_snapshot(timeout_s=max(self.MIN_READ_S, deadline - now()))
+            if released(snapshot):
+                return True
+            left = deadline - now()
+            if left <= 0:
+                return snapshot
+            sleep(min(.15, left))
+
+    def escape(self, delay=0.35):
+        """Back out of the current screen: Esc (``key("menu")``) on the desktop, ``leave_page`` on Android, where
+        the duck that Esc's menu key maps to would open the menu instead of leaving."""
+        if capabilities(game_backend()).touch_actions_only:
+            return self.leave_page(delay)
+        return self.key("menu", delay)
+
+    def leave_page(self, delay=0.35):
+        """Android: leave the current screen (a modal by its close mark, a page by its back arrow, the quit
+        confirmation by 取消); True at once on the open-world HUD. The PC counterpart is pressing Esc."""
+        if self.stopped:
+            return False
+        if not capabilities(game_backend()).touch_actions_only:
+            raise NotImplementedError("leave_page is the Android counterpart of key('menu') on a page")
+        return self._touch_key("leave", delay)
+
+    def _touch_key(self, name, delay):
+        """Android: a named game action as at most one tap, decided on one recognised, focus-confirmed frame and
+        confirmed on a fresh one, which the tap carries as its source (host.android.actions). The quit
+        confirmation is cancelled first if it is showing. No tap within 40 px of a forbidden word (each word located
+        on its own, host.android.pages.forbidden_word_near) on either frame."""
+        from host import UnsupportedInput
+        from host.android import actions, pages
+        from navigation.models import NavigationError
+        from task_control import ForegroundChanged
+        if name not in actions.ACTIONS:
+            raise UnsupportedInput(f"安卓模拟器上还不支持「{name}」这个游戏动作，任务已停止。")
+        guard_taps = 0
+        focus_change = None
+
+        def sent_so_far():
+            return f"已点过 {guard_taps} 次退出确认框的「取消」" if guard_taps else "没有发送任何输入"
+
+        def refuse_near_forbidden(recognize, target):
+            word = pages.forbidden_word_near(recognize, target)
+            if word:
+                raise NavigationError(f"「{actions.ACTION_NAMES[name]}」要点的地方旁边有「{word}」，没有点，"
+                                      f"{sent_so_far()}，任务停止。")
+        for _attempt in range(self.TOUCH_KEY_ATTEMPTS):
+            if self.stopped:
+                return False
+            decided = self._fresh_device_frame()
+            if decided is None:
+                return False
+            recognize = self._recognizer_on(decided)
+            try:
+                screen = actions.read_screen(recognize)
+                plan = actions.plan_tap(name, screen, recognize)
+            except actions.ScreenUnrecognised as error:
+                if not self._frame_still_valid(decided):
+                    continue  # focus changed while recognising: decide again on a new frame
+                raise NavigationError(f"{error}，{sent_so_far()}。") from error
+            if not self._frame_still_valid(decided):
+                continue  # a focus loss was observed while deciding: nothing decided on this frame counts
+            if plan.target is None:
+                return True  # nothing to do (e.g. leaving while already in the open world)
+            refuse_near_forbidden(recognize, plan.target)
+            # Right before sending: the same screen with the same thing in the same place on a fresh frame, which
+            # the tap then carries, so a page that changed during the (long) search is not tapped.
+            confirming = self._fresh_device_frame()
+            if confirming is None:
+                return False
+            recognize_confirming = self._recognizer_on(confirming)
+            target = actions.confirm_tap(plan, screen, recognize_confirming)
+            # Both frames must still carry the current focus generation and epoch: a loss observed at any point
+            # since the decision began voids it (the dispatch then rechecks the confirming frame under its lock).
+            if target is None or not (self._frame_still_valid(decided) and self._frame_still_valid(confirming)):
+                continue
+            refuse_near_forbidden(recognize_confirming, target)
+            try:
+                if not self.action("Click", target=target, source_frame=confirming):
+                    return False
+            except ForegroundChanged as error:
+                focus_change = error  # cancelled before sending: decide again within the same limit
+                continue
+            if plan.completes:
+                return self.pause(delay)
+            guard_taps += 1
+            self.pause(delay)  # the quit confirmation was cancelled: look again before the asked action
+        if focus_change is not None and not guard_taps:
+            raise focus_change
+        raise NavigationError(f"「{actions.ACTION_NAMES[name]}」连续 {self.TOUCH_KEY_ATTEMPTS} 次没能在稳定的画面上完成，"
+                              f"{sent_so_far()}，已停止。")
+
+    def _fresh_device_frame(self):
+        self.invalidate_frame()
+        return self.capture()
+
+    def _recognizer_on(self, frame):
+        """Recognition on ``frame`` without a focus poll per call (the frame's mark is checked before any tap)."""
+        def recognize(node, override=None):
+            with measure("recognition.native"):
+                return self.context.run_recognition(node, frame, {node: override} if override else None)
+        return recognize
+
+    def _frame_still_valid(self, frame):
+        return device_input().marks_of(frame) == (self._focus_generation, device_input().epoch)
+
+    def _release_touch(self, state):
+        try:
+            state.release_touch()
+        except BaseException:
+            self._halt_unconfirmed()
+            raise
+
+    def _report_held_contact(self):
+        """Android, before a touch is sent: the source frame showed a contact held (or no readable touch state)."""
+        self._halt_unconfirmed()
+        from host import InputUnconfirmed
+        raise InputUnconfirmed("安卓模拟器上还有按住的触点（或读不出设备的触摸状态），这一步没有发送，已停止所有输入；"
+                               "请检查模拟器后重新启动 MaaNikki。")
+
+    def _halt_unconfirmed(self):
+        """The touch may have gone down without coming up: nothing more is sent by this process, and the tasker's
+        queue is stopped so later tasks of the batch do not start."""
+        device_input().halt()
+        self.navigation_halted = True
+        session = active_session()
+        if session is not None:
+            session.input_unconfirmed = True
+        if device_input().lifts_outstanding:
+            # A gesture's lift is still queued behind a pending job: MaaFramework's Tasker::post_stop clears the
+            # controller's queued jobs (that UP included) while the running DOWN, posted without auto-up, completes
+            # and stays held. The tasker is not stopped; this process is halted, so every Android task sends nothing
+            # (Android pipelines run only custom actions), and the marker stays (the client's stopper does not stop
+            # the tasker while touch.json exists).
+            return
+        try:
+            self.context.tasker.post_stop()
+        except Exception:
+            pass
+
     def key(self, value, delay=0.35):
         # Integer keys are physical UI shortcuts / legacy physical recordings.
         # Never remap Ctrl+A to the configured left-movement key.
         if self.stopped:
             return False
+        if isinstance(value, str) and capabilities(game_backend()).touch_actions_only:
+            return self._touch_key(value, delay)
         if isinstance(value, str):
             try:
                 binding = self.game_keys.get(value)
@@ -494,6 +926,9 @@ class Runtime:
     def hold(self, key, seconds):
         if type(seconds) not in (int, float) or not math.isfinite(seconds) or not 0 <= seconds <= 8 or self.stopped:
             return False
+        if capabilities(game_backend()).touch_actions_only:
+            from host import UnsupportedInput
+            raise UnsupportedInput("安卓模拟器上还不能按住按键（移动和摇杆在导航阶段实现），任务已停止。")
         self.invalidate_frame()
         binding = self.game_keys.get(key) if isinstance(key, str) else None
         is_mouse = binding is not None and binding.kind == "mouse"
@@ -522,6 +957,49 @@ class Runtime:
 
     def capture(self):
         return self._capture()
+
+    def _sessionless_target(self):
+        target = getattr(self, "_device_target", None)
+        if target is None:
+            from host import connect_target
+            target = self._device_target = connect_target(self.controller)
+        return target
+
+    def _device_focus_now(self):
+        """Android: a positive reading that the game has focus on the device right now (no waiting)."""
+        inputs = self._active_inputs()
+        if inputs is None:
+            session = active_session()
+            inputs = session.ensure_adapter() if session is not None else None
+        target = inputs if inputs is not None else self._sessionless_target()
+        focused = bool(target.foreground())
+        if not focused:
+            device_input().observed_loss()
+        return focused
+
+    def _device_focus_ready(self):
+        """Android: True when the game has focus on the device now; otherwise wait for it (a pause, also in
+        background observation, which does not wait on its own) and return False so the caller captures again."""
+        inputs = self._active_inputs()
+        if inputs is None:
+            session = active_session()
+            inputs = session.ensure_adapter() if session is not None else None
+        if inputs is None:
+            # No session to wait in: still a positive reading from the device, never an assumption.
+            target = self._sessionless_target()
+            if target.foreground():
+                return True
+            device_input().observed_loss()  # frames captured before this are stale
+            if not target.exists():
+                from navigation.models import GameWindowClosed
+                raise GameWindowClosed("模拟器里的游戏已经退出。")
+            wall_time.sleep(.3)
+            return False
+        if inputs.foreground():
+            return True
+        device_input().observed_loss()
+        inputs.check(require_foreground=True)
+        return False
 
     def capture_parked(self, park_point, *, settle_s: float = 0.08):
         """Capture one frame while temporarily holding the cursor at ``park_point`` in window-input mode."""
@@ -615,41 +1093,63 @@ class Runtime:
         inputs = self._active_inputs()
         if inputs is not None:
             self._check_inputs(inputs, session)
+        device_focus = capabilities(game_backend()).capture_needs_device_focus
         while not self.stopped:
             if available is not None and not available():
                 return None
             self.check_focus()
-            obs_gen = self.observation_generation()
-            with measure("capture"):
-                with measure("capture.post"):
-                    result = self.controller.post_screencap()
-                submitted_at = wall_time.monotonic()
-                expired = False
-                try:
-                    idle = 0 if deadline is None else deadline-wall_time.monotonic()
-                    if idle > 0:
-                        count("capture.prefetched")
-                        with measure("capture.overlap_idle"):
-                            self.pause(idle)
-                        # A delayed wake-up must not act on a prefetched frame
-                        # which could have completed long before this decision.
-                        expired = wall_time.monotonic()-submitted_at > .1
-                finally:
-                    # Drain the one native job even on Stop/focus exceptions;
-                    # never leave a capture queued for the next task to inherit.
-                    with measure("capture.wait"):
-                        result.wait()
-                if self.stopped or available is not None and not available():
-                    return None
-                self.check_focus()
-                if expired or obs_gen != self.observation_generation():
-                    count("capture.discarded")
-                    continue
-                with measure("capture.transfer"):
-                    image = result.get() if result.succeeded else None
+            if device_focus:
+                device_input().claim()  # capture, decision and dispatch belong to one agent process
+            # The epoch is read before the focus check, so a loss seen anywhere after it discards this frame.
+            epoch = device_input().epoch if device_focus else None
+            if device_focus and not self._device_focus_ready():
+                continue
+            # Android: the device's touch state and latest input event right before this frame, kept with it; a tap
+            # decided on the frame is sent only if nothing was held then, and its lift must come after that event.
+            # Under the input lock from that reading until the frame is complete (Android only; off Android this is
+            # nullcontext and device_input() is not touched): no touch, a gesture's contact in particular, can be down
+            # while this frame is captured, from this Runtime or any other in the process, and the input count read
+            # here (DeviceInputState.inputs) counts only inputs confirmed before the reading.
+            with (device_input().lock if device_focus else nullcontext()):
+                inputs_sent = device_input().inputs if device_focus else None
+                touch = self._sessionless_target().touch_snapshot() if device_focus else None
+                obs_gen = self.observation_generation()
+                with measure("capture"):
+                    with measure("capture.post"):
+                        result = self.controller.post_screencap()
+                    submitted_at = wall_time.monotonic()
+                    expired = False
+                    try:
+                        idle = 0 if deadline is None else deadline-wall_time.monotonic()
+                        if idle > 0:
+                            count("capture.prefetched")
+                            with measure("capture.overlap_idle"):
+                                self.pause(idle)
+                            # A delayed wake-up must not act on a prefetched frame
+                            # which could have completed long before this decision.
+                            expired = wall_time.monotonic()-submitted_at > .1
+                    finally:
+                        # Drain the one native job even on Stop/focus exceptions;
+                        # never leave a capture queued for the next task to inherit.
+                        with measure("capture.wait"):
+                            result.wait()
+                    # Android: this screencap's number, counted as it completes (DeviceInputState.captures)
+                    capture_no = device_input().completed_capture() if device_focus else None
+                    if self.stopped or available is not None and not available():
+                        return None
+                    self.check_focus()
+                    if expired or obs_gen != self.observation_generation():
+                        count("capture.discarded")
+                        continue
+                    with measure("capture.transfer"):
+                        image = result.get() if result.succeeded else None
             self.check_focus()
             if obs_gen != self.observation_generation():
                 count("capture.discarded")
+                continue
+            if device_focus and image is not None and image.size and (
+                    not self._device_focus_ready() or device_input().epoch != epoch):
+                count("capture.discarded")  # focus was (or was seen) away from the game while capturing
                 continue
             if image is None or image.size == 0:
                 inputs = self._active_inputs()
@@ -659,13 +1159,28 @@ class Runtime:
                 count("capture.failed")
                 return None
             if ((image.shape[1], image.shape[0]) not in ALLOWED_FRAME_SIZES or is_clipped_game_frame(image)) \
-                    and capabilities(platform_backend()).tall_window:
+                    and capabilities(game_backend()).tall_window:
                 from tall_window import ensure_16_9_window
                 adjusted = ensure_16_9_window(
                     self.controller, context=self.context, notify=self.log, write_log=False
                 )
                 if adjusted is not None:
                     image = adjusted
+            if device_focus:
+                # One locked step: no focus loss can be recorded between the epoch check, the validation (which on
+                # a wrong-size frame saves it as evidence and stops the task) and the mark.
+                with device_input().lock:
+                    if device_input().epoch != epoch:
+                        count("capture.discarded")
+                        continue
+                    self.validate_frame(image)
+                    marked = device_input().mark_if_unchanged(image, self._focus_generation, epoch, touch,
+                                                                 inputs=inputs_sent, capture=capture_no)
+                if not marked:
+                    count("capture.discarded")
+                    continue
+                self.evidence.remember_frame(image, self._focus_generation)  # only an accepted frame is evidence
+                return image
             self.evidence.remember_frame(image, self._focus_generation)
             self.validate_frame(image)
             return image
@@ -710,6 +1225,9 @@ class Runtime:
         return bool(result and result.hit)
 
     def input_text(self, content):
+        if capabilities(game_backend()).touch_actions_only:
+            from host import UnsupportedInput
+            raise UnsupportedInput("安卓模拟器上的文字输入还在开发中，这一步暂不支持。")
         if self.stopped:
             return False
         # Taken before the first focus check: a pause and resume consumed by it or by ensure_frame()
@@ -723,7 +1241,7 @@ class Runtime:
         if self._use_window_input(inputs):
             with measure("input.text"):
                 return bool(inputs.input_window_text(content))
-        if platform_backend() == "macos":
+        if game_backend() == "macos":
             return self._input_text_by_character(content, start)
         with measure("input.text"):
             return self.controller.post_input_text(content).wait().succeeded
@@ -1057,6 +1575,11 @@ class Runtime:
                 inputs.release()
 
     def run(self, entry, overrides=None):
+        if capabilities(game_backend()).touch_actions_only:
+            # A child task runs pipeline nodes whose actions (and any override set earlier in the run) this guard
+            # cannot see; not needed on Android yet.
+            from host import UnsupportedInput
+            raise UnsupportedInput(f"安卓模拟器上暂不运行子任务「{entry}」。")
         if self.stopped:
             return False
         self.invalidate_frame()
@@ -1387,7 +1910,7 @@ class Executors(Runtime):
             return options.get("allow_energy", True)
         if rule.key == "chat" and not options.get("allow_chat", False):
             return False
-        if rule.key == "chat" and not capabilities(platform_backend()).text_input:
+        if rule.key == "chat" and not capabilities(game_backend()).text_input:
             return False  # macOS: public chat needs text input, not yet verified there
         if rule.key == "bubble" and not options.get("bubble_equipped", False):
             return False
@@ -1576,7 +2099,7 @@ class Executors(Runtime):
         return True
 
     def chat(self, mode):
-        if not capabilities(platform_backend()).text_input:
+        if not capabilities(game_backend()).text_input:
             # Before sitting down or opening the channel: nothing is committed.
             self.log("聚会聊天需要文字输入，Mac 版尚未验证，已跳过。")
             return False
@@ -1588,7 +2111,7 @@ class Executors(Runtime):
                 if not self.key("interact", 2):
                     return False
                 if self.text([1050, 120, 220, 500], r"牵手|添加好友"):
-                    self.key("menu", .5)
+                    self.escape(.5)
                     if not self.hold("forward", .25) or not self.pause(.2):
                         return False
                     continue
@@ -2199,7 +2722,7 @@ class Executors(Runtime):
             if abs(desired - current) <= (45 if is_kg_unit else 8):
                 adjusted = step_adjust(current, desired)
             else:
-                if not capabilities(platform_backend()).text_input:
+                if not capabilities(game_backend()).text_input:
                     from host import UnsupportedInput
                     # Before clicking the field or Ctrl+A: a plain failure here would let the realm queue spend the
                     # remaining energy on the default realm.

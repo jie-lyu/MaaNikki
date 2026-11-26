@@ -173,7 +173,7 @@ class Fishing:
         if leave_home:
             if (not self.rt.hit("MaaNikki_Home_StarCollectReady")
                     and not self.ui.page_matches("MaaNikki_MainDetected")):
-                self.rt.key("menu", 1.0)
+                self.rt.escape(1.0)
             if self.rt.hit("MaaNikki_Home_StarCollectReady"):
                 exited = bool(self.ui.leave_star_collect())
                 self.actions.event({"type": "star_collect_exit", "success": exited})

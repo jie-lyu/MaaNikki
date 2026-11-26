@@ -554,8 +554,8 @@ class Navigator:
     def _ensure_cursor_released(self):
         if self._cursor_released or getattr(self.inputs, "window_only", False):
             return
-        from host import capabilities, platform_backend
-        if not capabilities(platform_backend()).requires_alt_before_camera:
+        from host import capabilities, game_backend
+        if not capabilities(game_backend()).requires_alt_before_camera:
             # No lasting cursor mode to leave (macOS); the key would make the game swallow the next
             # camera move, which calibration would read as too small a turn.
             self._cursor_released = True

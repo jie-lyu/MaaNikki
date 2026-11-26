@@ -119,6 +119,9 @@ class FailureEvidence:
     def save(self, stage, reason, *, image=None, details=None, generation=None):
         """Never capture, send input, or raise over the original task failure."""
         try:
+            from message_log import redact  # Android: no UID in the scene's text (the image is masked below)
+            reason, details = redact(reason), redact(details)
+            observations = redact(list(self.observations))
             frame = self.frame if image is None else image
             key = (stage, str(reason), id(frame), self.frame_at)
             if key == self._last_saved:
@@ -130,7 +133,7 @@ class FailureEvidence:
             folder.mkdir(parents=True, exist_ok=True)
             record = {"time": now.isoformat(timespec="milliseconds"), "stage": stage,
                       "reason": str(reason)[:1200], "details": brief(details or {}),
-                      "observations": list(self.observations), "image_status": "unavailable",
+                      "observations": observations, "image_status": "unavailable",
                       "frame_source": "last_observed" if image is None else "provided",
                       "frame_age_ms": round((time.monotonic()-self.frame_at)*1000)
                                       if image is None and self.frame_at is not None else None,

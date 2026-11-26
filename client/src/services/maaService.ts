@@ -532,6 +532,7 @@ export const maaService = {
     piEnvs?: Record<string, string>,
     controllerInfo?: ControllerTelemetryInfo,
     logRedactSecrets?: string[],
+    beforeSubmit?: () => void,
   ): Promise<number[]> {
     if (isUpdateInstalledPendingRestart()) {
       throw new Error('软件更新已安装完成，请先重启客户端后再运行任务。');
@@ -574,6 +575,8 @@ export const maaService = {
         tcpCompatMode,
       );
     }
+    // Last synchronous check right before the request leaves (Android starts: a Stop pressed meanwhile cancels).
+    beforeSubmit?.();
     if (!isTauri()) {
       const result = await apiPost<{ taskIds: number[] }>(
         `/maa/instances/${instanceId}/tasks/start`,

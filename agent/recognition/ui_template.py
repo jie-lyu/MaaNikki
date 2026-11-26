@@ -7,14 +7,14 @@ from client_config import parse_custom_param
 from registration import agent_recognition
 from maa.custom_recognition import CustomRecognition
 
-from app_paths import RESOURCE_ROOT
+from app_paths import RESOURCE_ROOT, resolve_resource_image
 from vision import prepared_template
 
 
 @agent_recognition("nikki.ui_template")
 class UITemplateRecognition(CustomRecognition):
     @staticmethod
-    def _match_spec(image, param, image_root):
+    def _match_spec(image, param, resource_dir):
         roi = param.get("roi", [0, 0, image.shape[1], image.shape[0]])
         if (not isinstance(roi, list) or len(roi) != 4
                 or any(type(v) is not int for v in roi)):
@@ -55,8 +55,9 @@ class UITemplateRecognition(CustomRecognition):
         for name, threshold in zip(templates, thresholds):
             if not isinstance(name, str) or not isinstance(threshold, (int, float)) or not 0 <= threshold <= 1:
                 raise ValueError("页面模板或阈值无效。")
-            path = (image_root / name).resolve()
-            if not path.is_relative_to(image_root):
+            # The logical resource directory (not a symlink-resolved one), like GameUI, so both pick the same layer.
+            path = resolve_resource_image(name, resource_dir)
+            if path is None:
                 raise ValueError("页面图像资源路径无效。")
             prepared = prepared_template(path, grayscale=not bool(color) and not masked,
                                          gray=None if color else gray, color=color)
@@ -91,13 +92,13 @@ class UITemplateRecognition(CustomRecognition):
                     not isinstance(fallback_all, list) or not fallback_all
                     or any(not isinstance(spec, dict) for spec in fallback_all)):
                 raise ValueError("页面兜底模板参数无效。")
-            image_root = (RESOURCE_ROOT / "resource" / "image").resolve()
-            box, detail = self._match_spec(image, param, image_root)
+            resource_dir = RESOURCE_ROOT / "resource"
+            box, detail = self._match_spec(image, param, resource_dir)
             if box is not None or not fallback_all:
                 return CustomRecognition.AnalyzeResult(box=box, detail=detail)
             matched = []
             for spec in fallback_all:
-                sub_box, sub_detail = self._match_spec(image, spec, image_root)
+                sub_box, sub_detail = self._match_spec(image, spec, resource_dir)
                 if sub_box is None:
                     return CustomRecognition.AnalyzeResult(box=None, detail=detail)
                 matched.append((sub_box, sub_detail))

@@ -306,6 +306,7 @@ pub async fn start_web_server(
         // 系统信息
         .route("/system/is-elevated", get(handle_is_elevated))
         .route("/macos/task-tiers", get(handle_get_macos_task_tiers))
+        .route("/android/task-tiers", get(handle_get_android_task_tiers))
         .route(
             "/system/restart-as-admin",
             axum::routing::post(handle_restart_as_admin),
@@ -1303,6 +1304,12 @@ async fn handle_is_elevated() -> impl IntoResponse {
 /// 返回后端系统的 Mac 任务档位（与 get_macos_task_tiers 命令相同）；Windows/Linux 全空，清单读不出来时带 error
 async fn handle_get_macos_task_tiers() -> impl IntoResponse {
     Json(crate::commands::utils::macos_task_tiers()).into_response()
+}
+
+/// GET /api/android/task-tiers
+/// 返回安卓模拟器目标的任务档位（与 get_android_task_tiers 命令相同）；macOS 以外全空
+async fn handle_get_android_task_tiers() -> impl IntoResponse {
+    Json(crate::commands::utils::android_task_tiers()).into_response()
 }
 
 /// POST /api/system/restart-as-admin

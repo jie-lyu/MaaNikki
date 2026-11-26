@@ -34,8 +34,8 @@ import { generateTaskPipelineOverride } from '@/utils';
 import { OptionEditor, SwitchGrid, switchHasNestedOptions } from './OptionEditor';
 import { ContextMenu, useContextMenu } from './ContextMenu';
 import { Tooltip } from './ui/Tooltip';
-import { MacTaskBadge, macTaskNoteLine, useMacTaskMark } from './MacTaskMarks';
-import { macExcludedText } from '@/utils/macTaskTiers';
+import { MacTaskBadge, macTaskNoteLine, useInstanceTaskMark } from './MacTaskMarks';
+import { taskExcludedText } from '@/utils/taskTiers';
 import { ConfirmDialog } from './ConfirmDialog';
 import { buildListItemMenuItems, InlineNameEditor } from './listItemShared';
 import { TriStateCheckbox, getTaskCheckboxState } from './ui/TriStateCheckbox';
@@ -470,11 +470,13 @@ export function TaskItem({ instanceId, task }: TaskItemProps) {
 
   // macOS 任务档位（Windows 上为 null）：不开放的任务（包括从预设或 Windows 配置带来的）保留在列表中，
   // 按不兼容处理并写明原因，运行时由后端跳过；试用任务显示标记和说明。前置任务只在声明了任务入口时
-  // （如启动游戏的 MaaNikki_StartGame）按该入口标记，显示清单里的原因。
-  const macMark = useMacTaskMark(
+  // （如启动游戏的 MaaNikki_StartGame）按该入口标记，显示清单里的原因。档位按这个任务所在实例选的控制器
+  // 取：Adb（安卓模拟器）用安卓档位和安卓说法，其他控制器仍用 Mac 档位。
+  const macMark = useInstanceTaskMark(
+    instanceId,
     isPretask ? pretaskItem?.entry : isMxuTask ? mxuSpecialTask?.entry : taskDef?.entry,
   );
-  const macExcluded = macExcludedText(macMark);
+  const macExcluded = taskExcludedText(macMark);
   const macNote = macTaskNoteLine(macMark);
 
   const isIncompatible = isControllerIncompatible || isResourceIncompatible || !!macExcluded;

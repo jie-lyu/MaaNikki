@@ -17,7 +17,7 @@ import math
 
 from app_paths import DATA_ROOT
 from client_config import mxu_config, node_action_params
-from host import capabilities, platform_backend
+from host import capabilities, game_backend
 
 
 BASE_CAPTURE_WIDTH = 1280
@@ -62,7 +62,7 @@ def is_auto_adjust_resolution_enabled(context=None, options=None) -> bool:
 
 
 def _layout():
-    if not capabilities(platform_backend()).tall_window:
+    if not capabilities(game_backend()).tall_window:
         raise RuntimeError("当前系统不支持调整游戏窗口。")
     from host.win32 import window_layout
     return window_layout
@@ -74,14 +74,14 @@ def window_hwnd(rt=None, controller=None) -> int | None:
     Callers pass it to the capture-safe point functions; without work-area bounds those use the
     frame and need no handle, so there is none.
     """
-    if not capabilities(platform_backend()).work_area_bounds:
+    if not capabilities(game_backend()).work_area_bounds:
         return None
     return _layout().window_hwnd(rt=rt, controller=controller)
 
 
 def _work_area_layout():
     """The window layout backend when it clips click targets to the work area, else None."""
-    if capabilities(platform_backend()).work_area_bounds:
+    if capabilities(game_backend()).work_area_bounds:
         from host.win32 import window_layout
         return window_layout
     return None
@@ -153,15 +153,15 @@ def tall_window(rt):
 # Session lifecycle hooks run unconditionally at startup and exit; without the
 # window layout backend nothing was resized, so there is nothing to hand off.
 def adopt_session_16_9_handoff():
-    if capabilities(platform_backend()).tall_window:
+    if capabilities(game_backend()).tall_window:
         return _layout().adopt_session_16_9_handoff()
 
 
 def persist_session_16_9_handoff():
-    if capabilities(platform_backend()).tall_window:
+    if capabilities(game_backend()).tall_window:
         return _layout().persist_session_16_9_handoff()
 
 
 def restore_session_16_9_windows():
-    if capabilities(platform_backend()).tall_window:
+    if capabilities(game_backend()).tall_window:
         return _layout().restore_session_16_9_windows()

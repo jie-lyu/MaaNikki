@@ -430,7 +430,7 @@ class Crown(Runtime):
         self.claim_awards(account, award)
         if self.stopped:
             return
-        self.require(self.ui.enter_page(lambda: self.key("menu", 0), "MaaNikki_Crown_SummitReady",
+        self.require(self.ui.enter_page(lambda: self.escape(0), "MaaNikki_Crown_SummitReady",
             source=award, recover=self.open_summit), "未能关闭赛事嘉奖")
         if not parameters(self.context, "MaaNikki_Crown_Rewards").get("value", False):
             return

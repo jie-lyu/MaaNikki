@@ -199,9 +199,15 @@ def expected_text(value, default=""):
     return text or default
 
 
-@lru_cache(maxsize=4)
 def catalog(resource):
-    path = Path(resource) / "image/game/catalog.json"
+    """The image catalog of ``resource``, with the entries of any overriding resource layer (Android) on top."""
+    from app_paths import resource_layers
+    return _catalog(tuple(resource_layers(Path(resource))))
+
+
+@lru_cache(maxsize=4)
+def _catalog(layers):
+    path = Path(layers[0]) / "image/game/catalog.json"
     if not path.is_file():
         raise ValueError("图像资源索引缺失，请先补全并保存所需截图资源。")
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -211,6 +217,22 @@ def catalog(resource):
         if not isinstance(entries, dict):
             raise ValueError("图像资源索引格式无效，请重新保存截图资源。")
         value[name] = entries
+    for layer in layers[1:]:
+        overlay = Path(layer) / "image/game/catalog.json"
+        if not overlay.is_file():
+            continue  # a layer without its own catalog overrides no entries
+        data = json.loads(overlay.read_text(encoding="utf-8"))
+        for name in ("assets", "materials"):
+            entries = data.get(name, {})
+            if not isinstance(entries, dict):
+                raise ValueError("图像资源索引格式无效，请重新保存截图资源。")
+            merged = dict(value[name])
+            for key, entry in entries.items():
+                # Field by field: an override that only moves the roi keeps the base entry's template.
+                base_entry = merged.get(key)
+                merged[key] = ({**base_entry, **entry} if isinstance(base_entry, dict) and isinstance(entry, dict)
+                               else entry)
+            value[name] = merged
     return value
 
 
@@ -279,9 +301,9 @@ class GameUI:
     def asset_path(self, template_path):
         if self._asset_paths is not None and template_path in self._asset_paths:
             return self._asset_paths[template_path]
-        image_root = (self.resource / "image").resolve()
-        path = (image_root / template_path).resolve()
-        if not path.is_relative_to(image_root):
+        from app_paths import resolve_resource_image
+        path = resolve_resource_image(template_path, self.resource)
+        if path is None:
             raise ValueError("任务图像资源路径无效。")
         if self._asset_paths is not None:
             self._asset_paths[template_path] = path
@@ -347,8 +369,8 @@ class GameUI:
             return False
         if self._preserve_cursor:
             return True
-        from host import capabilities, platform_backend
-        if not capabilities(platform_backend()).pointer_hover:
+        from host import capabilities, game_backend
+        if not capabilities(game_backend()).pointer_hover:
             return True  # the control unit restored the cursor after the click
         main = self.rt.hit("MaaNikki_MainDetected")
         self.rt.invalidate_frame()
@@ -489,9 +511,9 @@ class GameUI:
         name = definition.get("template", "game/navigation/pickup.png")
         if isinstance(name, list):
             name = name[0]
-        root = (self.resource / "image").resolve()
-        path = (root / name).resolve()
-        if not path.is_relative_to(root):
+        from app_paths import resolve_resource_image
+        path = resolve_resource_image(name, self.resource)
+        if path is None:
             raise ValueError("拾取图像资源路径无效。")
         template = prepared_template(path, grayscale=True, gray=(210, 255)).image
         if not template.size:
@@ -536,10 +558,10 @@ class GameUI:
         # first scroll after unhover() is not dropped.
         if paged:
             amount = 120 if amount > 0 else -120 if amount < 0 else 0
-        from host import capabilities, platform_backend
+        from host import capabilities, game_backend
         # Without pointer hover (macOS) the control unit hovers the scroll target itself, settles and
         # puts the cursor back; a separate TouchMove would only be refused there.
-        if capabilities(platform_backend()).pointer_hover and not (
+        if capabilities(game_backend()).pointer_hover and not (
                 self.rt.action("TouchMove", target=target) and self.rt.pause(.3 if paged else .15)):
             return False
         return (self.rt.action("Scroll", target=target, dx=0, dy=amount)
@@ -1549,7 +1571,7 @@ class GameUI:
                 if escapes >= 8:
                     break
                 escapes += 1
-                if not self.rt.key("menu", .35):
+                if not self.rt.escape(.35):
                     return False
             if self.wait_page("MaaNikki_MainDetected", seconds=min(1.5, max(0, deadline-time.monotonic()))):
                 return True
@@ -1580,7 +1602,7 @@ class GameUI:
                     and self.dismiss_realm_confirm() is False):
                 return False
             for parent in route:
-                if not self.enter_page(lambda: self.rt.key("menu", 0), parent,
+                if not self.enter_page(lambda: self.rt.escape(0), parent,
                                        source=node, attempts=1):
                     return False
                 node = parent

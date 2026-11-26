@@ -95,6 +95,10 @@ class Mailbox:
         return True
 
     def run(self):
+        from host import capabilities, game_backend
+        if capabilities(game_backend()).touch_actions_only:
+            from host.android import mailbox  # the phone layout has its own flow and taps (Windows does not ship it)
+            return mailbox.run(self.rt) and not self.rt.stopped
         completed = False
         try:
             if self.ui.find_menu_entry(node="MaaNikki_Mailbox_Open"):

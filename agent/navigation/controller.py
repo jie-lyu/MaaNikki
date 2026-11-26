@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from task_control import task_time as time
+from task_control import TaskStopped, task_time as time
 
-from host import background_input_class, connect_target, native_key
+from host import android_user_stop, background_input_class, connect_target, native_key
 from .models import GameWindowClosed, NavigationError
 from game_keys import Binding, GameKeys, MACRO_KEYS
 
@@ -62,6 +62,8 @@ class ForegroundInput:
 
     def check(self, *, require_foreground=True):
         if self.stopped():
+            if android_user_stop():  # Android: ends as stopped, not as a navigation error (False on the desktop)
+                raise TaskStopped("任务已停止。")
             raise NavigationError("已停止导航。")
         from task_control import active_session
         session = active_session()
@@ -268,6 +270,11 @@ class ForegroundInput:
     def mouse_down(self, button=0):
         if button not in (0, 1, 2, 3, 4):
             raise NavigationError("鼠标按键未登记。")
+        if getattr(self.native, "supports_scene_buttons", True) is False:
+            # A target without mouse buttons (Android): refuse before the button counts as held, so the
+            # release path never sends anything for it.
+            self.native.press_mouse(button)  # raises UnsupportedInput
+            raise NavigationError("鼠标动作输入失败。")
         self.check()
         if self.scene_press_blocked():
             # macOS: the control unit presses where the cursor is and refuses outside the game window; say
@@ -320,6 +327,9 @@ def relative_camera(controller, dx: int, dy: int) -> bool:
     if (type(dx) is not int or type(dy) is not int
             or abs(dx) > MAX_CAMERA_PIXELS or abs(dy) > 300):
         return False
+    from host import UnsupportedInput, capabilities, game_backend
+    if capabilities(game_backend()).touch_actions_only:
+        raise UnsupportedInput("安卓模拟器上没有相对鼠标移动，镜头需要用滑动来转，这一步暂不支持。")
     adapter = ForegroundInput(controller, lambda: False)
     from task_control import active_session
     if active_session() is not None:

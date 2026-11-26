@@ -10,7 +10,7 @@ import traceback
 from weakref import WeakSet
 
 from client_config import node_action_params
-from host import native_key
+from host import android_user_stop, native_key
 from navigation.models import GameWindowClosed, NavigationError
 from game_view import GameFrameSizeError, require_game_frame
 from message_log import write_message
@@ -29,10 +29,28 @@ def focus_lost_mode(mode) -> str:
     if mode not in {"pause", "return", "background"}:
         return "pause"
     if mode == "background":
-        from host import capabilities, platform_backend
-        if not capabilities(platform_backend()).background_input:
+        from host import capabilities, game_backend
+        if not capabilities(game_backend()).background_input:
             return "pause"
+    if mode == "return":
+        from host import capabilities, game_backend
+        if not capabilities(game_backend()).refocus_game:
+            return "pause"  # nothing here can bring the game back; never tell the player it will
     return mode
+
+def message_override(focus):
+    """The override that shows ``focus`` messages through MaaNikki_Daily_Message.
+
+    On a touch-only target (Android) the node's recognition, action and next are pinned as well: an earlier
+    override in the same task could otherwise give the message node an action that reaches the device.
+    """
+    node = {"focus": focus}
+    from host import capabilities, game_backend
+    if capabilities(game_backend()).touch_actions_only:
+        # (MaaFramework 5.16.1 rejects an "interrupt" field here, even empty.)
+        node.update(recognition="DirectHit", action="DoNothing", next=[], on_error=[])
+    return {"MaaNikki_Daily_Message": node}
+
 
 class TaskStopped(NavigationError):
     pass
@@ -87,6 +105,8 @@ class ForegroundSession:
         self.account_generation = None
         self.account_mismatch = False
         self._frame_failure = None
+        # Set when a touch on an Android device was not confirmed released: every Runtime of this run stops.
+        self.input_unconfirmed = False
         self.evidence = FailureEvidence()
 
     def register(self, inputs):
@@ -102,8 +122,7 @@ class ForegroundSession:
         return self._controller
 
     def notify(self, message):
-        self.context.run_task("MaaNikki_Daily_Message", {
-            "MaaNikki_Daily_Message": {"focus": {"Node.Action.Starting": message}}})
+        self.context.run_task("MaaNikki_Daily_Message", message_override({"Node.Action.Starting": message}))
 
     def validate_frame(self, frame):
         """Reject incompatible coordinates once, before any recovery can click."""
@@ -345,7 +364,7 @@ class ForegroundSession:
             self._cached_stopping = False
 
     def stopped(self, *, fresh=False):
-        if self._frame_failure:
+        if self._frame_failure or self.input_unconfirmed:
             return True
         now = wall_time.monotonic()
         if (not fresh and self._stop_poll_interval > 0 and self._stop_checked_at is not None
@@ -442,19 +461,22 @@ class ForegroundSession:
         return adapter.target.bring_to_foreground(adapter.controller)
 
     def _wait_until(self, adapter, ready, pause_message, resume_message, *, check_hung, bring_back):
-        if self.stopped():
+        # Android: a user stop is no focus loss to pause for (False on Windows and native Mac).
+        if self.stopped() or android_user_stop():
             raise TaskStopped("任务已停止。")
         begin = wall_time.monotonic()
         self.waiting = True
         try:
             for inputs in list(self.inputs):
                 inputs.release()
+            if android_user_stop(ask_tasker=False):  # Android: the stop may have been published meanwhile
+                raise TaskStopped("任务已停止。")
             self.notify(pause_message)
             stable_since = None
             refocused_at = None
             hung_since = None
             while True:
-                if self.stopped() or adapter.stopped():
+                if self.stopped() or adapter.stopped() or android_user_stop(ask_tasker=False):
                     raise TaskStopped("任务已停止。")
                 if not adapter.target.exists():
                     self.window_closed()
@@ -480,6 +502,8 @@ class ForegroundSession:
             self.bump_generation(paused=True)
             if self._background_active():
                 self._observed_foreground = adapter.foreground()
+            if android_user_stop(ask_tasker=False):  # Android: no resume notice after a stop published meanwhile
+                raise TaskStopped("任务已停止。")
             self.notify(resume_message)
         finally:
             self.paused_seconds += wall_time.monotonic()-begin
@@ -507,8 +531,11 @@ class ForegroundSession:
             if self.stopped():
                 raise TaskStopped("任务已停止。")
             self.started = True
-            # Keep automatic startup focus only for foreground runs.
-            if not bg_active and not adapter.foreground():
+            # Keep automatic startup focus only for foreground runs, and only where the backend nudges
+            # focus with a key (not on a device target).
+            from host import capabilities, game_backend
+            if (not bg_active and capabilities(game_backend()).startup_focus_key
+                    and not adapter.foreground()):
                 if not adapter.controller.post_key_up(native_key(18)).wait().succeeded:
                     raise NavigationError("未能自动聚焦游戏，请检查窗口连接。")
         if not self._background_observation and adapter.hung():

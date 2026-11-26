@@ -8,7 +8,7 @@ import { RouteEditorPage } from '@/components/routes/RouteEditorPage';
 import { monitorResonance } from '@/services/resonanceService';
 import { monitorPearpal } from '@/services/pearpalService';
 import { explorationOwnsWindow, initializeExploration, monitorExploration, useExplorationStore } from '@/services/explorationService';
-import { loadMacTaskTiers } from '@/services/macTaskTiersService';
+import { loadMacTaskTiers, watchAndroidTaskTiersNeed } from '@/services/macTaskTiersService';
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import {
   useAppStore,
@@ -718,6 +718,9 @@ function App() {
           useAppStore.getState().setMacTaskTiers(tiers);
           if (tiers.error) toast.error(tiers.error, { id: 'mac-task-tiers' });
         });
+        // 安卓模拟器任务档位只在 macOS 后端、并且有实例选了 Adb 控制器时才加载（只用原生 Mac 控制器时从不请求安卓清单）；
+        // 选了 Adb 控制器的实例用它标记和判断能否开始。读取失败不弹全局提示，在该实例的添加任务面板和开始时说明。
+        watchAndroidTaskTiersNeed();
       }
 
       // 设置翻译

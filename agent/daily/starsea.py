@@ -239,7 +239,9 @@ class Starsea:
 
     def crystal_markers(self, frame, boxes):
         real, edges, uncertain, readings = [], [], [], []
-        ring = prepared_template(self.resource / "image/nikki/common/crystal_edge_ring.png")
+        from app_paths import resolve_resource_image
+        relative = "nikki/common/crystal_edge_ring.png"
+        ring = prepared_template(resolve_resource_image(relative, self.resource) or self.resource / "image" / relative)
         for box in boxes:
             if not crystal_border(box):
                 real.append(box)

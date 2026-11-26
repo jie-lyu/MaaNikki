@@ -123,6 +123,8 @@ pub fn run() {
             match commands::utils::get_app_data_dir() {
                 Ok(data_dir) => {
                     app_config.load_config(&data_dir);
+                    // 安卓模拟器输入的恢复边界：在任何任务能开始之前（macOS 以外什么都不做）。
+                    commands::android_input::clear_at_startup(&data_dir);
                 }
                 Err(e) => {
                     log::warn!("AppConfigState: could not get data dir: {}", e);
@@ -364,6 +366,7 @@ pub fn run() {
             commands::system::get_arch,
             commands::system::get_os,
             commands::system::get_macos_task_tiers,
+            commands::system::get_android_task_tiers,
             commands::system::get_system_info,
             commands::system::get_web_server_port,
             commands::system::get_local_lan_ip,
@@ -394,6 +397,9 @@ pub fn run() {
                 tauri::WindowEvent::Destroyed => {
                     if let Some(state) = window.try_state::<Arc<MaaState>>() {
                         state.cleanup_all_agent_children();
+                        // 安卓运行的 agent 不在实例上，单独结束（只在 macOS 上有）。
+                        #[cfg(target_os = "macos")]
+                        commands::android_run::kill_on_exit(&state);
                     }
                 }
                 _ => {}
@@ -404,6 +410,12 @@ pub fn run() {
         .run(|_app_handle, event| {
             // 退出前收尾遥测（结束 Session 与悬挂 Transaction 并 flush）并卸载鼠标守护线程
             if matches!(event, tauri::RunEvent::Exit) {
+                // Android run (macOS only): also on this path (tray Quit), wait until no touch can be cut; returns
+                // at once when the window's destruction already did it or nothing runs.
+                #[cfg(target_os = "macos")]
+                if let Some(state) = _app_handle.try_state::<Arc<MaaState>>() {
+                    commands::android_run::kill_on_exit(&state);
+                }
                 mouse_guard::shutdown_server();
                 commands::telemetry::on_app_exit();
             }

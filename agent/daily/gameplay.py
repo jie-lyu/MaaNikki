@@ -148,6 +148,13 @@ class Gameplay:
         return True
 
     def dig(self):
+        from host import capabilities, game_backend
+        if capabilities(game_backend()).touch_actions_only:
+            # The phone layout has its own flow (Windows does not ship it): it opens the page and reads the queue
+            # only, never harvests, never re-digs and sends no statistics.
+            from host.android import dig
+            return dig.run(self.rt) and not self.rt.stopped
+
         def steps():
             if not self.ui.find_menu_entry(node="MaaNikki_Dig_Open"):
                 self.rt.log("未找到美鸭梨挖掘入口。")
@@ -1266,6 +1273,10 @@ class Gameplay:
         return "failed"
 
     def monthly(self):
+        from host import capabilities, game_backend
+        if capabilities(game_backend()).touch_actions_only:
+            from host.android import monthly  # the phone layout has its own flow and taps (Windows does not ship it)
+            return monthly.run(self.rt) and not self.rt.stopped
         kind, label = "unknown", "奇迹之旅／乐园构想"
         # Availability belongs to this run; a new season can reopen Paradise.
         self.ui.monthly_paradise_unavailable = False

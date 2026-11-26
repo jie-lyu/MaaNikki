@@ -3143,6 +3143,8 @@ dependencies = [
  "maa-framework",
  "machine-uid",
  "notify-rust",
+ "objc2",
+ "objc2-foundation",
  "os_info",
  "regex",
  "reqwest 0.12.28",
