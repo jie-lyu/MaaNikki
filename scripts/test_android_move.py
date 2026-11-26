@@ -724,7 +724,7 @@ class ReviewRound2Tests(unittest.TestCase):
             with self.subTest(row[0]):
                 self.assertEqual(hud_with(*HUD_TEXT, row), ("hud", ""))
         unobserved = (("活动人厅", [833, 62, 72, 22]), ("共吗", [708, 62, 38, 22]), ("23Gms", [80, 700, 40, 18]),
-                      ("UID1172973A1", [0, 700, 90, 18]), ("商城", [900, 62, 38, 22]),  # 商城 out of its place
+                      ("UID1234567A9", [0, 700, 90, 18]), ("商城", [900, 62, 38, 22]),  # 商城 out of its place
                       ("126", [320, 40, 30, 16]), ("1234", [600, 668, 60, 22]))
         for row in unobserved:
             with self.subTest(row[0]):

@@ -70,6 +70,7 @@ import re
 import time
 
 from host.android.actions import HUD_LABEL_ROW
+from host.android.account import UID_DIGITS, UID_PREFIX
 from host.android.gesture import BELL_PRESS_MAX_S, DEFAULT_LAYOUT, GESTURE_MAX_S, DecisionExpired
 from navigation.geometry import segment_distance
 
@@ -787,9 +788,11 @@ def label_run(text: str, box) -> int:
 
 # The other HUD text regions' exact observed forms (every form read there on the saved frames, threshold 0.5):
 # 心誓5 / 心誓5×1 and its hearts (❤ ♡ や ゃ ～, or 3s with an occasional 0 or 8: 33333×1, 心誓530333, 38333);
-# the masked UID (UID 123456789, UID-123456789, LID123456789, D123456789, cut short) and the ping (46ms, 46m, 45mm).
+# the UID by its shape, for any account (host.android.account.UID_PREFIX: 「UID 」, 「UID-」, misread 「LID」 or 「D」,
+# then its digits, also cut short to as few as 3: the walker only judges the layout here, while the account reader
+# needs all UID_DIGITS) and the ping (46ms, 46m, 45mm).
 HEARTS_FORM = re.compile(r"(?:心?誓5?)?[308❤♡やゃ～]*(?:[×x]1?)?")
-UID_FORM = re.compile(r"(?:UID|LID|D)[\s\-]?\d{3,9}|\d{1,4}m{1,2}s?")
+UID_FORM = re.compile(rf"{UID_PREFIX}\d{{3,{UID_DIGITS[1]}}}|\d{{1,4}}m{{1,2}}s?")
 TRACKER_DISTANCE_FORM = re.compile(r"◆?\d{1,5}米?")  # 1049米, ◆1048米, 1046 (without 米)
 
 

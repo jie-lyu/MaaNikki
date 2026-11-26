@@ -59,7 +59,9 @@ NOTICE = ("星海星光结晶路线（安卓，开发用）：这个版本固定
           "这是预期的。")
 # A run stopped after the bell press but before its result was read: what the user can do (the coordinator's note).
 BELL_NOTE = ("如果按铃之后、读到结果之前任务停了：当天的记录会阻止再按一次；可以手动打开星海地图看卡片，"
-             "仍显示尚未召唤摇铃就手动摇一次铃；如果铃其实已经响过，不会有任何损失。")
+             "仍显示尚未召唤摇铃就手动摇一次铃；如果铃其实已经响过，不会有任何损失。"
+             "按铃记录按游戏账号分开：开始时要在大世界左下角分开截的两张图上读出同样的 UID；"
+             "两次读不出或读到的不一样时，今天的铃如果还没召唤就停下，不传送、不按铃。")
 BELL_POINT = (616, 612)  # the bell button's centre on every saved HUD frame (template hit at (616,613))
 BELL_S = 4.0
 AT_POINT_U = 15.0  # the first minimap fix after a teleport lies this close to the point (the walker's own trust aside)

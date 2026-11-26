@@ -67,8 +67,7 @@ class ReadTests(unittest.TestCase):
     """One frame: the UID only from the HUD, only in its slot, only in a form seen on the device, nine digits."""
 
     def test_the_forms_seen_on_the_device(self):
-        for text in (f"UID {UID_A}", f"UID-{UID_A}", f"LID{UID_A}", f"D{UID_A}", f"UID{UID_A}", f"UID:{UID_A}",
-                     f"UID：{UID_A}"):
+        for text in (f"UID {UID_A}", f"UID-{UID_A}", f"LID{UID_A}", f"D{UID_A}", f"UID{UID_A}"):
             with self.subTest(text=text):
                 self.assertEqual(read((text, UID_BOX)), (UID_A, ""))
         # with the ping at its place (46ms, 47m, 45mm on the saved frames)
@@ -77,7 +76,8 @@ class ReadTests(unittest.TestCase):
     def test_a_cut_short_or_misread_uid_is_refused(self):
         # The saved frames: cut short to 8, 6 or 3 digits at score 0.95-1.0, and a letter among the digits.
         for text in (f"UID {UID_A[:8]}", f"UID{UID_A[:6]}", f"UID {UID_A[:3]}", "UID1234567A9", f"UID {UID_A}0",
-                     f"XUID {UID_A}", f"UID {UID_A} 46ms", f"UID {UID_A[:4]} {UID_A[4:]}"):
+                     f"XUID {UID_A}", f"UID {UID_A} 46ms", f"UID {UID_A[:4]} {UID_A[4:]}", f"UID:{UID_A}",
+                     f"UID：{UID_A}"):  # (no colon was ever read there)
             with self.subTest(text=text):
                 digits, reason = read((text, UID_BOX))
                 self.assertIsNone(digits)
@@ -208,6 +208,19 @@ class IdentifyTests(unittest.TestCase):
                 self.assertNotIn(UID_B[:6], text)
 
 
+class PatternTests(unittest.TestCase):
+    def test_the_walkers_uid_slot_shares_the_account_pattern(self):
+        # One prefix for both (no drift); the walker also lets a cut-short UID through (it judges the layout only),
+        # the account reader never does.
+        self.assertTrue(move.UID_FORM.pattern.startswith(account.UID_PREFIX))
+        for text in (f"UID {UID_A}", f"UID-{UID_A}", f"LID{UID_A}", f"D{UID_A}", f"UID{UID_A}"):
+            self.assertTrue(move.UID_FORM.fullmatch(text) and account._uid_text(text) == UID_A, text)
+        self.assertTrue(move.UID_FORM.fullmatch(f"UID {UID_A[:8]}"))
+        self.assertIsNone(account._uid_text(f"UID {UID_A[:8]}"))
+        for text in ("UID1234567A9", f"UID:{UID_A}", f"XUID{UID_A}"):
+            self.assertFalse(move.UID_FORM.fullmatch(text) or account._uid_text(text), text)
+
+
 class KeyTests(unittest.TestCase):
     def test_the_key_is_a_salted_sha256_prefix(self):
         import hashlib
@@ -283,6 +296,54 @@ class RecordTests(unittest.TestCase):
             copy.write_bytes(source.read_bytes())
             with self.assertRaises((ValueError, crystal_route.RecordError)):
                 make(KEY_B).load()
+
+
+class ScrubTests(unittest.TestCase):
+    """Failure scenes on Android keep no UID in their text (the image is masked by diagnostics)."""
+
+    def test_uid_like_text_is_masked_and_other_numbers_kept(self):
+        for text in (f"UID {UID_B}", f"LID{UID_B}", f"UID-{UID_B[:5]}", f"读到「{UID_B}」", f"x{UID_B}0"):
+            with self.subTest(text=text):
+                self.assertNotIn(UID_B[:5], account.scrub(text))
+                self.assertIn(account.UID_MASK, account.scrub(text))
+        for text in ("46ms", "1049米", "X10000", "本周限购0/1", "-25%", "2026-11-26T00:00:00", "¥648"):
+            with self.subTest(text=text):
+                self.assertEqual(account.scrub(text), text)
+        nested = {"rows": [(f"UID {UID_B}", [0, 700, 90, 18])], "score": 0.9, "n": 123456789012}
+        self.assertEqual(account.scrub(nested), {"rows": [(account.UID_MASK, [0, 700, 90, 18])], "score": 0.9,
+                                                 "n": 123456789012})
+
+    def test_an_android_failure_scene_keeps_no_uid(self):
+        import diagnostics
+        from daily import runtime
+        root = Path(tempfile.mkdtemp())
+        messages = []
+        rt = runtime.Runtime.__new__(runtime.Runtime)
+        rt._evidence, rt._focus_generation = diagnostics.FailureEvidence(), 0
+        rt._evidence.observe("recognition", node=move.SCREEN_TEXT, results=[{"text": f"UID {UID_B}", "score": 0.99,
+                                                                              "box": [0, 700, 90, 18]}])
+        frame = np.full((720, 1280, 3), 120, np.uint8)
+        with patch.object(runtime, "active_session", return_value=None), \
+                patch("host.android_user_stop", return_value=False), \
+                patch.object(runtime, "game_backend", return_value="android"), \
+                patch.object(diagnostics, "DATA_ROOT", root), \
+                patch.object(diagnostics, "write_message", side_effect=lambda text, *a: messages.append(text)):
+            reference = rt.diagnostic("android_test_stop_0", f"守卫拦下了一行「UID {UID_B}」",
+                                      image=frame, details={"row": f"UID {UID_B}", "digits": UID_B})
+        self.assertEqual(reference["image_status"], "saved")
+        written = [path.read_text(encoding="utf-8") for path in (root / "debug/on_error").glob("*.json")]
+        self.assertEqual(len(written), 1)
+        for text in (*written, *messages):
+            self.assertNotIn(UID_B[:5], text)
+            self.assertIn(account.UID_MASK, text)
+        # the desktop path is untouched: what it is given is what it saves
+        rt._evidence = Mock()
+        with patch.object(runtime, "active_session", return_value=None), \
+                patch("host.android_user_stop", return_value=False), \
+                patch.object(runtime, "game_backend", return_value="win32"):
+            rt.diagnostic("stage", f"UID {UID_B}", details={"x": UID_B})
+        self.assertEqual(rt._evidence.save.call_args.args[1], f"UID {UID_B}")
+        self.assertEqual(rt._evidence.save.call_args.kwargs["details"], {"x": UID_B})
 
 
 class FramesToolTests(unittest.TestCase):

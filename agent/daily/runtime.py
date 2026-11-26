@@ -286,6 +286,16 @@ class Runtime:
         from host import android_user_stop
         if android_user_stop():
             return None  # Android: after a user stop a frame is no failure scene (False on the desktop)
+        if game_backend() == "android":
+            # Android: no UID in a failure scene's text either (the image is masked by diagnostics.save_image): the
+            # reason, the details and the buffered observations with every UID-like text masked.
+            from collections import deque
+            from host.android.account import scrub
+            reason, details = scrub(reason), scrub(details)
+            observations = getattr(self.evidence, "observations", None)
+            if isinstance(observations, deque):
+                for index, entry in enumerate(observations):
+                    observations[index] = scrub(entry)
         return self.evidence.save(stage, reason, image=image, details=details,
                                   generation=self._focus_generation)
 

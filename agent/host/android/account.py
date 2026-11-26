@@ -9,8 +9,8 @@ Reading (identify): two separate fresh frames, each a positively recognised HUD 
 and the full-frame OCR pass itself reading at least move.MIN_LABELS shortcut labels in place), on each the full-frame
 OCR (move.SCREEN_TEXT, the walker's own pass) read in move's UID region; the rows there, with move's score and noise
 filters, must be exactly the UID text in its slot (move.HUD_SLOTS, BLOCK_PX) and optionally the ping at its place; the
-UID text must be exactly a prefix form seen on the device (「UID」, misread 「LID」 or 「D」; then a space, a hyphen, a colon
-or nothing) and UID_DIGITS digits; both frames must give the same digits. Anything else (not the HUD, OCR not run, a
+UID text must be exactly a prefix form seen on the device (UID_PREFIX: 「UID」, misread 「LID」 or 「D」; then a space, a
+hyphen or nothing) and UID_DIGITS digits; both frames must give the same digits. Anything else (not the HUD, OCR not run, a
 cut-short UID or one with a letter misread among the digits, two UIDs, any other text in the corner, a focus change, the
 two reads disagreeing) raises Unidentified, and the task refuses before any record-dependent decision (it neither skips
 nor acts on another account's record). On the saved device frames the corner reads 「UID 」 and nine digits (box
@@ -27,8 +27,12 @@ import hashlib
 from pathlib import Path
 import re
 
+# The UID text's shape, for any account (shared with host.android.move's UID slot, so the two cannot drift): the
+# label as seen on the device frames, 「UID」 or misread 「LID」 / 「D」, then a space, a hyphen or nothing, then the
+# digits. No UID itself is written anywhere in the code or the tests (they use made-up digits).
+UID_PREFIX = r"(?:UID|LID|D)[\s\-]?"
 UID_DIGITS = (9, 9)  # digits of the UIDs seen on the device (one account so far: nine)
-UID_TEXT = re.compile(r"(?:UID|LID|D)[\s:：\-]?(\d+)")
+UID_TEXT = re.compile(UID_PREFIX + r"(\d+)")
 READS = 2  # separate frames that must agree
 READ_GAP_S = 0.3  # between the two captures (no input in between)
 KEY_SALT = b"MaaNikki/android-account/v1\x00"
@@ -145,6 +149,24 @@ def identify(rt) -> str | None:
             raise Unidentified("两张截图上读到的 UID 不一样", frames)
         seen = digits
     return account_key(seen)
+
+
+# Text that may be a UID, masked in what an Android failure scene records (scrub): a UID label with three or more
+# digits (a cut-short read included), or a bare run of 8-10 digits (the UID read apart from its label).
+UID_LIKE = re.compile(UID_PREFIX + r"\d{3,}|(?<!\d)\d{8,10}(?!\d)")
+UID_MASK = "UID ***"
+
+
+def scrub(value):
+    """``value`` (text, or lists, tuples and dicts of them, as a failure scene's reason, details and observations)
+    with every UID-like text replaced by UID_MASK; other values unchanged."""
+    if isinstance(value, str):
+        return UID_LIKE.sub(UID_MASK, value)
+    if isinstance(value, dict):
+        return {key: scrub(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(scrub(item) for item in value)
+    return value
 
 
 def refusal(error) -> str:
