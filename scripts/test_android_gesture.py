@@ -1050,6 +1050,56 @@ print(json.dumps(results))
 """
 
 
+class NotAfterTests(GestureTestCase):
+    """The deciding frame's expiry (``not_after``, time.monotonic) carried to the last check before contact-down
+    (movement review round 2, finding 4)."""
+
+    def test_an_expired_decision_sends_nothing_and_halts_nothing(self):
+        import time as real_time
+        rt = self.runtime()
+        with android_run(), self.assertRaises(g.DecisionExpired):
+            g.joystick_step(rt, self.frame, 270, 1, .5, not_after=real_time.monotonic() - 1)
+        self.assert_nothing_sent(outcomes=[("Gesture", "sending"), ("Gesture", "cancelled")])
+
+    def test_a_decision_still_valid_is_sent_and_confirmed(self):
+        import time as real_time
+        rt = self.runtime()
+        with android_run():
+            self.assertTrue(g.joystick_step(rt, self.frame, 270, 1, .5, not_after=real_time.monotonic() + 60))
+        self.assertEqual(self.outcomes()[-1], ("Gesture", "confirmed"))
+
+    def test_expiry_during_the_final_focus_query_is_caught_before_contact_down(self):
+        import time as real_time
+        rt = self.runtime()
+
+        def slow_focus():  # time.sleep is patched in these tests: wait on the real clock
+            end = real_time.monotonic() + 0.1
+            while real_time.monotonic() < end:
+                pass
+            return True
+        rt._device_target.foreground.side_effect = slow_focus
+        with android_run(), self.assertRaises(g.DecisionExpired):
+            g.joystick_step(rt, self.frame, 270, 1, .5, not_after=real_time.monotonic() + 0.05)
+        self.assert_nothing_sent(outcomes=[("Gesture", "sending"), ("Gesture", "cancelled")])
+
+    def test_the_bell_step_takes_the_same_expiry(self):
+        import time as real_time
+        rt = self.runtime()
+        with android_run(), self.assertRaises(g.DecisionExpired):
+            g.bell_step(rt, self.frame, (616, 612), 4.0, not_after=real_time.monotonic() - 1)
+        self.assertEqual(self.controller.calls, [])
+        with android_run():
+            self.assertTrue(g.bell_step(self.runtime(), self.fresh_frame(), (616, 612), 4.0,
+                                        not_after=real_time.monotonic() + 60))
+
+    def test_an_invalid_expiry_is_refused_before_anything(self):
+        rt = self.runtime()
+        for bad in (float("nan"), "soon", float("inf")):
+            with self.subTest(bad=bad), android_run(), self.assertRaises(host.UnsupportedInput):
+                g.joystick_step(rt, self.frame, 270, 1, .5, not_after=bad)
+        self.assert_nothing_sent()
+
+
 class DesktopTests(unittest.TestCase):
     def test_the_gesture_api_and_capture_changes_are_unreachable_on_windows_and_native_mac(self):
         # A fresh interpreter: Runtime.gesture refuses on the desktop backends before host.android is imported,

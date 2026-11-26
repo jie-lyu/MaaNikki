@@ -515,7 +515,8 @@ class Runtime:
             return self.pause(.1) and self.ui.unhover()
         return succeeded
 
-    def _dispatch_touch(self, action, fields, focus_generation, source_frame, send=None, movement=False):
+    def _dispatch_touch(self, action, fields, focus_generation, source_frame, send=None, movement=False,
+                        not_after=None):
         """Android: the last checks and the dispatch of a validated tap or swipe decided on ``source_frame``; with
         ``send``, a gesture (Runtime.gesture) is sent by calling it instead, under the same reservation, intent log,
         checks and device lift confirmation. ``send`` returns host.android.gesture's DONE, ABORTED (a stop seen during
@@ -524,7 +525,9 @@ class Runtime:
         earlier input and counts as a gesture; any input needs one captured after the latest gesture
         (DeviceInputState.inputs); a gesture or movement swipe also needs the latest completed capture
         (DeviceInputState.captures), and its device confirmation ends by a wall-clock deadline.
-        Every touch is confirmed by an UP newer than its frame's baseline and the last UP that confirmed a touch."""
+        Every touch is confirmed by an UP newer than its frame's baseline and the last UP that confirmed a touch.
+        ``not_after`` (a gesture's, wall_time.monotonic): past it at the very last check before sending,
+        host.android.gesture.DecisionExpired, nothing sent, nothing halted."""
         from task_control import ForegroundChanged
         if send is not None:
             from host.android.gesture import ABORTED, DONE, OVERRUN
@@ -597,6 +600,10 @@ class Runtime:
                 # framework's stop could otherwise cut into the gesture and leave its contact held.
                 if state.stop_requested():
                     return False
+                # The deciding frame's expiry (gestures only): the last check, so no I/O above can outlast it.
+                if not_after is not None and wall_time.monotonic() > not_after:
+                    from host.android.gesture import DecisionExpired
+                    raise DecisionExpired(f"安卓模拟器上的「{action}」依据的截图已经超过了有效时间，没有发送；要在新截图上重新判断。")
                 sent = True
                 state.sent_input(gesture=fresh)
                 try:
@@ -654,7 +661,7 @@ class Runtime:
             return self.pause(.1) and self.ui.unhover()
         return True
 
-    def gesture(self, gesture, *, source_frame):
+    def gesture(self, gesture, *, source_frame, not_after=None):
         """Android only: send a scripted multi-contact gesture (host.android.gesture: joystick steps, the bell press)
         decided on ``source_frame``, a current frame captured with device focus confirmed. The script is checked
         first (contacts 0 and 1, points inside the frame, its time cap); then it takes the tap's path: refused on a
@@ -665,13 +672,17 @@ class Runtime:
         every earlier Android input (UnsupportedInput otherwise, nothing sent), and no later input may use a frame
         captured before this gesture. True when it ran whole and its lift was confirmed; False on a stop (before it
         started, or seen while it held a contact: it then lifts early). A failed call, an overrun of its time limits
-        or a lift not confirmed raises InputUnconfirmed (input halted, marker kept). Every other backend raises
-        UnsupportedInput, as ``hold`` does on Android."""
+        or a lift not confirmed raises InputUnconfirmed (input halted, marker kept). ``not_after`` (time.monotonic):
+        the deciding frame's expiry, checked right before the first contact goes down, after every other check;
+        past it, host.android.gesture.DecisionExpired and nothing sent (the caller decides again on a new frame).
+        Every other backend raises UnsupportedInput, as ``hold`` does on Android."""
         from host import UnsupportedInput
         if not capabilities(game_backend()).touch_actions_only:
             raise UnsupportedInput("多触点手势只在安卓模拟器上使用，这里不发送。")
         from host.android.gesture import check_gesture, perform
         check_gesture(gesture)
+        if not_after is not None and (type(not_after) not in (int, float) or not math.isfinite(not_after)):
+            raise UnsupportedInput("安卓模拟器上的手势的截止时间无效，没有发送。")
         if source_frame is None:
             raise UnsupportedInput("安卓模拟器上的手势必须说明它依据的是哪一张截图，这一步暂不支持。")
         if self.stopped:
@@ -693,7 +704,8 @@ class Runtime:
         def keep_queue():  # a lift is still queued behind a pending job: the tasker must not be stopped (it clears it)
             state.lifts_outstanding = True
         return self._dispatch_touch(self.GESTURE_ACTION, fields, None, source_frame,
-                                    send=lambda: perform(self.controller, gesture, abort, keep_queue))
+                                    send=lambda: perform(self.controller, gesture, abort, keep_queue),
+                                    not_after=not_after)
 
     GESTURE_ACTION = "Gesture"
     TOUCH_KEY_ATTEMPTS = 3

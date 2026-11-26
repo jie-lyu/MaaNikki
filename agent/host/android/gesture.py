@@ -424,9 +424,22 @@ def _refuse_off_android(frame):
         raise UnsupportedInput("安卓模拟器上的手势必须说明它依据的是哪一张截图，这一步暂不支持。")
 
 
-def joystick_step(rt, frame, angle_deg, magnitude, duration_s, jump_at_s=None, layout: Layout = DEFAULT_LAYOUT):
-    """One joystick movement step decided on ``frame`` (Runtime.gesture's rules); see joystick()."""
-    return rt.gesture(joystick(angle_deg, magnitude, duration_s, jump_at_s, layout), source_frame=frame)
+class DecisionExpired(Exception):
+    """A gesture's ``not_after`` (time.monotonic) passed before its first contact went down: nothing was sent and
+    nothing is halted; the caller captures a new frame and decides again."""
+
+
+def joystick_step(rt, frame, angle_deg, magnitude, duration_s, jump_at_s=None, layout: Layout = DEFAULT_LAYOUT, *,
+                  not_after=None):
+    """One joystick movement step decided on ``frame`` (Runtime.gesture's rules); see joystick(). ``not_after``: the
+    deciding frame's expiry (time.monotonic); past it, right before contact-down, DecisionExpired and nothing sent."""
+    return rt.gesture(joystick(angle_deg, magnitude, duration_s, jump_at_s, layout), source_frame=frame,
+                      not_after=not_after)
+
+
+def bell_step(rt, frame, point, duration_s, *, not_after=None):
+    """The bell long-press decided on ``frame`` (Runtime.gesture's rules, ``not_after`` as in joystick_step)."""
+    return rt.gesture(bell_press(point, duration_s), source_frame=frame, not_after=not_after)
 
 
 def camera_drag(rt, frame, begin, end, duration_s):
