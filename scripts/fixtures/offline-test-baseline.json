@@ -583,6 +583,7 @@
   },
   "test_android_replay.py": {
    "tests": [
+    "DiscoveryTests.test_a_memory_breach_during_discovery_stops_the_listing_before_any_decode",
     "DiscoveryTests.test_collect_is_sorted_bounded_and_clocked",
     "DiscoveryTests.test_move_frames_lists_its_screens_inside_the_replay",
     "DiscoveryTests.test_teleport_frames_loads_the_map_and_lists_frames_inside_the_replay",

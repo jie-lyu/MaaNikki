@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import probe  # noqa: E402
 
 GB = 1024 ** 3
+DISCOVERY_RSS_EVERY = 100  # paths listed between two memory reads while a tool discovers its frames
 
 
 class ReplayLimit(probe.ProbeError):
@@ -192,8 +193,10 @@ class Guard:
 
     def collect(self, paths: Iterable[Path], limit: int | None = None) -> list[Path]:
         """Discovered paths, sorted, refused as soon as there are more than `limit` (default max_frames) so a large
-        tree is never listed whole; the clock is checked while walking."""
+        tree is never listed whole. The clock is checked for each path and memory every DISCOVERY_RSS_EVERY paths and
+        once before returning; a memory breach here stops the listing and sticks, so nothing is decoded after it."""
         limit = self.limits.max_frames if limit is None else limit
+        self.check_breach()
         found = []
         for path in paths:
             self.check_time()
@@ -201,6 +204,9 @@ class Guard:
             if len(found) > limit:
                 raise ReplayLimit(f"refused: more than {limit} frames found, above the frame limit "
                                   f"(raise it explicitly, e.g. --max-frames, if this is intended)")
+            if len(found) % DISCOVERY_RSS_EVERY == 0:
+                self.check_memory()
+        self.check_memory()
         return sorted(found)
 
     def before_decode(self) -> None:
@@ -310,7 +316,8 @@ class Replay:
         read with cv2.imread and skipped (no callback) unless accept(image) is true; image may be None. Every attempt
         counts toward the frame limit and the memory reads: skipped frames, and frames whose decode, accept or
         callback raised. One run at a time: a second run() while one is in progress (started and neither finished
-        nor closed), or an iterator resumed after its with block ended, raises RuntimeError.
+        nor closed) raises RuntimeError. An iterator is closed with its with block: kept and resumed afterwards
+        (also in a reopened block) it yields nothing more (StopIteration) and charges nothing.
         """
         if self.recognizer is None:
             raise RuntimeError("Replay.run outside its with block")

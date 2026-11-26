@@ -615,6 +615,38 @@ class DiscoveryTests(unittest.TestCase):
             with self.assertRaises(replay.ReplayLimit):
                 slow.collect(iter([Path("a"), Path("b")]))
 
+    def test_a_memory_breach_during_discovery_stops_the_listing_before_any_decode(self):
+        reads = iter([100, 100, 5000] + [100] * 10)  # after setup, at 100 paths, at 200 paths, then back under
+        pulled, decoded = [], []
+
+        def endless():
+            while True:
+                pulled.append(1)
+                yield Path(f"{len(pulled):09d}.png")
+
+        def read(path):
+            decoded.append(path)
+            return "pixels"
+
+        with Fakes() as fakes, patch.object(probe, "read_frame", read):
+            with self.assertRaises(replay.ReplayLimit):  # the block's end is refused too: the breach sticks
+                with replay.Replay(rss=lambda: next(reads), limits=replay.Limits(max_frames=10 ** 6,
+                                                                                 max_rss_bytes=1000)) as session:
+                    with self.assertRaises(replay.ReplayLimit) as caught:
+                        session.guard.collect(endless())
+                    self.assertIn("uses", str(caught.exception))
+                    self.assertEqual(len(pulled), 2 * replay.DISCOVERY_RSS_EVERY)  # stopped at the breaching read
+                    with self.assertRaises(replay.ReplayLimit):
+                        session.guard.collect(iter([Path("a.png")]))
+                    with self.assertRaises(replay.ReplayLimit):
+                        list(session.run(frames(1), lambda *a: self.fail("ran")))
+        self.assertEqual(decoded, [])
+        self.assertEqual(fakes.events, ["release recognizer", "destroy Controller"])
+        reads = []
+        guard = replay.Guard(rss=lambda: reads.append(1) or 1).start()
+        self.assertEqual(guard.collect(iter([Path("b"), Path("a")])), [Path("a"), Path("b")])
+        self.assertEqual(len(reads), 1)  # a short listing is still read once before it is returned
+
     def test_move_frames_lists_its_screens_inside_the_replay(self):
         import move_frames
         with tempfile.TemporaryDirectory() as folder:
