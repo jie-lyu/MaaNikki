@@ -447,6 +447,9 @@ HUD_TEXT = (*LABEL_ROW, ("登上鸣鸣列车", [110, 235, 120, 25]), ("1049米",
             ("心誓5×1", [520, 668, 200, 22]), ("UID 123456789", [0, 700, 90, 18]))
 
 
+NO_MOVE = ("other", "misread")  # verdicts on which no step is ever decided
+
+
 class ClassifyTests(unittest.TestCase):
     """What may move: the HUD and nothing else; narration only as one ambient line (rows as OCR read them)."""
 
@@ -481,7 +484,7 @@ class ClassifyTests(unittest.TestCase):
         for name, rows in cases.items():
             with self.subTest(name):
                 kind, reason = hud_with(*rows, *HUD_TEXT)
-                self.assertEqual(kind, "other")
+                self.assertIn(kind, NO_MOVE)
                 self.assertTrue(reason)
                 self.assertFalse(any(text in reason for text, _box in rows))  # no OCR text for the user
 
@@ -677,7 +680,7 @@ class ReviewRound2Tests(unittest.TestCase):
         }
         for name, rows in cases.items():
             with self.subTest(name):
-                self.assertEqual(hud_with(*rows, *HUD_TEXT)[0], "other")
+                self.assertIn(hud_with(*rows, *HUD_TEXT)[0], NO_MOVE)
 
     def test_1_only_the_observed_forms_of_the_huds_own_text_move(self):
         observed = (("LID123456789", [0, 700, 90, 18]), ("D123456789", [0, 700, 90, 18]), ("46m", [80, 700, 30, 18]),
@@ -691,7 +694,7 @@ class ReviewRound2Tests(unittest.TestCase):
                       ("126", [320, 40, 30, 16]), ("1234", [600, 668, 60, 22]))
         for row in unobserved:
             with self.subTest(row[0]):
-                self.assertEqual(hud_with(*HUD_TEXT, row)[0], "other")
+                self.assertIn(hud_with(*HUD_TEXT, row)[0], NO_MOVE)
 
     def test_1_the_first_frame_must_be_a_clean_hud(self):
         for name, kinds, regions in (("quest start in the tracker", ["hud"], lambda n: ("任务开始",)),
@@ -884,7 +887,7 @@ class ReviewRound3Tests(unittest.TestCase):
         for name, rows in cases.items():
             with self.subTest(name):
                 rest = [row for row in HUD_TEXT if not (name.startswith("a marker") and row[0] == "登上鸣鸣列车")]
-                self.assertEqual(hud_with(*rows, *rest)[0], "other")
+                self.assertIn(hud_with(*rows, *rest)[0], NO_MOVE)
         self.assertEqual(hud_with()[0], "other")  # a full-frame OCR miss authorises nothing
         self.assertEqual(hud_with(*HUD_TEXT[3:])[0], "other")  # only 3 of 9 labels read in place
 
@@ -1008,6 +1011,73 @@ class ReviewRound3Tests(unittest.TestCase):
         out = probe._opaque("登上鸣鸣列车")
         self.assertEqual(set(out), {"length", "sha1"})
         self.assertNotIn("登", json.dumps(out, ensure_ascii=False))
+
+
+HUD_BLOCKS = (("hearts", 520.0, 720.0, 679.0), ("labels", 638.0, 676.0, 73.0), ("uid", 0.0, 90.0, 709.0))
+
+
+class MisreadRuleTests(unittest.TestCase):
+    """A frame whose only failure is a permanent-HUD block's string (same blocks as the first frame): saved, one
+    recapture with nothing sent, and the walk goes on only if that frame passes fully."""
+
+    def walker(self, kinds, blocks=lambda n: HUD_BLOCKS):
+        walk, io = walker(World((0, 0), yaw=0.0), kinds=kinds)
+        io.blocks = blocks
+        original = io.observe
+
+        def observe():
+            obs = original()
+            obs.blocks = io.blocks(obs.frame.number)
+            return obs
+        io.observe = observe
+        return walk, io
+
+    def test_a_misread_then_a_clean_frame_goes_on_with_the_misread_frame_saved(self):
+        walk, io = self.walker(["hud", ("misread", "读错"), "hud"])
+        result = walk.walk([Goal(0, -12)], (0, 0), 60)
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(io.saved[0][0], "android_move_misread")
+        self.assertEqual(io.saved[0][2].number, 2)
+        self.assertNotIn(2, [step["frame"].number for step in io.steps])  # never a step on the misread frame
+        self.assertGreaterEqual(len(io.steps), 2)  # frame 3 passed fully and the walk went on
+
+    def test_two_misreads_in_a_row_stop(self):
+        walk, io = self.walker(["hud", ("misread", "读错"), ("misread", "读错")])
+        result = walk.walk([Goal(0, -20)], (0, 0), 60)
+        self.assertEqual((result.outcome, len(io.steps), io.observed), ("screen", 1, 3))
+        self.assertEqual([frame.number for _stage, _reason, frame in io.saved], [2, 3])
+
+    def test_a_misread_followed_by_narration_or_another_failure_stops(self):
+        for after in ("narration", "blank", ("other", "另一个页面")):
+            with self.subTest(after=after):
+                walk, io = self.walker(["hud", ("misread", "读错"), after, "hud"])
+                result = walk.walk([Goal(0, -20)], (0, 0), 60)
+                self.assertEqual((result.outcome, len(io.steps), io.observed), ("screen", 1, 3))
+
+    def test_an_added_or_moved_block_stops_at_once(self):
+        for name, layout in (("added", HUD_BLOCKS + (("uid", 140.0, 180.0, 709.0),)),
+                             ("moved", (("hearts", 520.0, 720.0, 679.0), ("labels", 900.0, 960.0, 73.0),
+                                        ("uid", 0.0, 90.0, 709.0)))):
+            with self.subTest(name):
+                walk, io = self.walker(["hud", ("misread", "读错"), "hud"],
+                                       blocks=lambda n, layout=layout: HUD_BLOCKS if n == 1 else layout)
+                result = walk.walk([Goal(0, -20)], (0, 0), 60)
+                self.assertEqual((result.outcome, len(io.steps), io.observed), ("screen", 1, 2))
+                self.assertEqual(io.saved[0][0], "android_move_screen")
+
+    def test_classify_marks_only_in_place_misreads_and_still_counts_covered_labels(self):
+        misread_row = (("奇迹之旅活动人厅奇想日历无限之心", [761, 62, 284, 22]),)
+        rows = [row for row in HUD_TEXT if row[0] != "奇迹之旅活动大厅奇想日历无限之心"] + list(misread_row)
+        self.assertEqual(hud_with(*rows)[0], "misread")
+        self.assertEqual(hud_with(*HUD_TEXT, ("23Gms", [80, 700, 40, 18]))[0], "misread")
+        self.assertEqual(hud_with(*rows, ("查看", [794, 329, 55, 31]))[0], "other")  # plus text elsewhere: other
+
+    def test_same_blocks(self):
+        self.assertTrue(move.same_blocks(HUD_BLOCKS, HUD_BLOCKS))
+        self.assertTrue(move.same_blocks((("hearts", 520.0, 600.0, 679.0),) + HUD_BLOCKS[1:], HUD_BLOCKS))  # 心誓5
+        self.assertTrue(move.same_blocks(HUD_BLOCKS[:2], HUD_BLOCKS))  # a block not read this time is no new block
+        self.assertFalse(move.same_blocks((("uid", 638.0, 676.0, 73.0),) + HUD_BLOCKS[::2], HUD_BLOCKS))
+        self.assertFalse(move.same_blocks(HUD_BLOCKS + (("labels", 900.0, 960.0, 73.0),), HUD_BLOCKS[:1]))
 
 
 def _frame(name):

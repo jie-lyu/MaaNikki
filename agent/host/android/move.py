@@ -137,6 +137,7 @@ class Observation:
     reason: str = ""
     captured: float | None = None
     regions: tuple = ()
+    blocks: tuple = ()  # Verdict.blocks
 
     def __post_init__(self):
         if self.captured is None:
@@ -226,7 +227,8 @@ class Walker:
         self._anchor = None  # the first fix after the last input: no-input rechecks stay within REFIX_SHIFT_U of it
         self._gestured = False  # any gesture (step or bell) sent yet
         self._start = (None, None)  # (first goal, start radius) for the guard before the first gesture
-        self._regions = None  # the first frame's compared HUD regions (Verdict.regions)
+        self._regions = None  # the first frame's quest name (Verdict.regions)
+        self._blocks = None  # the first frame's permanent-HUD text block layout (Verdict.blocks)
 
     # -- entry --
 
@@ -436,7 +438,7 @@ class Walker:
                     self._fail("refused", "连续两次没有拿到可用的截图，没有开始移动", obs)
                 self._pause(POLL_S, obs)
                 continue
-            if obs.kind not in ("hud", "narration"):
+            if obs.kind not in ("hud", "narration", "misread"):
                 self._fail("refused", f"开始时画面不是干净的大世界（{obs.reason or '认不出的画面'}），没有开始移动", obs)
             if not self.reader.present(obs.frame):
                 self._fail("refused", "没有在默认位置认出小地图（界面布局可能改过，或被挡住了），没有开始移动", obs)
@@ -444,7 +446,7 @@ class Walker:
             if len(names) > 1 or distances > 1 or any(word in name for name in names for word in NARRATION_DENY):
                 self._fail("refused", "开始时任务栏的位置有多余的文字，不是干净的大世界，没有开始移动", obs)
             if obs.kind == "hud" and len(names) == 1 and distances == 1:
-                self._regions = names[0]
+                self._regions, self._blocks = names[0], obs.blocks
                 return obs
             if obs.kind == "narration" and not logged:
                 logged = True
@@ -468,16 +470,31 @@ class Walker:
     def _look(self) -> Observation:
         """A frame that is the open-world HUD and nothing else, or one with allowed narration waited through; any
         other screen ends the walk on its first frame, saved. A failed or blank capture is tried again once."""
-        narration_since, blanks = None, 0
+        narration_since, blanks, misread = None, 0, False
         while True:
             self._check_stop()
             obs = self.io.observe()
             if obs is None:
                 raise Halt(WalkResult("stopped", STOPPED))
-            if obs.kind in ("hud", "narration") and not self.reader.present(obs.frame):  # before any exception
+            hud_like = obs.kind in ("hud", "narration", "misread")
+            if hud_like and not self.reader.present(obs.frame):  # before any exception
                 self._fail("screen", "小地图上的位置标记不见了（可能有东西挡住了大世界），已停止所有输入", obs)
-            if obs.kind in ("hud", "narration") and self._regions is not None and not self._tracker_kept(obs):
+            if hud_like and self._regions is not None and not self._tracker_kept(obs):
                 self._fail("screen", "大世界界面上的任务栏文字变了（可能出现了新的提示或任务），已停止所有输入", obs)
+            if misread and obs.kind != "hud":  # after a misread frame only a frame that passes fully goes on
+                self._fail("screen", "大世界常驻界面的文字连续两次没有按原样读出，已停止所有输入", obs)
+            if obs.kind == "misread":
+                # Only a permanent-HUD block's string differs, its blocks exactly where the first frame had them:
+                # an OCR misread. The frame is kept, nothing is decided on it, and one fresh frame must pass fully.
+                if self._blocks is None or not same_blocks(obs.blocks, self._blocks):
+                    self._fail("screen", "大世界常驻界面的文字和开始时不一样，已停止所有输入", obs)
+                misread = True
+                self.io.save("android_move_misread", "大世界常驻界面的文字没有按原样读出，不在这张图上走，重新截一张", obs.frame,
+                             {"position": self.position, "steps": len(self.steps)})
+                self._detail("a permanent-HUD text block misread: frame saved, captured once more")
+                self._check_deadline(obs)
+                self._pause(POLL_S, obs)
+                continue
             if obs.kind == "hud":
                 if narration_since is not None:
                     self.io.log("环境旁白已消失，继续移动。")
@@ -738,9 +755,10 @@ NARRATION_DENY = ("点击", "点按", "继续", "跳过", "任务", "对话", "�
 
 @dataclass(frozen=True)
 class Verdict:
-    kind: str  # "hud", "narration" or "other"
+    kind: str  # "hud", "narration", "misread" (only a permanent-HUD block's text differs: see Walker) or "other"
     reason: str = ""  # for "other": a fixed Chinese text (never OCR text)
     regions: tuple = ()  # the quest tracker's rows top to bottom: tracker_name() for a name, TRACKER_DISTANCE
+    blocks: tuple = ()  # Rows.blocks: the permanent-HUD text block layout
 
 
 def _inside(box, region) -> bool:
@@ -749,12 +767,29 @@ def _inside(box, region) -> bool:
     return region[0] <= cx < region[2] and region[1] <= cy < region[3]
 
 
-def read_rows(result):
-    """``(outside, regions, labels)`` from a full-frame OCR result: the rows worth judging that are not the HUD's own
-    text in its exact form and place, as [(text, box)] (any row with an overlay glyph among them, judged on its raw
-    text); the quest tracker's rows (Verdict.regions); and how many labels of the label row were read in place."""
+# A permanent-HUD text block of a misread frame is no new block when it overlaps one of the first frame's blocks in the
+# same region (x ranges overlapping within BLOCK_PX, centres within BLOCK_PX vertically). Overlap, not equal count
+# and centre: OCR splits and merges the label row differently from frame to frame (共鸣 apart or joined to the next
+# labels), and the 心誓 block's width changes with ×1 read or not; a block where the first frame had none stops.
+BLOCK_PX = 12
+BLOCK_REGIONS = ("labels", "hearts", "uid")  # the regions whose block layout a misread frame must keep
+
+
+@dataclass(frozen=True)
+class Rows:
+    outside: list  # [(text, box)] judged as overlay text (glyph rows among them, on their raw text)
+    regions: tuple  # the quest tracker's rows (Verdict.regions)
+    labels: int  # labels read in place, plus those a misread label-row block covers (see misread)
+    blocks: tuple  # ((region, x0, x1, cy), ...) of every counted block in BLOCK_REGIONS, matching or misread
+    misread: int  # blocks in BLOCK_REGIONS whose text is not that region's exact form
+
+
+def read_rows(result) -> Rows:
+    """The full-frame OCR result sorted out: rows that are not the HUD's own text (outside), the quest tracker, the
+    labels read in place, the permanent-HUD block layout, and how many of those blocks were misread (in a HUD region,
+    not in its exact form; Walker gives such a frame one recapture when nothing else differs from the first frame)."""
     from host.android import actions, pages
-    outside, tracker, labels = [], [], 0
+    outside, tracker, blocks, labels, covered, misread = [], [], [], 0, 0, 0
     if result is not None and actions._hit(result):
         for row in pages._rows(result):
             if row is None:
@@ -772,18 +807,32 @@ def read_rows(result):
                 continue
             region = next((name for name, area in HUD_REGIONS if _inside(box, area)), None)
             squashed = re.sub(r"\s", "", text)
-            if region == "labels" and label_run(text, box):
-                labels += label_run(text, box)
-            elif region == "hearts" and HEARTS_FORM.fullmatch(squashed):
-                pass
-            elif region == "uid" and UID_FORM.fullmatch(text.strip()):
-                pass
-            elif region == "tracker":
+            if region is None:
+                outside.append((text, box))
+                continue
+            if region == "tracker":
                 distance = TRACKER_DISTANCE_FORM.fullmatch(squashed)
                 tracker.append((box[1], box[0], TRACKER_DISTANCE if distance else tracker_name(text)))
+                continue
+            blocks.append((region, box[0], box[0] + box[2], box[1] + box[3] / 2))
+            if region == "labels" and label_run(text, box):
+                labels += label_run(text, box)
+            elif (region == "hearts" and HEARTS_FORM.fullmatch(squashed)) or (
+                    region == "uid" and UID_FORM.fullmatch(text.strip())):
+                pass
             else:
-                outside.append((text, box))
-    return outside, tuple(entry for _y, _x, entry in sorted(tracker)), labels
+                misread += 1
+                if region == "labels":  # the labels whose places the misread block covers
+                    covered += sum(1 for _label, x in LABEL_CENTRES if box[0] <= x <= box[0] + box[2])
+    return Rows(outside, tuple(entry for _y, _x, entry in sorted(tracker)), labels + covered,
+                tuple(sorted(blocks)), misread)
+
+
+def same_blocks(blocks, first) -> bool:
+    """No block of ``blocks`` is new against ``first`` (the walk's first frame): each overlaps one of first's blocks
+    in the same region and row (see BLOCK_PX)."""
+    return all(any(region == r and x0 <= fx1 + BLOCK_PX and fx0 <= x1 + BLOCK_PX and abs(y - fy) <= BLOCK_PX
+                   for r, fx0, fx1, fy in first) for region, x0, x1, y in blocks)
 
 
 def narration_verdict(rows) -> str:
@@ -828,13 +877,16 @@ def classify(screen, recognize) -> Verdict:
     result = recognize(SCREEN_TEXT)
     if result is None:
         return Verdict("other", "画面（画面文字的检查没能完成）")
-    outside, regions, labels = read_rows(result)
-    if labels < MIN_LABELS:  # positive evidence from this pass itself, not only read_screen's label check
-        return Verdict("other", "画面（全画面文字里没有在原位读到大世界的快捷栏）", regions)
-    if not outside:
-        return Verdict("hud", "", regions)
-    why = narration_verdict(outside)
-    return Verdict("narration", "", regions) if not why else Verdict("other", why, regions)
+    rows = read_rows(result)
+    regions, blocks = rows.regions, rows.blocks
+    if rows.labels < MIN_LABELS:  # positive evidence from this pass itself, not only read_screen's label check
+        return Verdict("other", "画面（全画面文字里没有在原位读到大世界的快捷栏）", regions, blocks)
+    if rows.outside:
+        why = narration_verdict(rows.outside) if not rows.misread else "大世界的界面文字读错了，同时还有别的文字"
+        return Verdict("narration", "", regions, blocks) if not why else Verdict("other", why, regions, blocks)
+    if rows.misread:
+        return Verdict("misread", "大世界常驻界面的文字没有按原样读出", regions, blocks)
+    return Verdict("hud", "", regions, blocks)
 
 
 class RuntimeIo:
@@ -870,7 +922,7 @@ class RuntimeIo:
             return Observation(frame, "other", at, "画面（截图时设备上有按住的触点，或读不出触摸状态）", captured)
         recognize = self.rt._recognizer_on(frame)
         verdict = classify(actions.read_screen(recognize), recognize)
-        return Observation(frame, verdict.kind, at, verdict.reason, captured, verdict.regions)
+        return Observation(frame, verdict.kind, at, verdict.reason, captured, verdict.regions, verdict.blocks)
 
     def step(self, frame, angle, seconds, jump_at, *, not_after=None) -> bool:
         from host.android import gesture
