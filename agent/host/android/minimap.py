@@ -132,6 +132,11 @@ class MinimapReader:
         """The minimap is where this reader expects it (the player chevron at the default pivot)."""
         return chevron_at_pivot(frame)
 
+    def within(self, x, y) -> bool:
+        """``(x, y)`` lies on this map (its image's extent, map units)."""
+        spec = self.locator.full_spec if hasattr(self.locator, "full_spec") else self.locator.spec
+        return 0 <= x < spec.width and 0 <= y < spec.height
+
     def fix(self, frame, hint, search_radius) -> Fix:
         """Match ``frame``'s minimap in a window around ``hint`` (required: no unhinted search). Nothing is kept
         between calls (no speed gate, no camera terrain memory): the walk decides what to trust."""
@@ -139,8 +144,13 @@ class MinimapReader:
             raise NavigationError("没有位置提示，不做小地图的全图搜索。")
         locator = self.locator
         locator.camera_background.reset()  # each reading stands alone, as in the offline and device measurements
-        pose = locator.locate(to_pc(frame), hint=(float(hint[0]), float(hint[1])), search_radius=search_radius,
-                              commit=False)
+        if not self.within(float(hint[0]), float(hint[1])):
+            raise NavigationError("位置提示在地图之外，不做小地图匹配。")
+        try:
+            pose = locator.locate(to_pc(frame), hint=(float(hint[0]), float(hint[1])), search_radius=search_radius,
+                                  commit=False)
+        except cv2.error:  # a window the matcher cannot use (e.g. at the map's edge): no trusted position
+            return Fix(float(hint[0]), float(hint[1]), 0.0, None, 0.0, False, "match_error")
         diagnostics = locator.heading_diagnostics or {}
         score = float(pose.score) if pose.score is not None and math.isfinite(pose.score) else 0.0
         candidate = diagnostics.get("candidate_position")

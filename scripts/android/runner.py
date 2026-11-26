@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -148,24 +149,29 @@ def dev_override(entry: str, chosen: dict[str, str]) -> list[dict]:
     """The pipeline override of a dev-only entry from its --option values (WALK_PROBE: map, hint=X,Y, target=X,Y,
     timeout, leash, radius; hint and target required). The agent checks the ranges again."""
     if entry != WALK_PROBE:
-        raise RunnerError(f"{entry} is not a dev-only entry")
+        raise RunnerError(f"{entry} 不是开发用的入口")
     unknown = set(chosen) - set(WALK_OPTIONS)
     if unknown:
-        raise RunnerError(f"{entry} has no option {sorted(unknown)}; its options: {sorted(WALK_OPTIONS)}")
+        raise RunnerError(f"{entry} 没有选项 {sorted(unknown)}；可用的选项：{sorted(WALK_OPTIONS)}")
     missing = {"hint", "target"} - set(chosen)
     if missing:
-        raise RunnerError(f"{entry} needs --option {' and '.join(sorted(missing))} (X,Y in map units)")
+        raise RunnerError(f"{entry} 需要 --option {'、'.join(f'{name}=X,Y' for name in sorted(missing))}（地图坐标）")
     param = {"kind": "android_walk_probe", "map": "miraland"}
     for name, value in chosen.items():
         kind = WALK_OPTIONS[name]
         try:
             if kind == "point":
                 x, y = (float(v) for v in value.split(","))
+                if not (math.isfinite(x) and math.isfinite(y)):
+                    raise ValueError(value)
                 param[name] = [x, y]
             else:
                 param[name] = kind(value)
+                if kind is float and not math.isfinite(param[name]):
+                    raise ValueError(value)
         except ValueError:
-            raise RunnerError(f"option {name}={value!r} is not valid for {entry}") from None
+            form = "X,Y（两个数，用英文逗号分开）" if kind == "point" else "一个数" if kind is float else "地图名"
+            raise RunnerError(f"选项 {name}={value!r} 无效，应为{form}") from None
     return [{entry: {"custom_action_param": param}}]
 
 

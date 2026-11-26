@@ -69,9 +69,11 @@ class FakeIo:
         self.observed, self.frames = 0, []
         self.lift_at = None
         self.stop_after_steps = None
+        self.stop_after_observations = None
 
     def stopped(self):
-        return self.stop_after_steps is not None and len(self.steps) >= self.stop_after_steps
+        return (self.stop_after_steps is not None and len(self.steps) >= self.stop_after_steps) or (
+            self.stop_after_observations is not None and self.observed >= self.stop_after_observations)
 
     def observe(self):
         at = self.clock()
@@ -87,10 +89,12 @@ class FakeIo:
         self.observed += 1
         frame = Frame(self.observed, (x, y), kind, reason=reason)
         self.frames.append(frame)
-        return Observation(frame, kind, at, reason)
+        return Observation(frame, kind, at, reason, self.clock())
 
     def step(self, frame, angle, seconds, jump_at):
         assert frame is self.frames[-1], "a step must be decided on the frame just captured"
+        assert not any(kind == "step" and record["step"] == len(self.steps) for kind, record in self.records), \
+            "a step's record is written only after its lift"
         self.steps.append({"frame": frame, "angle": angle, "seconds": seconds, "jump_at": jump_at,
                            "position": self.world.position})
         ok = self.step_results.pop(0) if self.step_results else True
@@ -132,15 +136,21 @@ class FakeReader:
     """Reads the frame's minimap position exactly, the world's yaw as the camera heading; ``bad`` frames (by
     number) read as a weak or misplaced match."""
 
-    def __init__(self, world, *, score=0.75, bad=None, heading_missing=()):
+    def __init__(self, world, *, score=0.75, bad=None, heading_missing=(), slow=(), clock=None, bounds=None):
         self.world, self.score, self.bad, self.heading_missing = world, score, dict(bad or {}), set(heading_missing)
+        self.slow, self.clock, self.bounds = set(slow), clock, bounds  # slow: frames whose decision takes 1.2 s
         self.calls = []
 
     def present(self, frame):
         return frame.present
 
+    def within(self, x, y):
+        return self.bounds is None or (0 <= x < self.bounds[0] and 0 <= y < self.bounds[1])
+
     def fix(self, frame, hint, search_radius):
         self.calls.append((frame.number, hint, search_radius))
+        if frame.number in self.slow and self.clock is not None:
+            self.clock.t += 1.2
         x, y = frame.position
         heading = None if frame.number in self.heading_missing else self.world.yaw
         if frame.number in self.bad:
@@ -148,8 +158,8 @@ class FakeReader:
         return Fix(x, y, self.score, heading, 1.0 if heading is not None else 0.0, self.score >= 0.55, "luma")
 
 
-def walker(world, *, kinds=None, step_results=None, reader=None, **options):
-    clock = Clock()
+def walker(world, *, kinds=None, step_results=None, reader=None, clock=None, **options):
+    clock = clock or Clock()
     io = FakeIo(world, clock, kinds, step_results)
     return Walker(io, reader or FakeReader(world), clock=clock, **options), io
 
@@ -340,20 +350,29 @@ class ScreenTests(unittest.TestCase):
         self.assertIn("另一个页面", result.message)
         self.assertNotIn("bell", [k for k, _r in io.records])
 
-    def test_not_recognised_yet_is_waited_through_briefly(self):
+    def test_an_unrecognised_frame_ends_the_walk_at_once_with_that_frame_saved(self):
         world = World((0, 0), yaw=0.0)
-        walk, io = walker(world, kinds=["hud", "transition", "transition", "hud"])
+        walk, io = walker(world, kinds=["hud", ("other", "认不出的画面"), "hud"])
+        result = walk.walk([Goal(0, -6)], (0, 0), 60)
+        self.assertEqual(result.outcome, "screen")
+        self.assertEqual(len(io.steps), 1)
+        self.assertEqual(io.observed, 2)  # no grace: the HUD coming back is never looked at
+        self.assertEqual(io.saved[0][2].number, 2)
+
+    def test_one_blank_capture_is_tried_again(self):
+        world = World((0, 0), yaw=0.0)
+        walk, io = walker(world, kinds=["hud", "blank", "hud"])
         result = walk.walk([Goal(0, -6)], (0, 0), 60)
         self.assertTrue(result.ok, result.message)
         self.assertEqual(io.saved, [])
 
-    def test_not_recognised_for_too_long_stops_with_the_frame_saved(self):
+    def test_two_blank_captures_in_a_row_stop_with_the_frame_saved(self):
         world = World((0, 0))
-        walk, io = walker(world, kinds=["hud"] + ["transition"] * 20)
+        walk, io = walker(world, kinds=["hud", "blank", "blank", "hud"])
         result = walk.walk([Goal(0, -20)], (0, 0), 60)
         self.assertEqual(result.outcome, "screen")
         self.assertEqual(len(io.steps), 1)
-        self.assertEqual(io.saved[0][2].kind, "transition")
+        self.assertEqual(io.saved[0][2].number, 3)
 
     def test_narration_on_the_hud_pauses_input_then_the_walk_continues(self):
         world = World((0, 0), yaw=0.0)
@@ -373,6 +392,117 @@ class ScreenTests(unittest.TestCase):
         self.assertEqual(result.outcome, "screen")
         self.assertEqual(len(io.steps), 1)
         self.assertEqual(len(io.saved), 1)
+
+
+class Row:
+    def __init__(self, text, box, score=0.99):
+        self.text, self.box, self.score = text, box, score
+
+
+class Ocr:
+    def __init__(self, rows):
+        self.hit, self.box = bool(rows), (rows[0].box if rows else None)
+        self.filtered_results, self.best_result = rows, (rows[0] if rows else None)
+
+
+def hud_with(*rows, ocr_fails=False):
+    """classify() on a positively recognised HUD whose full-frame OCR reads ``rows`` [(text, [x, y, w, h])]."""
+    from host.android.actions import Screen
+
+    def recognize(node, override=None):
+        assert node == move.SCREEN_TEXT
+        return None if ocr_fails else Ocr([Row(*row) for row in rows])
+    return move.classify(Screen("hud", {"duck": [30, 18, 54, 54]}), recognize)
+
+
+WIND = (("暖暖", [609, 506, 59, 31]), ("起风了——大喵小心，别被吹跑啦。", [446, 557, 374, 30]))  # m2-goto1, as read
+BELL = (("暖暖，", [401, 561, 73, 22]), ("星之铃似乎在闪烁呢！摇动它试试吧", [466, 555, 390, 31]),
+        ("大喵", [608, 502, 61, 38]))  # phase0/hud-1280x720.png, as read
+HUD_TEXT = (("商城", [630, 60, 40, 20]), ("登上鸣鸣列车", [110, 235, 120, 25]), ("1049米", [120, 262, 60, 20]),
+            ("心誓5×1", [520, 668, 200, 22]), ("UID 123456789", [0, 700, 90, 18]))
+
+
+class ClassifyTests(unittest.TestCase):
+    """What may move: the HUD and nothing else; narration only as one ambient line (rows as OCR read them)."""
+
+    def test_the_hud_alone_and_its_own_text_move(self):
+        self.assertEqual(hud_with(), ("hud", ""))
+        self.assertEqual(hud_with(*HUD_TEXT), ("hud", ""))
+        self.assertEqual(hud_with(("口", [640, 610, 20, 20]), ("一飞", [240, 500, 800, 95], 0.52)), ("hud", ""))
+
+    def test_the_two_saved_ambient_remarks_are_narration(self):
+        self.assertEqual(hud_with(*WIND, *HUD_TEXT), ("narration", ""))
+        self.assertEqual(hud_with(*BELL, *HUD_TEXT), ("narration", ""))
+
+    def test_prompts_dialogue_banners_and_buttons_are_no_narration(self):
+        cases = {
+            "tap to continue": (("点击继续", [560, 560, 160, 28]),),
+            "quest start": (("任务开始", [560, 560, 160, 28]),),
+            "remark with a tap prompt": (*WIND, ("点击屏幕继续", [520, 640, 240, 24])),
+            "top banner": (("获得新的服装", [500, 140, 280, 40]),),
+            "banner over the label row": (("活动开启：星海拾光", [700, 50, 300, 40]),),
+            "prompt over the 心誓 bar": (("点击屏幕继续", [520, 660, 240, 24]),),
+            "centre banner": (("星海·星梦群屿", [520, 300, 240, 40]),),
+            "interaction prompt": (("查看", [794, 329, 55, 31]),),
+            "pick-up prompt": (("拾取", [793, 328, 57, 32]),),
+            "dialogue choice": (("我知道了", [900, 420, 160, 30]),),
+            "two lines": (("暖暖，你看那边", [480, 556, 300, 28]), ("好像有什么东西", [480, 578, 300, 28])),
+            "two labels": (("暖暖", [609, 506, 59, 31]), ("大喵", [560, 506, 59, 31]),
+                           ("起风了", [560, 557, 120, 30])),
+            "label only": (("暖暖", [609, 506, 59, 31]),),
+            "line too high": (("起风了", [560, 505, 120, 30]),),
+        }
+        for name, rows in cases.items():
+            with self.subTest(name):
+                kind, reason = hud_with(*rows, *HUD_TEXT)
+                self.assertEqual(kind, "other")
+                self.assertTrue(reason)
+                self.assertFalse(any(text in reason for text, _box in rows))  # no OCR text for the user
+
+    def test_an_ocr_that_could_not_run_or_another_screen_stops(self):
+        from host.android.actions import Screen
+        self.assertEqual(hud_with(ocr_fails=True)[0], "other")
+        self.assertEqual(move.classify(Screen("page", {}, title="设置"), lambda *a: None)[0], "other")
+        self.assertEqual(move.classify(Screen("unknown", reason="认不出"), lambda *a: None)[0], "other")
+
+
+class DeadlineTests(unittest.TestCase):
+    def test_arrival_after_the_deadline_is_a_timeout(self):
+        world = World((0, 0), yaw=0.0, lag=0.3)
+        walk, io = walker(world)
+        result = walk.walk([Goal(0, -6)], (0, 0), 1.5)  # the step plus its settle end past 1.5 s
+        self.assertEqual(result.outcome, "timeout")
+        self.assertEqual(len(io.saved), 1)
+        self.assertIs(io.saved[0][2], io.frames[-1])
+
+    def test_continuous_narration_ends_at_the_deadline_not_after_twenty_seconds(self):
+        world = World((0, 0))
+        walk, io = walker(world, kinds=["hud"] + ["narration"] * 100)
+        result = walk.walk([Goal(0, -20)], (0, 0), 3)
+        self.assertEqual(result.outcome, "timeout")
+        self.assertLess(io.clock.t - 100, 4.5)
+
+    def test_no_bell_press_after_the_deadline(self):
+        world = World((0, 0), yaw=90.0)
+        walk, io = walker(world, allow_bell=True)
+        result = walk.walk([Goal(0.5, 0, 1.2, action="bell")], (0, 0), 0.2)  # arrived, but the time is up
+        self.assertEqual(result.outcome, "timeout")
+        self.assertEqual(io.bells, [])
+
+    def test_a_final_wait_point_is_judged_again_on_its_fresh_fix(self):
+        world = World((0, 0), yaw=90.0)
+        walk, io = walker(world)
+        original = io.pause
+
+        def pause(seconds):  # something nudges the character during the wait
+            if seconds == 0.9:
+                world.position = (world.position[0] + 2.5, world.position[1])
+            return original(seconds)
+        io.pause = pause
+        result = walk.walk([Goal(4, 0, 1.6, action="wait", params={"seconds": 0.9})], (0, 0), 60)
+        self.assertTrue(result.ok, result.message)
+        self.assertLessEqual(math.dist(world.position, (4, 0)), 1.6)
+        self.assertEqual([seconds for _after, seconds in io.pauses].count(0.9), 1)  # the wait is not repeated
 
 
 class StopTests(unittest.TestCase):
@@ -421,6 +551,88 @@ class StopTests(unittest.TestCase):
         self.assertEqual(io.steps, [])
 
 
+class ResultTests(unittest.TestCase):
+    def test_a_stop_seen_right_before_arrival_reports_no_arrival(self):
+        world = World((0, 0), yaw=0.0, lag=0.3)
+        walk, io = walker(world)
+        io.stop_after_observations = 3  # the settled frame that would report arrival
+        result = walk.walk([Goal(0, -6)], (0, 0), 60)
+        self.assertEqual(result.outcome, "stopped")
+        self.assertFalse(result.ok)
+
+    def test_a_successful_walk_reports_its_steps(self):
+        world = World((0, 0), yaw=0.0)
+        walk, io = walker(world)
+        result = walk.walk([Goal(0, -20)], (0, 0), 60)
+        self.assertTrue(result.ok)
+        self.assertEqual((result.attempted, result.confirmed), (len(io.steps), len(io.steps)))
+        self.assertGreaterEqual(result.attempted, 3)
+        written = [record for kind, record in io.records if kind == "step"]
+        self.assertEqual(len(written), result.attempted)
+        self.assertTrue(all(record["frame"].startswith("frame-") for record in result.steps))
+
+    def test_a_step_that_returns_false_counts_as_attempted_not_confirmed(self):
+        world = World((0, 0))
+        walk, io = walker(world, step_results=[True, False])
+        result = walk.walk([Goal(0, -40)], (0, 0), 120)
+        self.assertEqual((result.outcome, result.attempted, result.confirmed), ("stopped", 2, 1))
+
+    def test_a_decision_that_aged_out_is_captured_again_and_replanned(self):
+        world = World((0, 0), yaw=0.0)
+        clock = Clock()
+        walk, io = walker(world, clock=clock, reader=FakeReader(world, slow={1}, clock=clock))
+        result = walk.walk([Goal(0, -6)], (0, 0), 60)
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(io.steps[0]["frame"].number, 2)  # frame 1's decision took 1.2 s: not sent on it
+
+    def test_decisions_that_keep_aging_out_stop(self):
+        world = World((0, 0))
+        clock = Clock()
+        walk, io = walker(world, clock=clock, reader=FakeReader(world, slow=set(range(1, 10)), clock=clock))
+        result = walk.walk([Goal(0, -6)], (0, 0), 60)
+        self.assertEqual(result.outcome, "screen")
+        self.assertEqual(io.steps, [])
+
+    def test_a_settled_fix_that_jumps_past_the_lag_is_a_bad_fix_not_arrival(self):
+        world = World((0, 0), yaw=0.0)
+        # step 1 (7.44 u) is read right; the settle recheck jumps 4.96 u further, twice: lost, never arrived
+        jump = Fix(0, -12.4, 0.78, 0.0, 1.0, True)
+        reader = FakeReader(world, bad={3: jump, 4: jump})
+        walk, io = walker(world, reader=reader)
+        result = walk.walk([Goal(0, -13, 1.0)], (0, 0), 60)
+        self.assertEqual(result.outcome, "lost")
+        self.assertEqual(len(io.steps), 1)
+
+    def test_coordinates_outside_the_map_are_refused_before_anything(self):
+        world = World((10, 10))
+        for hint, goal in (((-5, 10), (10, 5)), ((10, 10), (10, 50000))):
+            with self.subTest(hint=hint, goal=goal):
+                walk, io = walker(world, reader=FakeReader(world, bounds=(1000, 1000)))
+                result = walk.walk([Goal(*goal)], hint, 60)
+                self.assertEqual((result.outcome, io.observed, io.steps), ("refused", 0, []))
+                self.assertIn("地图之外", result.message)
+
+    def test_a_first_fix_outside_the_routes_start_radius_sends_nothing(self):
+        world = World((0, 0))
+        walk, io = walker(world)
+        result = walk.walk([Goal(10, 0), Goal(20, 0)], (0, 0), 60, start_radius=9)
+        self.assertEqual(result.outcome, "refused")
+        self.assertEqual(io.steps, [])
+        self.assertEqual(len(io.saved), 1)
+        walk, io = walker(World((0, 0), yaw=90.0))
+        self.assertTrue(walk.walk([Goal(8, 0), Goal(12, 0)], (0, 0), 60, start_radius=9).ok)
+
+    def test_walk_route_passes_the_start_radius(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        route = SimpleNamespace(map_id="starsea", points=(SimpleNamespace(x=1, y=2, radius=1.2, jump=False,
+                                                                          action="", params={}),),
+                                timeout=900.0, start_radius=9.0)
+        with patch("host.android.minimap.MinimapReader"), patch.object(move.Walker, "walk") as walk:
+            move.walk_route(object(), route, (1, 2))
+        self.assertEqual(walk.call_args.kwargs["start_radius"], 9.0)
+
+
 def _frame(name):
     import cv2
     import numpy as np
@@ -464,6 +676,13 @@ class RealFrameTests(unittest.TestCase):
         from navigation.models import NavigationError
         with self.assertRaises(NavigationError):
             self.reader.fix(_frame("move_minimap_goto_start.jpg"), None, 75)
+
+    def test_an_out_of_map_hint_is_refused_in_chinese_not_an_opencv_assertion(self):
+        from navigation.models import NavigationError
+        with self.assertRaisesRegex(NavigationError, "地图之外"):
+            self.reader.fix(_frame("move_minimap_goto_start.jpg"), (-500.0, 99999.0), 40)
+        self.assertFalse(self.reader.within(-1, 10))
+        self.assertTrue(self.reader.within(9886, 10005))
 
     def test_the_chevron_check(self):
         import numpy as np
@@ -595,6 +814,32 @@ class DevEntryTests(unittest.TestCase):
             self.assertFalse(walk_probe.run(rt, {"map": "miraland", "hint": [1, 2], "target": [3, 4]}))
         rt.log.assert_called_once()
 
+    def test_a_stop_before_the_final_report_reports_nothing_and_returns_false(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        from host.android import walk_probe
+        arrived = move.WalkResult("arrived", "已到达目标位置。", (3, 4), [{"confirmed": True}])
+        rt = SimpleNamespace(log=Mock(), stopped=False)
+        with tempfile.TemporaryDirectory() as folder, patch("app_paths.DATA_ROOT", Path(folder)), \
+                patch("host.game_backend", return_value="android"), patch("host.android.minimap.MinimapReader"), \
+                patch.object(move.Walker, "walk", return_value=arrived), \
+                patch("host.android_user_stop", side_effect=[True]):  # stop.request seen at the final check
+            self.assertFalse(walk_probe.run(rt, {"map": "miraland", "hint": [1, 2], "target": [3, 4]}))
+            rt.log.assert_not_called()
+            line = json.loads(next(Path(folder).rglob("walk.jsonl")).read_text(encoding="utf-8").splitlines()[-1])
+            self.assertEqual((line["kind"], line["stopped"], line["attempted"], line["confirmed"]),
+                             ("result", True, 1, 1))
+
+    def test_bad_runner_options_are_reported_in_chinese(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        sys.path.insert(0, str(ROOT / "scripts" / "android"))
+        import runner
+        for bad in ({"target": "1,2"}, {"hint": "1,2", "target": "3"}, {"hint": "1,2", "target": "3,4", "x": "1"},
+                    {"hint": "1,2", "target": "3,4", "timeout": "soon"}, {"hint": "nan,2", "target": "3,4"}):
+            with self.subTest(options=bad), self.assertRaises(runner.RunnerError) as caught:
+                runner.dev_override(self.ENTRY, bad)
+            self.assertTrue(any("一" <= ch <= "鿿" for ch in str(caught.exception)), str(caught.exception))
+
     def test_each_step_and_its_frame_go_to_the_debug_folder_with_the_uid_masked(self):
         import numpy as np
         import cv2
@@ -630,7 +875,8 @@ from host.android import actions, move
 fixtures = repo / "scripts/fixtures/android"
 crop = lambda name: cv2.imread(str(fixtures / name))
 duck = cv2.imread(str(repo / "resource_android/image/android/menu_duck.png"))
-row, remark, settings = crop("hud_label_row.png"), crop("move_companion_remark.jpg"), crop("page_title.png")
+row, settings = crop("hud_label_row.png"), crop("page_title.png")
+wind, bell, look = crop("move_narration_wind.jpg"), crop("move_narration_bell.jpg"), crop("move_prompt_look.jpg")
 
 def hud():
     frame = np.full((720, 1280, 3), 90, np.uint8)
@@ -638,8 +884,11 @@ def hud():
     return frame
 
 frames = {"hud": hud(), "blank": np.full((720, 1280, 3), 90, np.uint8)}
-frames["hud with a companion remark"] = hud()
-frames["hud with a companion remark"][505:592, 380:900] = remark
+for name, image, x, y in (("wind", wind, 240, 495), ("bell", bell, 240, 495), ("look prompt", look, 760, 315)):
+    frames[name] = hud()
+    frames[name][y:y + image.shape[0], x:x + image.shape[1]] = image
+frames["wind and look prompt"] = frames["wind"].copy()
+frames["wind and look prompt"][315:375, 760:900] = look
 frames["page"] = np.full((720, 1280, 3), 90, np.uint8)
 frames["page"][10:10 + settings.shape[0], 0:settings.shape[1]] = settings
 current, results = {}, {}
@@ -679,9 +928,10 @@ print(json.dumps(results, ensure_ascii=False))
 
 @unittest.skipUnless((ROOT / "maafw").exists(), "needs the MaaFramework runtime in ./maafw")
 class FrameworkTests(unittest.TestCase):
-    """The narration band and the screen classes through the real nodes and OCR (both layers), on frames composed from
-    device crops: the HUD label row and duck, the companion remark 「大喵」 line from a saved frame (it appeared over
-    the calendar there; no frame of a remark over the HUD was saved, so its place over the HUD is assumed the same)."""
+    """The screen classes through the real nodes and full-frame OCR (both layers), on frames composed from device
+    crops: the HUD label row and duck; the subtitle band of the two saved narration frames over the HUD (「暖暖」 /
+    「起风了——大喵小心，别被吹跑啦。」, m2-goto1; 「大喵」 / 「暖暖，星之铃似乎在闪烁呢！摇动它试试吧？」, phase0); the
+    interaction prompt 「查看」 seen over the HUD in m2-rl10."""
 
     def test_the_hud_the_narration_band_and_other_screens(self):
         if not (ROOT / "resource_android").is_dir():
@@ -694,19 +944,20 @@ class FrameworkTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
         outcome = json.loads(result.stdout.strip().splitlines()[-1])
         self.assertEqual(outcome["hud"], ["hud", ""])
-        self.assertEqual(outcome["hud with a companion remark"], ["narration", ""])
-        self.assertEqual(outcome["blank"], ["transition", ""])
+        self.assertEqual(outcome["wind"], ["narration", ""])
+        self.assertEqual(outcome["bell"], ["narration", ""])
+        self.assertEqual(outcome["look prompt"][0], "other")
+        self.assertEqual(outcome["wind and look prompt"][0], "other")  # narration with anything else: stop
+        self.assertEqual(outcome["blank"][0], "other")
         self.assertEqual(outcome["page"][0], "other")
         self.assertTrue(outcome["page"][1].startswith("另一个页面"))
 
-    def test_the_narration_node(self):
+    def test_the_screen_text_node_reads_the_whole_frame(self):
         nodes = json.loads((ROOT / "resource_android/pipeline/android_move.json").read_text(encoding="utf-8"))
-        self.assertEqual(list(nodes), [move.NARRATION])
-        node = nodes[move.NARRATION]
-        self.assertEqual((node["recognition"], node["action"]), ("OCR", "DoNothing"))
-        x, y, w, h = node["roi"]
-        self.assertGreaterEqual(y, 470)  # below the HUD label row and the quest tracker
-        self.assertLessEqual(y + h, 600)  # above the bottom HUD text (心誓, at y ~680)
+        self.assertEqual(list(nodes), [move.SCREEN_TEXT])
+        node = nodes[move.SCREEN_TEXT]
+        self.assertEqual((node["recognition"], node["action"], node["roi"]), ("OCR", "DoNothing", [0, 0, 1280, 720]))
+        self.assertEqual(node["threshold"], move.TEXT_SCORE)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 {
-  "MaaNikki_Android_Narration": {
+  "MaaNikki_Android_ScreenText": {
     "recognition": "OCR",
-    "roi": [240, 500, 800, 95],
+    "roi": [0, 0, 1280, 720],
     "expected": ".+",
     "threshold": 0.8,
     "action": "DoNothing"

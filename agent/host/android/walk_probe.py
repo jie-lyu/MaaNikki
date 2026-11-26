@@ -95,8 +95,11 @@ def run(rt, options: dict) -> bool:
                         "leash": params.leash, "radius": params.radius}, None)
     walker = Walker(io, MinimapReader(params.map), leash=(*params.hint, params.leash))
     result = walker.walk([Goal(*params.target, params.radius)], params.hint, params.timeout)
+    # The loop's own stop check (the tasker or the stop request): after a stop nothing is reported, not even arrival.
+    stopped = io.stopped()
     io.record("result", {"outcome": result.outcome, "message": result.message, "position": result.position,
-                         "steps": len(result.steps)}, None)
-    if not rt.stopped:
-        rt.log(f"走路探针：{result.message}（{len(result.steps)} 步）")
+                         "attempted": result.attempted, "confirmed": result.confirmed, "stopped": stopped}, None)
+    if stopped:
+        return False
+    rt.log(f"走路探针：{result.message}（发出 {result.attempted} 步，完成 {result.confirmed} 步）")
     return result.ok

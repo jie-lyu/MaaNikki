@@ -10,8 +10,8 @@ DIR defaults to .build/android. Reported, per measured run in DIR/phase-e-measur
   - the model: settled displacement / move.expected_distance for full-deflection steps;
   - the lag: settled - immediate frame distance (what LAG_U bounds);
   - the angle formula: the direction each step actually moved vs the one move.screen_angle's inverse predicts;
-  - screens (unless --no-screens, needs ./maafw): move.classify on every saved HUD frame (expect "hud": no narration
-    false positives) through the real nodes, as the walk does.
+  - screens (unless --no-screens, needs ./maafw): move.classify on every saved HUD frame (expect "hud" except the
+    「起风了」 narration frames and the 查看/拾取 interaction prompts) through the real nodes, as the walk does.
 """
 from __future__ import annotations
 
