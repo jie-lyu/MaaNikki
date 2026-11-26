@@ -74,6 +74,7 @@ class FakeIo:
         self.captured, self.started, self.not_afters = {}, {}, []
         self.present = True  # the minimap chevron on the next frames
         self.regions = lambda number: ("登上鸣鸣列车", move.TRACKER_DISTANCE)  # the tracker's rows on frame ``number``
+        self.name_only = lambda number: False  # Verdict.name_only on frame ``number``
 
     def stopped(self):
         return (self.stop_after_steps is not None and len(self.steps) >= self.stop_after_steps) or (
@@ -95,7 +96,8 @@ class FakeIo:
         self.frames.append(frame)
         self.captured[frame.number] = self.clock()
         self.started[frame.number] = at
-        return Observation(frame, kind, at, reason, self.clock(), self.regions(self.observed))
+        return Observation(frame, kind, at, reason, self.clock(), self.regions(self.observed),
+                           name_only=self.name_only(self.observed))
 
     BELL_S = 4.0
 
@@ -206,9 +208,12 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(move.step_seconds(0), move.MIN_STEP_S)
         self.assertEqual(move.step_seconds(0.3), move.MIN_STEP_S)  # 0.3 + 0.05 is under the minimum
         self.assertAlmostEqual(move.step_seconds(4.34), 1.0, places=2)  # m2-fb10: 1.0 s covered 4.2-4.8 u
-        self.assertEqual(move.step_seconds(7.44), 1.5)
+        self.assertEqual(move.step_seconds(6.2), 1.3)
+        self.assertEqual(move.step_seconds(7.44), 1.3)  # beyond one step's reach: the longest step
         self.assertEqual(move.step_seconds(100), move.MAX_STEP_S)
-        self.assertEqual(move.MAX_STEP_S, 1.5)
+        self.assertEqual(move.MAX_STEP_S, 1.3)
+        self.assertAlmostEqual(move.REACH_U, 6.2)
+        self.assertAlmostEqual(move.REACH_U, move.expected_distance(move.MAX_STEP_S))
         self.assertAlmostEqual(move.expected_distance(1.5), 7.44)
         self.assertAlmostEqual(move.expected_distance(0.5), 1.24)  # m2: 0.5 s covered ~0.7-2.0 u
         self.assertEqual(move.expected_distance(0.2), 0.0)
@@ -279,8 +284,30 @@ class WalkTests(unittest.TestCase):
         self.assertLessEqual(math.dist(world.position, (100, 94)), move.ARRIVAL_U)
         # Arrival was judged on a frame captured at least SETTLE_S after the last lift (a settle wait happened).
         self.assertTrue(any(after == len(io.steps) and seconds > 0 for after, seconds in io.pauses))
-        self.assertTrue(all(step["seconds"] <= 1.5 for step in io.steps))
+        self.assertTrue(all(step["seconds"] <= move.MAX_STEP_S for step in io.steps))
         self.assertTrue(all(step["frame"].kind == "hud" for step in io.steps))
+
+    def test_the_longest_hold_leaves_a_dispatch_margin_under_the_gesture_cap(self):
+        """On the device a 1500 ms hold (= the cap) overran; 1385 and 1126 ms were confirmed. Every planned hold, and
+        the deadline-based not_after, keep HOLD_MARGIN_S for the lift's dispatch latency; the bell too."""
+        from host.android import gesture
+        self.assertEqual(gesture.GESTURE_MAX_S, 1.5)  # the cap itself is unchanged
+        self.assertGreaterEqual(move.HOLD_MARGIN_S, 0.2)
+        self.assertLessEqual(move.MAX_STEP_S + move.HOLD_MARGIN_S, gesture.GESTURE_MAX_S + 1e-9)
+        self.assertLess(move.MAX_STEP_S, 1.385 + 1e-9)  # no longer than the longest hold confirmed on the device
+        self.assertEqual(move.LIFT_MARGIN_S, move.HOLD_MARGIN_S)
+        self.assertLessEqual(move.RuntimeIo.BELL_S + move.HOLD_MARGIN_S, gesture.BELL_PRESS_MAX_S)
+        world = World((0, 0), yaw=0.0)
+        walk, io = walker(world)
+        self.assertTrue(walk.walk([Goal(0, -40)], (0, 0), 120).ok)
+        self.assertEqual(max(step["seconds"] for step in io.steps), move.MAX_STEP_S)
+
+    def test_a_bell_press_without_the_dispatch_margin_is_refused(self):
+        walk, io = walker(World((0, 0), yaw=90.0), allow_bell=True)
+        io.BELL_S = 4.4  # under the bell's 4.5 s cap, but not by HOLD_MARGIN_S
+        result = walk.walk([Goal(0.5, 0, 1.2, action="bell")], (0, 0), 30)
+        self.assertEqual(result.outcome, "refused", result.message)
+        self.assertEqual(io.not_afters, [])
 
     def test_far_steps_do_not_wait_for_the_minimap_to_settle(self):
         world = World((0, 0), yaw=200.0, lag=0.3)
@@ -291,7 +318,7 @@ class WalkTests(unittest.TestCase):
                - move.LAG_U > move.REACH_U]
         self.assertGreaterEqual(len(far), 2)
         self.assertFalse([after for after, _seconds in io.pauses if after in far and after > 0 and after - 1 in far])
-        self.assertEqual({io.steps[i]["seconds"] for i in far}, {1.5})
+        self.assertEqual({io.steps[i]["seconds"] for i in far}, {move.MAX_STEP_S})
 
     def test_steps_are_replanned_with_the_camera_yaw_of_each_frame(self):
         world = World((0, 0), yaw=10.0)
@@ -1182,6 +1209,99 @@ def _frame(name):
     return frame
 
 
+TRACKER_CROP_AT = (100, 220)  # where the move_tracker_*.jpg crops were cut from their 1280x720 frames
+STARSEA_NAME = ("·登上鸣鸣列车", [126, 231, 126, 23], 0.971)  # phase0/hud-1280x720.png (星海), as read
+HUD_WITHOUT_TRACKER = tuple(row for row in HUD_TEXT if row[0] not in ("登上鸣鸣列车", "1049米"))
+
+
+def _tracker_frame(name):
+    """A 1280x720 frame (flat grey) with a saved tracker crop at its place."""
+    import cv2
+    import numpy as np
+    crop = cv2.imread(str(FIXTURES / name))
+    frame = np.full((720, 1280, 3), 90, np.uint8)
+    x, y = TRACKER_CROP_AT
+    frame[y:y + crop.shape[0], x:x + crop.shape[1]] = crop
+    return frame
+
+
+def tracker_verdict(frame, *rows):
+    from host.android.actions import Screen
+    verdict = move.classify(Screen("hud", {"duck": [30, 18, 54, 54]}),
+                            lambda node, override=None: Ocr([Row(*row) for row in (*HUD_WITHOUT_TRACKER, *rows)]),
+                            frame)
+    return verdict.kind, verdict.regions, verdict.name_only
+
+
+class NameOnlyTrackerTests(unittest.TestCase):
+    """星海: the tracked quest is in another map and the tracker shows its name without a distance row (phase0 and
+    the survey frames). Such a first frame walks only with the distance row positively empty; later frames keep the
+    shape exactly. Crops: move_tracker_starsea.jpg (phase0), move_tracker_starsea_shore.jpg (survey/jump/j4, the
+    shoreline behind the row), move_tracker_distance_unread.jpg (m2-rl10b t18: 「1040米」 drawn, OCR read no
+    distance)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.starsea = _tracker_frame("move_tracker_starsea.jpg")
+
+    def test_the_real_starsea_tracker_is_a_name_with_positively_no_distance(self):
+        self.assertEqual(tracker_verdict(self.starsea, STARSEA_NAME), ("hud", ("登上鸣鸣列车",), True))
+        shore = _tracker_frame("move_tracker_starsea_shore.jpg")
+        self.assertEqual(tracker_verdict(shore, ("登上鸣鸣列车", [144, 231, 106, 23], 0.913))[2], True)
+
+    def test_an_unread_distance_is_not_an_empty_row(self):
+        frame = _tracker_frame("move_tracker_distance_unread.jpg")
+        self.assertEqual(tracker_verdict(frame, ("·登上呜鸣列车", [134, 227, 120, 28], 0.872)),
+                         ("hud", ("登上鸣鸣列车",), False))
+        self.assertGreater(move.edge_fraction(frame, move.distance_area([134, 227, 120, 28])),
+                           move.DISTANCE_EDGE_MAX)
+
+    def test_the_name_row_must_be_a_plain_quest_name(self):
+        for text in ("交谈", "鸣鸣列车"[:3], "前往鸣鸣列车", "点击继续游戏"):
+            with self.subTest(text):
+                self.assertFalse(tracker_verdict(self.starsea, (text, [126, 231, 126, 23]))[2])
+
+    def test_anything_else_in_the_tracker_or_its_distance_row_is_no_empty_row(self):
+        cases = {
+            "a weak marker glyph over the tracker": (("▼", [256, 236, 14, 14], 0.4),),
+            "a weak row in the distance row": (("1", [140, 258, 10, 18], 0.3),),
+            "the distance read": (("1044米", [129, 255, 79, 24], 1.0),),
+            "two name rows": (("登上鸣鸣列车", [126, 205, 126, 23]),),
+        }
+        for name, rows in cases.items():
+            with self.subTest(name):
+                self.assertFalse(tracker_verdict(self.starsea, STARSEA_NAME, *rows)[2])
+        self.assertFalse(tracker_verdict(None, STARSEA_NAME)[2])  # no frame, no evidence
+        flat = _tracker_frame("move_tracker_starsea.jpg")
+        flat[258:278, 130:200:6] = 255  # stroke-like pixels in the distance row OCR did not read
+        self.assertFalse(tracker_verdict(flat, STARSEA_NAME)[2])
+
+    def test_a_name_only_first_frame_walks_and_later_frames_keep_that_shape(self):
+        walk, io = walker(World((0, 0), yaw=0.0))
+        io.regions, io.name_only = (lambda n: ("登上鸣鸣列车",)), (lambda n: n == 1)
+        result = walk.walk([Goal(0, -12)], (0, 0), 60)
+        self.assertTrue(result.ok, result.message)
+        self.assertTrue(any("没有距离" in text for _detail, text in io.logs))
+        for changed in (("登上鸣鸣列车", move.TRACKER_DISTANCE), ("离开鸣鸣列车",), ("登上鸣鸣列车", "任务开始"), ()):
+            with self.subTest(changed=changed):
+                walk, io = walker(World((0, 0)))
+                io.regions = lambda n, changed=changed: ("登上鸣鸣列车",) if n == 1 else changed
+                io.name_only = lambda n: n == 1
+                result = walk.walk([Goal(0, -20)], (0, 0), 60)
+                self.assertEqual((result.outcome, len(io.steps), io.observed), ("screen", 1, 2))
+                self.assertEqual(io.saved[0][2].number, 2)
+
+    def test_a_name_only_first_frame_without_the_evidence_or_too_short_never_steps(self):
+        for name, regions, name_only in (("no positive evidence", ("登上鸣鸣列车",), False),
+                                         ("交谈 even if flagged", ("交谈",), True),
+                                         ("a deny word even if flagged", ("前往鸣鸣列车",), True)):
+            with self.subTest(name):
+                walk, io = walker(World((0, 0)))
+                io.regions, io.name_only = (lambda n, r=regions: r), (lambda n, f=name_only: f)
+                result = walk.walk([Goal(0, -6)], (0, 0), 60)
+                self.assertEqual((result.outcome, io.steps), ("refused", []))
+
+
 class RealFrameTests(unittest.TestCase):
     """The minimap reader on crops of the saved m2-goto2 frames (positions and camera yaw as the device session read
     them with the offline adapter, .build/android/phase-e-measure/m2-goto2/results.jsonl)."""
@@ -1252,7 +1372,7 @@ class RealFrameTests(unittest.TestCase):
         result = Walker(io, self.reader, clock=clock).walk([Goal(9878.3, 10011.5)], (9886, 10006), 60)
         angle, seconds = io.steps[0]
         self.assertAlmostEqual(angle, 75.7, delta=1.5)  # what the device run sent toward the same point
-        self.assertEqual(seconds, 1.5)  # 10.4 u away: a full-length step
+        self.assertEqual(seconds, move.MAX_STEP_S)  # 10.4 u away: a full-length step
         moved = [record for kind, record in io.records if kind == "moved"]
         self.assertLessEqual(math.dist((moved[0]["after"]["x"], moved[0]["after"]["y"]), (9884.08, 10007.73)), 0.3)
         self.assertEqual(result.outcome, "stopped")  # the second gesture "returned False": nothing further
@@ -1538,6 +1658,8 @@ for name, image, x, y in (("wind", wind, 240, 495), ("bell", bell, 240, 495), ("
     frames[name][y:y + image.shape[0], x:x + image.shape[1]] = image
 frames["wind and look prompt"] = frames["wind"].copy()
 frames["wind and look prompt"][315:375, 760:900] = look
+frames["starsea tracker"] = hud()
+frames["starsea tracker"][220:292, 100:270] = crop("move_tracker_starsea.jpg")
 frames["page"] = np.full((720, 1280, 3), 90, np.uint8)
 frames["page"][10:10 + settings.shape[0], 0:settings.shape[1]] = settings
 current, results = {}, {}
@@ -1555,8 +1677,9 @@ class Judge(CustomAction):
         image = context.tasker.controller.post_screencap().wait().get()
         def recognize(node, override=None):
             return context.run_recognition(node, image, {node: override} if override else None)
-        verdict = move.classify(actions.read_screen(recognize), recognize)
+        verdict = move.classify(actions.read_screen(recognize), recognize, image)
         results[current["name"]] = [verdict.kind, verdict.reason]
+        results[current["name"] + "/tracker"] = [list(verdict.regions), verdict.name_only]
         return CustomAction.RunResult(success=True)
 
 resource = Resource()
@@ -1594,6 +1717,9 @@ class FrameworkTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
         outcome = json.loads(result.stdout.strip().splitlines()[-1])
         self.assertEqual(outcome["hud"], ["hud", ""])
+        self.assertEqual(outcome["starsea tracker"], ["hud", ""])  # 星海: the quest name alone, real OCR
+        self.assertEqual(outcome["starsea tracker/tracker"], [["登上鸣鸣列车"], True])
+        self.assertEqual(outcome["hud/tracker"], [[], False])
         self.assertEqual(outcome["wind"], ["narration", ""])
         self.assertEqual(outcome["bell"], ["narration", ""])
         self.assertEqual(outcome["look prompt"][0], "other")

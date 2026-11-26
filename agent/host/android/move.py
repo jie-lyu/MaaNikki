@@ -8,7 +8,8 @@ the only touch this module sends; the bell press, off by default, is the one oth
    no contact held when it was captured, and full-frame OCR reading no text outside the HUD's own text regions, each
    region showing only what it may (HUD_REGIONS: the label row's labels, the 心誓 bar, the masked UID and ping, the
    icon badges' numbers, and the quest tracker as it was on the walk's first frame). The first frame must be such a
-   clean HUD or nothing is sent. The one exception is ambient narration: a known companion's label (AMBIENT_SPEAKERS)
+   clean HUD, its tracker showing a quest name and its distance, or (a quest tracked in another map, as on 星海) a
+   name alone with the distance row positively empty (name_only_tracker), or nothing is sent. The one exception is ambient narration: a known companion's label (AMBIENT_SPEAKERS)
    over one short plain line in the subtitle band, no marker, no word of NARRATION_DENY: it pauses without input until
    it goes (logged), up to NARRATION_MAX_S. Anything else (a prompt, a banner, a quest or interaction button, an
    overlay glyph, a missing minimap chevron, another page, a dialog, the quit confirmation, an unrecognised or dark
@@ -25,7 +26,8 @@ the only touch this module sends; the bell press, off by default, is the one oth
    view cone on the same frame give the joystick's screen angle: screen_angle = bearing - yaw + 270 (screen angles: 0
    right, 90 down; the camera looks "up" the screen, 270). The joystick is always at full deflection; the distance is
    set by the duration from the measured model expected_distance(T) = SPEED_U_S * (T - DEAD_S), clamped to
-   [MIN_STEP_S, MAX_STEP_S] and to the time left before the deadline. The camera is never turned. A decision is sent
+   [MIN_STEP_S, MAX_STEP_S] (MAX_STEP_S: the gesture cap less HOLD_MARGIN_S for dispatch latency) and to the time
+   left before the deadline. The camera is never turned. A decision is sent
    with its frame's expiry (capture requested + MAX_DECISION_AGE_S, and early enough that its hold ends before the
    deadline: gesture ``not_after``): Runtime refuses it right before
    contact-down once expired (DecisionExpired) and the walk captures again and replans; the bell follows the same rule
@@ -57,7 +59,7 @@ import math
 import re
 import time
 
-from host.android.gesture import DecisionExpired
+from host.android.gesture import BELL_PRESS_MAX_S, GESTURE_MAX_S, DecisionExpired
 from navigation.geometry import segment_distance
 
 # ---- the measured model ----
@@ -65,12 +67,18 @@ from navigation.geometry import segment_distance
 # least-squares line through the three means is d = 6.2 * (T - 0.3): 0.3 s of every step is ramp and acceleration.
 SPEED_U_S = 6.2
 DEAD_S = 0.3
-MAX_STEP_S = 1.5  # the gesture cap (docs: 每一步 ≤ 1.5 秒)
+# The longest hold stays HOLD_MARGIN_S under the gesture cap (GESTURE_MAX_S, first down to last up): the lift is
+# posted when the poll wakes after its scheduled time, and a lift at the cap itself has only gesture.TIMER_SLACK_S
+# (5 ms) before the gesture counts as overrun. On the device (.build/android/phase-e-walk, 2026-11-26) holds of 1385
+# and 1126 ms were confirmed and a 1500 ms hold was rejected as "overran its time cap" (sending 11:03:08.717,
+# outcome 11:03:10.260). 0.2 s is above the 1385 ms run's 115 ms of headroom and more than ten poll intervals.
+HOLD_MARGIN_S = 0.2
+MAX_STEP_S = round(GESTURE_MAX_S - HOLD_MARGIN_S, 3)  # 1.3 s
 # The shortest step: with 0.3 s of dead time a 0.4 s step still moves predictably (~0.6 u, under the smallest route
 # radius in use, 0.95 u, so a final approach can land inside); anything shorter pays the ~0.84 s fixed cost per step
 # for almost no movement.
 MIN_STEP_S = 0.4
-REACH_U = SPEED_U_S * (MAX_STEP_S - DEAD_S)  # the farthest one step goes (~7.4 u)
+REACH_U = SPEED_U_S * (MAX_STEP_S - DEAD_S)  # the farthest one step goes (6.2 u)
 # After the lift the minimap is still catching up: settled 0.6-0.9 s after it (m2-settle). A frame captured right
 # after the lift confirmation (~0.3 s) was short of the settled position by 0.95 u (median) and 2.8 u (max) over 74
 # full-deflection steps (scripts/android/move_frames.py).
@@ -91,7 +99,8 @@ REFIX_SHIFT_U = LAG_U + 0.5  # without input in between, a new fix moves at most
 MAX_DECISION_AGE_S = 1.2
 STALE_DECISIONS = 3  # consecutive decisions that aged out: the walk stops
 DEADLINE_MARGIN_S = 0.5  # a step ends at least this long before the deadline (lift confirmation, the next capture)
-LIFT_MARGIN_S = 0.2  # a gesture must start early enough that its hold plus this ends before the deadline (not_after)
+# A gesture must start early enough that its hold plus the same dispatch margin ends before the deadline (not_after).
+LIFT_MARGIN_S = HOLD_MARGIN_S
 STARTUP_WAIT_S = 5.0  # how long the start waits for a clean HUD frame (an allowed remark going, the distance read)
 
 # ---- stops ----
@@ -138,6 +147,7 @@ class Observation:
     captured: float | None = None
     regions: tuple = ()
     blocks: tuple = ()  # Verdict.blocks
+    name_only: bool = False  # Verdict.name_only
 
     def __post_init__(self):
         if self.captured is None:
@@ -228,6 +238,7 @@ class Walker:
         self._gestured = False  # any gesture (step or bell) sent yet
         self._start = (None, None)  # (first goal, start radius) for the guard before the first gesture
         self._regions = None  # the first frame's quest name (Verdict.regions)
+        self._name_only = False  # the first frame's tracker showed that name without a distance row
         self._blocks = None  # the first frame's permanent-HUD text block layout (Verdict.blocks)
         self._after_misread = False  # the frame just returned follows a misread one: its fix must hold, no retry
 
@@ -424,9 +435,11 @@ class Walker:
 
     def _first_look(self) -> Observation:
         """The walk's first frame: the open-world HUD and nothing else, with the minimap chevron and the quest tracker
-        showing one quest name and its distance; that name is what later frames must keep showing. While an allowed
-        ambient remark is on screen, or the tracker's distance is not read yet, the walk waits (STARTUP_WAIT_S,
-        within the deadline) for such a frame; anything else, or no clean frame in time, refuses with nothing sent."""
+        showing one quest name and its distance, or one name of at least TRACKER_NAME_MIN_CJK characters whose
+        distance row is positively empty (Observation.name_only: a quest tracked in another map, as on 星海); that
+        shape and name are what later frames must keep showing. While an allowed ambient remark is on screen, or the
+        tracker's distance is neither read nor shown to be absent, the walk waits (STARTUP_WAIT_S, within the
+        deadline) for such a frame; anything else, or no clean frame in time, refuses with nothing sent."""
         since, blanks, logged = self.clock(), 0, False
         while True:
             self._check_stop()
@@ -451,6 +464,11 @@ class Walker:
             if obs.kind == "hud" and len(names) == 1 and distances == 1:
                 self._regions, self._blocks = names[0], obs.blocks
                 return obs
+            if obs.kind == "hud" and len(names) == 1 and distances == 0 and obs.name_only \
+                    and _cjk(names[0]) >= TRACKER_NAME_MIN_CJK:
+                self._regions, self._blocks, self._name_only = names[0], obs.blocks, True
+                self.io.log("任务栏只显示任务名、没有距离（追踪的任务不在这张地图），之后每张图都要保持这样。")
+                return obs
             if obs.kind == "narration" and not logged:
                 logged = True
                 self.io.log("开始时画面上有一行环境旁白，等它消失再走。")
@@ -466,9 +484,10 @@ class Walker:
 
     def _tracker_kept(self, obs) -> bool:
         """The quest tracker still shows the first frame's quest name exactly (after tracker_name's 呜/鸣 and
-        punctuation), at most its distance besides, nothing else."""
+        punctuation), at most its distance besides (none at all when the first frame showed the name alone: a distance
+        appearing is a change), nothing else."""
         names, distances = self._tracker_parts(obs)
-        return names == [self._regions] and distances <= 1
+        return names == [self._regions] and distances <= (0 if self._name_only else 1)
 
     def _look(self) -> Observation:
         """A frame that is the open-world HUD and nothing else, or one with allowed narration waited through; any
@@ -621,6 +640,8 @@ class Walker:
             if not self.allow_bell:
                 self._fail("refused", "这一步要按铃，按铃在安卓模拟器上还没有开放，已停止", obs)
             press = float(getattr(self.io, "BELL_S", 4.0))
+            if not 0 < press <= BELL_PRESS_MAX_S - HOLD_MARGIN_S:  # the same dispatch margin under the bell's cap
+                self._fail("refused", "按铃的时长超出手势上限（没有留出发送余量），已停止", obs)
             if self.deadline - self.clock() < press + DEADLINE_MARGIN_S:  # the whole press must fit
                 self._fail("timeout", "移动超时（剩下的时间不够按完铃），已停止", obs)
             if not self._gestured:  # a bell as the first gesture takes the route's start guard too
@@ -772,6 +793,7 @@ class Verdict:
     reason: str = ""  # for "other": a fixed Chinese text (never OCR text)
     regions: tuple = ()  # the quest tracker's rows top to bottom: tracker_name() for a name, TRACKER_DISTANCE
     blocks: tuple = ()  # Rows.blocks: the permanent-HUD text block layout
+    name_only: bool = False  # name_only_tracker on the frame (set on "hud" verdicts only)
 
 
 def _inside(box, region) -> bool:
@@ -801,6 +823,7 @@ class Rows:
     labels: int  # labels read in place, plus those a misread label-row block covers (see misread)
     blocks: tuple  # ((region, x0, x1, cy, ping), ...) of every counted block in BLOCK_REGIONS, matching or misread
     misread: int  # blocks in BLOCK_REGIONS whose text is not that region's exact form
+    raw: tuple = ()  # every OCR row with a box, at any score, before any filtering: (text, box)
 
 
 def read_rows(result) -> Rows:
@@ -808,7 +831,7 @@ def read_rows(result) -> Rows:
     labels read in place, the permanent-HUD block layout, and how many of those blocks were misread (in a HUD region,
     not in its exact form; Walker gives such a frame one recapture when nothing else differs from the first frame)."""
     from host.android import actions, pages
-    outside, tracker, blocks, labels, covered, misread = [], [], [], 0, 0, 0
+    outside, tracker, blocks, labels, covered, misread, raw = [], [], [], 0, 0, 0, []
     if result is not None and actions._hit(result):
         for row in pages._rows(result):
             if row is None:
@@ -818,6 +841,7 @@ def read_rows(result) -> Rows:
             if box is None:
                 continue
             box = [int(v) for v in box]
+            raw.append((text, box))
             if _glyph(text):  # the raw text, before anything else
                 if score >= TEXT_SCORE:
                     outside.append((text, box))
@@ -847,7 +871,66 @@ def read_rows(result) -> Rows:
                 if region == "labels":  # the labels whose places the misread block covers
                     covered += sum(1 for _label, x in LABEL_CENTRES if box[0] <= x <= box[0] + box[2])
     return Rows(outside, tuple(entry for _y, _x, entry in sorted(tracker)), labels + covered,
-                tuple(sorted(blocks)), misread)
+                tuple(sorted(blocks)), misread, tuple(raw))
+
+
+# A quest tracker without a distance row. On 星海 the tracked story quest lies in another map and the tracker shows
+# its name alone: phase0/hud-1280x720.png (星海, 大喵's bell remark) reads 「·登上鸣鸣列车」 [126,231,126,23] with
+# nothing below it, like the other survey/* frames with that shoreline; on the saved 奇迹大陆 frames the distance is
+# read right under the name (name box ~[140,231,112,23]; distance box x 129-146, y 255-256, 60-80 x 20-24). Such a
+# first frame is accepted only with positive evidence that the distance row is empty, not merely unread: no OCR row
+# at any score in DISTANCE_AREA (relative to the name row's box) and the area's Canny edge fraction at most
+# DISTANCE_EDGE_MAX. Over the saved HUD frames (full-frame OCR, .build/android): the 61 name-only 星海 frames
+# 0.000-0.049 (a sand/water boundary crossing the row), the 439 frames whose distance was read 0.148-0.236, and the
+# one 奇迹大陆 frame whose drawn 「1040米」 OCR missed (m2-rl10b t18) 0.22. A busier background refuses (the safe side).
+TRACKER_NAME_MIN_CJK = 4
+DISTANCE_AREA = (-16, 1, 76, 27)  # x0, y0 from the name box's left and bottom; x1, y1 likewise
+DISTANCE_EDGE_MAX = 0.08
+
+
+def distance_area(name_box):
+    x, y, w, h = name_box
+    return (x + DISTANCE_AREA[0], y + h + DISTANCE_AREA[1], x + DISTANCE_AREA[2], y + h + DISTANCE_AREA[3])
+
+
+def _overlaps(box, area) -> bool:
+    x, y, w, h = box
+    return x < area[2] and area[0] < x + w and y < area[3] and area[1] < y + h
+
+
+def edge_fraction(frame, area) -> float | None:
+    """The fraction of Canny edge pixels in ``area`` (x0, y0, x1, y1) of ``frame``; None when the area does not lie
+    inside the frame."""
+    import cv2
+    shape = getattr(frame, "shape", None)
+    if shape is None or len(shape) != 3 or area[0] < 0 or area[1] < 0 or area[2] > shape[1] or area[3] > shape[0] \
+            or area[2] <= area[0] or area[3] <= area[1]:
+        return None
+    gray = cv2.cvtColor(frame[area[1]:area[3], area[0]:area[2]], cv2.COLOR_BGR2GRAY)
+    return float((cv2.Canny(gray, 60, 180) > 0).mean())
+
+
+def name_only_tracker(rows, frame) -> bool:
+    """Whether the quest tracker shows a quest name and positively no distance row: one name row (rows.regions) of
+    at least TRACKER_NAME_MIN_CJK CJK characters without a word of NARRATION_DENY, no overlay glyph read at any score
+    over the tracker region, and its distance row's area (distance_area) free of any OCR row and of edges
+    (DISTANCE_EDGE_MAX) on ``frame``."""
+    if frame is None or len(rows.regions) != 1 or rows.regions[0] == TRACKER_DISTANCE:
+        return False
+    name = rows.regions[0]
+    if _cjk(name) < TRACKER_NAME_MIN_CJK or any(word in name for word in NARRATION_DENY):
+        return False
+    tracker = dict(HUD_REGIONS)["tracker"]
+    if any(_glyph(text) for text, box in rows.raw if _overlaps(box, tracker)):
+        return False
+    own = [box for text, box in rows.raw if _inside(box, tracker) and tracker_name(text) == name]
+    if len(own) != 1:
+        return False
+    area = distance_area(own[0])
+    if any(_overlaps(box, area) for _text, box in rows.raw if box is not own[0]):
+        return False
+    edges = edge_fraction(frame, area)
+    return edges is not None and edges <= DISTANCE_EDGE_MAX
 
 
 def _slots():
@@ -896,12 +979,13 @@ def narration_verdict(rows) -> str:
     return ""
 
 
-def classify(screen, recognize) -> Verdict:
+def classify(screen, recognize, frame=None) -> Verdict:
     """The Verdict for one frame, from host.android.actions.read_screen's ``screen`` and ``recognize`` on it: "hud"
     when the HUD is positively recognised and no text is read outside the HUD's own text regions (each region matching
     its pattern); "narration" when the only such text is one ambient remark (narration_verdict); otherwise "other" with
     a fixed description (what OCR read is never part of it). The quest tracker's text is returned for the walk to
-    compare with its first frame."""
+    compare with its first frame, and on a "hud" verdict whether ``frame`` (the image OCR read) shows the tracker's
+    name with its distance row positively empty (name_only_tracker; never without the frame)."""
     from host.android import pages
     if screen.kind != "hud":
         what = pages.SCREEN_KINDS.get(screen.kind, "认不出的画面")
@@ -918,7 +1002,7 @@ def classify(screen, recognize) -> Verdict:
         return Verdict("narration", "", regions, blocks) if not why else Verdict("other", why, regions, blocks)
     if rows.misread:
         return Verdict("misread", "大世界常驻界面的文字没有按原样读出", regions, blocks)
-    return Verdict("hud", "", regions, blocks)
+    return Verdict("hud", "", regions, blocks, name_only_tracker(rows, frame))
 
 
 class RuntimeIo:
@@ -927,7 +1011,7 @@ class RuntimeIo:
     diagnostics through Runtime.diagnostic. Android only (Runtime.gesture refuses elsewhere)."""
 
     BELL_POINT = (616, 612)  # the bottom-centre bell icon on the saved HUD frames (inference; bell is off by default)
-    BELL_S = 4.0
+    BELL_S = 4.0  # 0.5 s under BELL_PRESS_MAX_S (4.5 s): more than HOLD_MARGIN_S, checked before the press
 
     def __init__(self, rt, *, clock=time.monotonic):
         self.rt, self.clock = rt, clock
@@ -953,8 +1037,9 @@ class RuntimeIo:
         if touch is None or getattr(touch, "state", None) != "none":
             return Observation(frame, "other", at, "画面（截图时设备上有按住的触点，或读不出触摸状态）", captured)
         recognize = self.rt._recognizer_on(frame)
-        verdict = classify(actions.read_screen(recognize), recognize)
-        return Observation(frame, verdict.kind, at, verdict.reason, captured, verdict.regions, verdict.blocks)
+        verdict = classify(actions.read_screen(recognize), recognize, frame)
+        return Observation(frame, verdict.kind, at, verdict.reason, captured, verdict.regions, verdict.blocks,
+                           verdict.name_only)
 
     def step(self, frame, angle, seconds, jump_at, *, not_after=None) -> bool:
         from host.android import gesture
