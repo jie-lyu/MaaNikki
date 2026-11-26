@@ -4,6 +4,7 @@ way out: on an exception, on an abort and when setup fails half-way."""
 from __future__ import annotations
 
 import contextlib
+import gc
 import io
 import json
 import math
@@ -15,6 +16,7 @@ import tempfile
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
+import weakref
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "android"))
@@ -196,7 +198,7 @@ class OneRecognizerTests(unittest.TestCase):
         self.assertEqual((FakeRecognizer.built, FakeController.built), (1, 1))
         self.assertEqual(len({identity for identity, _, _ in seen}), 1)
         self.assertEqual([path for _, path, _ in seen], frames(40))
-        self.assertEqual(fakes.controllers[0].shown, [f"pixels of frame-{i:03d}.png" for i in range(40)])
+        self.assertEqual(fakes.controllers[0].shown, [f"pixels of frame-{i:03d}.png" for i in range(40)] + [None])
         self.assertEqual(results, [(p, f"judged pixels of {p.name}") for p in frames(40)])  # the frame shown, in turn
         self.assertTrue(fakes.recognizers[0].android_layer)
         self.assertEqual(fakes.events, ["release recognizer", "destroy Controller"])  # tasker side first
@@ -478,7 +480,7 @@ class GuardCoverageTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError) as caught:
                     list(session.run(frames(2), nested))
                 self.assertIn("in progress", str(caught.exception))
-                self.assertEqual(fakes.controllers[0].shown, ["pixels of frame-000.png"])
+                self.assertEqual(fakes.controllers[0].shown, ["pixels of frame-000.png"])  # never frame B
                 self.assertEqual([p for p, _ in session.run(frames(1), lambda *a: None)], frames(1))  # freed again
 
     def test_a_second_run_while_one_is_suspended_is_refused(self):
@@ -497,19 +499,169 @@ class GuardCoverageTests(unittest.TestCase):
             with session:
                 old = session.run(iter(frames(5)), lambda *a: None)
                 next(old)
-            with self.assertRaises(RuntimeError):  # closed
+                unstarted = session.run(iter(frames(5)), lambda *a: None)
+            with self.assertRaises(StopIteration):  # closed with its block
                 next(old)
+            with self.assertRaises(StopIteration):
+                next(unstarted)
             with session:
                 old2 = session.run(iter(frames(5)), lambda *a: None)
                 next(old2)
                 old2_guard = session.guard
             with session:  # reopened: the old iterator may not charge or use the new block
-                with self.assertRaises(RuntimeError) as caught:
+                with self.assertRaises(StopIteration):
                     next(old2)
-                self.assertIn("ended", str(caught.exception))
                 self.assertEqual(session.guard.attempts, 0)
                 self.assertIsNot(session.guard, old2_guard)
                 self.assertEqual(len(list(session.run(frames(2), lambda *a: None))), 2)
+
+
+    def test_a_memory_breach_sticks_even_when_caught_and_memory_drops(self):
+        reads = iter([100, 5000] + [100] * 10)  # after setup, frame 1 over the limit, then back under it
+        decoded, ran = [], []
+
+        def read(path):
+            decoded.append(path.name)
+            return f"pixels of {path.name}"
+
+        with Fakes() as fakes, patch.object(probe, "read_frame", read):
+            with self.assertRaises(replay.ReplayLimit) as at_exit:  # the block's end is refused as well
+                with replay.Replay(rss=lambda: next(reads),
+                                   limits=replay.Limits(rss_every=1, max_rss_bytes=1000)) as session:
+                    try:
+                        list(session.run(frames(3), lambda r, p, i: ran.append(p.name)))
+                    except probe.ProbeError:  # a scratch script skipping "bad frames" catches the limit too
+                        pass
+                    for retry in (lambda: list(session.run(frames(1), lambda r, p, i: ran.append(p.name))),
+                                  lambda: session.guard.before_decode()):
+                        with self.assertRaises(replay.ReplayLimit) as caught:
+                            retry()
+                        self.assertIn("already hit", str(caught.exception))
+        self.assertIn("already hit", str(at_exit.exception))
+        self.assertEqual((decoded, ran), (["frame-000.png"], ["frame-000.png"]))  # nothing decoded after the breach
+        self.assertEqual(fakes.events, ["release recognizer", "destroy Controller"])
+
+    def test_an_explicit_close_after_a_break_is_checked_before_freeing(self):
+        reads = iter([100, 5000])  # after setup, then at the close
+        freed_at_check = []
+        with Fakes() as fakes:
+            def rss():
+                freed_at_check.append(list(fakes.events))
+                return next(reads)
+
+            with self.assertRaises(replay.ReplayLimit):
+                with replay.Replay(rss=rss, limits=replay.Limits(max_rss_bytes=3000)) as session:
+                    try:
+                        for _ in session.run(frames(10), lambda *a: "found"):
+                            break
+                    finally:
+                        session.close()  # checks before freeing, and frees all even though the check raises
+        self.assertEqual(freed_at_check, [[], []])  # nothing was freed when either read happened
+        self.assertEqual(fakes.events, ["release recognizer", "destroy Controller"])  # once, not again at the exit
+
+    def test_kept_iterators_recognizers_and_controllers_do_not_keep_the_pixels(self):
+        class Pixels:
+            pass
+
+        made = []
+
+        def read(path):
+            pixels = Pixels()
+            made.append(weakref.ref(pixels))
+            return pixels
+
+        class Controller:  # keeps no history, unlike FakeController
+            def __init__(self):
+                self.image = None
+
+            def show(self, image):
+                self.image = image
+
+        with Fakes(), patch.object(probe, "frame_controller", Controller), patch.object(probe, "read_frame", read):
+            session = replay.Replay(rss=no_rss)
+            with session:
+                iterator = session.run(frames(3), lambda r, p, image: r.on_one_frame(lambda captured: None))
+                next(iterator)  # suspended with its frame's locals
+                recognizer, controller = session.recognizer, session.controller
+                self.assertIsNotNone(made[0]())
+            gc.collect()
+            self.assertEqual([ref() for ref in made], [None])  # freed although all three are still referenced
+            self.assertIsNone(controller.image)
+            self.assertIs(recognizer.controller, controller)
+            with self.assertRaises(StopIteration):
+                next(iterator)
+
+
+class DiscoveryTests(unittest.TestCase):
+    """The tools list their frames inside the replay's limits, never past the frame limit."""
+
+    def test_collect_is_sorted_bounded_and_clocked(self):
+        guard = replay.Guard(replay.Limits(max_frames=3)).start()
+        self.assertEqual(guard.collect(iter([Path("c"), Path("a"), Path("b")])), [Path("a"), Path("b"), Path("c")])
+        pulled = []
+
+        def endless():
+            while True:
+                pulled.append(1)
+                yield Path(f"{len(pulled):09d}.png")
+
+        with self.assertRaises(replay.ReplayLimit):
+            guard.collect(endless())
+        self.assertEqual(len(pulled), 4)  # stopped one past the limit: a large tree is never listed whole
+        self.assertEqual(len(guard.collect(iter([Path("x")] * 10), limit=12)), 10)
+        clock = iter([0.0, 1.0, 9.0])
+        with patch.object(replay, "time", SimpleNamespace(monotonic=lambda: next(clock))):
+            slow = replay.Guard(replay.Limits(max_seconds=5)).start()
+            with self.assertRaises(replay.ReplayLimit):
+                slow.collect(iter([Path("a"), Path("b")]))
+
+    def test_move_frames_lists_its_screens_inside_the_replay(self):
+        import move_frames
+        with tempfile.TemporaryDirectory() as folder:
+            run = Path(folder, "phase-e-measure", "m2-test")
+            run.mkdir(parents=True)
+            images(run, [(72, 128)] * 5, [f"t{i}-hud.png" for i in range(5)])
+            for all_frames in (False, True):
+                with self.subTest(all_frames=all_frames), Fakes() as fakes:
+                    with self.assertRaises(replay.ReplayLimit) as caught:
+                        move_frames.screens(Path(folder), all_frames, replay.Limits(max_frames=3))
+                    self.assertIn("more than 3 frames", str(caught.exception))
+                    self.assertEqual(fakes.events, ["release recognizer", "destroy Controller"])  # the block was open
+                    self.assertEqual(fakes.controllers[0].shown, [None])  # no frame shown
+
+    def test_teleport_frames_loads_the_map_and_lists_frames_inside_the_replay(self):
+        import teleport_frames
+        order = []
+        with tempfile.TemporaryDirectory() as folder:
+            images(Path(folder), [], [])
+            frames_dir = Path(folder, "map-survey", "frames")
+            frames_dir.mkdir(parents=True)
+            images(frames_dir, [(72, 128)] * 2, ["a.png", "b.png"])
+            walk = Path(folder, "survey", "walk")
+            walk.mkdir(parents=True)
+            images(walk, [(72, 128)], ["w.png"])
+            with Fakes() as fakes, patch("host.android.teleport.WorldMap", lambda **k: order.append("world")), \
+                    patch.object(sys, "argv", ["teleport_frames.py", "--build", folder, "--max-frames", "2"]), \
+                    contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(teleport_frames.main(), 2)
+        self.assertEqual(order, ["world"])
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("more than 0 frames", err.getvalue())  # 2 map frames left no room for the walk frame
+        self.assertEqual(fakes.events, ["release recognizer", "destroy Controller"])
+
+    def test_the_measurement_pass_checks_after_building_its_report(self):
+        import move_frames
+        order = []
+        median = move_frames.statistics.median
+        with tempfile.TemporaryDirectory() as folder:
+            build = MeasurePassTests.build(folder, 2)
+            with patch("host.android.minimap.MinimapReader", MeasurePassTests.reader), \
+                    patch.object(replay, "current_rss", no_rss), \
+                    patch.object(replay.Guard, "finish", lambda self: order.append("finish")), \
+                    patch.object(move_frames.statistics, "median", lambda *a: order.append("report") or median(*a)):
+                move_frames.measure(build)
+        self.assertIn("report", order)
+        self.assertEqual(order[-1], "finish")
 
 
 class ReleaseTests(unittest.TestCase):

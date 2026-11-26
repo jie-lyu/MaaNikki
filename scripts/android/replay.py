@@ -38,6 +38,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import weakref
 from typing import Any, Callable, Iterable, Iterator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -159,6 +160,7 @@ class Guard:
         self._peak = peak if peak is not None else process_peak_rss
         self.attempts = 0        # decodes attempted, skipped frames included
         self.peak_rss = 0        # bytes: the highest RSS read or high-water mark seen
+        self.breached = None     # the memory limit's message once it was hit: everything after is refused
         self._started = None
 
     def start(self, count: int | None = None) -> "Guard":
@@ -173,15 +175,37 @@ class Guard:
             raise ReplayLimit(f"stopped after {self.attempts} frames: {self.limits.max_seconds:g} s wall-time "
                               f"limit reached")
 
+    def check_breach(self) -> None:
+        """A memory breach sticks: caught or not, and even if memory has dropped since, nothing more runs."""
+        if self.breached:
+            raise ReplayLimit(f"refused: the memory limit was already hit ({self.breached})")
+
     def check_memory(self) -> None:
+        self.check_breach()
         rss = self._rss()
         self.peak_rss = max(self.peak_rss, rss, self._peak())
         if rss > self.limits.max_rss_bytes:
+            self.breached = (f"this process used {rss / GB:.2f} GB after {self.attempts} frames, above the "
+                             f"{self.limits.max_rss_bytes / GB:.2f} GB limit")
             raise ReplayLimit(f"stopped after {self.attempts} frames: this process uses {rss / GB:.2f} GB, "
                               f"above the {self.limits.max_rss_bytes / GB:.2f} GB limit (frames are not being freed?)")
 
+    def collect(self, paths: Iterable[Path], limit: int | None = None) -> list[Path]:
+        """Discovered paths, sorted, refused as soon as there are more than `limit` (default max_frames) so a large
+        tree is never listed whole; the clock is checked while walking."""
+        limit = self.limits.max_frames if limit is None else limit
+        found = []
+        for path in paths:
+            self.check_time()
+            found.append(path)
+            if len(found) > limit:
+                raise ReplayLimit(f"refused: more than {limit} frames found, above the frame limit "
+                                  f"(raise it explicitly, e.g. --max-frames, if this is intended)")
+        return sorted(found)
+
     def before_decode(self) -> None:
         """Reserve one attempt (it counts even if the decode or the work on the frame then fails)."""
+        self.check_breach()
         self.check_time()
         if self.attempts >= self.limits.max_frames:
             raise ReplayLimit(f"stopped at the {self.limits.max_frames}-frame limit")
@@ -214,6 +238,7 @@ class Replay:
         self._open = False
         self._generation = 0     # one per with block: an iterator of an earlier block is refused
         self._running = None     # the token of the run() iterator in progress
+        self._iterators = weakref.WeakSet()  # this block's run() iterators, closed when it ends
 
     @property
     def peak_rss(self) -> int:
@@ -225,6 +250,7 @@ class Replay:
         self._open = True
         self._generation += 1
         self._running = None
+        self._iterators = weakref.WeakSet()
         self.guard, self.frames = Guard(self.limits, rss=self._rss, peak=self._peak), 0
         try:
             self.guard.start()  # setup counts toward the wall time
@@ -233,30 +259,48 @@ class Replay:
             self.guard.check_time()
             self.guard.check_memory()
         except BaseException:
-            self.close()
+            self._close(check=False)
             raise
         return self
 
     def __exit__(self, exc_type, *exc) -> None:
-        try:
-            if exc_type is None:  # a caller that stopped early (break) is checked too, before anything is freed
-                self.guard.finish()
-        finally:
-            self.close()
+        self._close(check=exc_type is None)  # an exception already on its way is not replaced by a limit
 
     def close(self) -> None:
-        """Free the tasker, the resource and the controller (in that order). Safe to call twice."""
+        """End the block: the guard's last check first (a caller that stopped early is checked too), then, also when
+        that check raises, close this block's iterators and free the tasker, the resource and the controller (in that
+        order). Only the first call does anything."""
+        self._close(check=True)
+
+    def _close(self, check: bool) -> None:
+        if not self._open:
+            return
+        try:
+            if check:
+                self.guard.finish()
+        finally:
+            self._teardown()
+
+    def _teardown(self) -> None:
         recognizer, controller = self.recognizer, self.controller
         self.recognizer = self.controller = None
+        self._open, self._running = False, None
+        iterators, self._iterators = list(self._iterators), weakref.WeakSet()
         try:
-            if recognizer is not None:
-                recognizer.release()
+            for iterator in iterators:  # a suspended iterator holds the last image and result in its frame
+                try:
+                    iterator.close()
+                except ValueError:
+                    pass  # the one running right now (close() from its callback): it stops at its next frame
+            if controller is not None:
+                controller.show(None)  # a recognizer kept by the caller still points at the controller
         finally:
             try:
+                if recognizer is not None:
+                    recognizer.release()
+            finally:
                 if controller is not None:
                     probe.destroy_native(controller)
-            finally:
-                self._open, self._running = False, None
 
     def run(self, paths: Iterable[Path], callback: Callable[[Any, Path, Any], Any], *,
             accept: Callable[[Any], bool] | None = None) -> Iterator[tuple[Path, Any]]:
@@ -270,7 +314,9 @@ class Replay:
         """
         if self.recognizer is None:
             raise RuntimeError("Replay.run outside its with block")
-        return self._run(self._generation, paths, callback, accept)
+        iterator = self._run(self._generation, paths, callback, accept)
+        self._iterators.add(iterator)
+        return iterator
 
     def _check_current(self, generation: int, token) -> None:
         if not self._open or self._generation != generation:
@@ -283,6 +329,7 @@ class Replay:
         if self._running is not None:
             raise RuntimeError("another run() of this Replay is in progress: finish or close it first")
         self._check_current(generation, None)
+        self.guard.check_breach()
         self._running = token
         try:
             guard = self.guard
@@ -308,9 +355,11 @@ class Replay:
                     guard.after_frame()  # the failed attempt is counted and checked (a limit hit replaces the error)
                     raise
                 guard.after_frame()
+                image = None  # not kept while the iterator waits
                 if skipped:
                     continue
                 yield path, result
+                result = None
             self._check_current(generation, token)
             guard.finish()
         finally:

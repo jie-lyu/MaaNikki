@@ -143,11 +143,15 @@ def main() -> int:
     args = parser.parse_args()
     build = Path(args.build)
     from host.android.teleport import WorldMap
-    world = WorldMap(resource=ROOT / "resource")
-    frames = sorted((build / "map-survey" / "frames").glob("*.png")) + sorted((build / "survey" / "walk").glob("*.png"))
     try:
-        # one recognizer for every frame, under the replay's frame, time and memory limits
+        # one recognizer for every frame, under the replay's frame, time and memory limits (from before the world
+        # map is loaded and the frames are listed)
         with replay.Replay(limits=replay.limits_from(args)) as session:
+            world = WorldMap(resource=ROOT / "resource")
+            session.guard.check_memory()
+            frames = session.guard.collect((build / "map-survey" / "frames").glob("*.png"))
+            frames += session.guard.collect((build / "survey" / "walk").glob("*.png"),
+                                            limit=session.limits.max_frames - len(frames))
             for path, result in session.run(frames, lambda recognizer, path, image:
                                             recognizer.on_one_frame(judge(world, image))):
                 print(json.dumps({"frame": f"{path.parent.name}/{path.name}", **result}, ensure_ascii=False))

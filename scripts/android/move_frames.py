@@ -116,8 +116,7 @@ def measure(build: Path, limits=None) -> dict:
                 predicted = (before["head"] + record["angle"] - 270) % 360
                 actual = move.bearing(settled["x"] - before["x"], settled["y"] - before["y"])
                 angle_errors.append((actual - predicted + 180) % 360 - 180)
-    guard.finish()
-    return {
+    report = {
         "fixes": {"n": len(deviations), "max_deviation_from_log_u": round(max(deviations), 3),
                   "score_min": round(min(scores), 3), "score_median": round(statistics.median(scores), 3),
                   "ms_median": round(statistics.median(timings), 1), "ms_max": round(max(timings), 1)},
@@ -129,6 +128,8 @@ def measure(build: Path, limits=None) -> dict:
         "angle_error_deg": {"n": len(angle_errors), "median_abs": round(statistics.median(map(abs, angle_errors)), 1),
                             "max_abs": round(max(map(abs, angle_errors)), 1)},
     }
+    guard.finish()  # after the report is built
+    return report
 
 
 LATER = ("reviews", "phase-e-walk", "heading-investigation")  # not in the --all-frames set (prefixes: every walk run)
@@ -137,11 +138,16 @@ LATER = ("reviews", "phase-e-walk", "heading-investigation")  # not in the --all
 def screens(build: Path, all_frames: bool = False, limits=None):
     import replay
     from host.android import actions, move
-    if all_frames:
-        frames = sorted(p for p in build.glob("*/**/*.png") if not p.relative_to(build).parts[0].startswith(LATER))
-    else:
-        frames = sorted((build / "phase-e-measure").glob("m*/*-hud.png")) + \
-            sorted(p for p in (build / "phase-e-measure").glob("m*/*.png") if not p.name.endswith("-hud.png"))[::6]
+    limits = limits or replay.Limits()
+
+    def discover(guard):  # sorted, but never listed past the frame limit
+        if all_frames:
+            return guard.collect(p for p in build.glob("*/**/*.png")
+                                 if not p.relative_to(build).parts[0].startswith(LATER))
+        measured = build / "phase-e-measure"
+        return guard.collect(measured.glob("m*/*-hud.png")) + \
+            guard.collect((p for p in measured.glob("m*/*.png") if not p.name.endswith("-hud.png")),
+                          limit=6 * limits.max_frames + 5)[::6]
 
     def judge_frame(recognizer, path, image):
         def judge(recognize):
@@ -175,7 +181,8 @@ def screens(build: Path, all_frames: bool = False, limits=None):
 
     counts, odd, near = {}, [], []
     # one recognizer for every frame, under the replay's frame, time and memory limits
-    with replay.Replay(limits=limits or replay.Limits()) as session:
+    with replay.Replay(limits=limits) as session:  # its clock and first memory read come before the discovery
+        frames = discover(session.guard)
         for path, verdict in session.run(frames, judge_frame,
                                          accept=lambda image: image is not None and image.shape[:2] == (720, 1280)):
             if verdict is None:
