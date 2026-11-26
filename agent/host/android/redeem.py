@@ -121,17 +121,15 @@ class Record:
     def outcomes(self) -> dict:
         return {code: entry["outcome"] for code, entry in self.load()["items"].items()}
 
-    def record(self, code, outcome, detail=""):
+    def record(self, code, outcome):
+        """Keep ``outcome`` (the classified result only: never the banner's text) for ``code``."""
         from file_io import exclusive_file_lock, write_json
         clean = str(code or "").strip()
         if not clean or len(clean) > 40 or any(ch.isspace() for ch in clean) or outcome not in RECORD_OUTCOMES:
             raise ValueError("兑换码或处理结果无效")
         with exclusive_file_lock(self.path.with_name("redeem_codes.lock")):
             data = self.load()
-            entry = {"outcome": outcome, "confirmed_at": datetime.now(timezone.utc).isoformat()}
-            if detail:
-                entry["detail"] = str(detail)[:120]
-            data["items"][clean] = entry
+            data["items"][clean] = {"outcome": outcome, "confirmed_at": datetime.now(timezone.utc).isoformat()}
             write_json(self.path, data)
 
 
@@ -638,11 +636,19 @@ OUTCOME_LOGS = {
 }
 
 
-def redeem_all(rt, record, pending) -> bool:
+ACCOUNT_CHANGED = "确认游戏账号之后焦点变过（可能换了账号）"
+
+
+def redeem_all(rt, record, pending, binding) -> bool:
+    """Each pending code once, while ``binding`` (the account whose record decided ``pending``, host.android.account)
+    stays valid: a focus change since its confirming frame stops before the next submit and before a result is
+    recorded (the modal shows no UID to confirm the account again)."""
     last_use, redeemed = None, 0
     for code in pending:
         if rt.stopped:
             return False
+        if not binding.valid(rt):
+            raise Stop(f"{ACCOUNT_CHANGED}，没有再提交兑换码", [])
         if not fill(rt, code):
             return False
         if last_use is not None:
@@ -653,12 +659,14 @@ def redeem_all(rt, record, pending) -> bool:
         last_use = time.monotonic()
         if result is None:
             return False
-        outcome, detail, _frame = result
+        outcome, _detail, _frame = result
         if outcome == "layer":
             if not confirm_success(rt, code):
                 return False
             outcome, redeemed = "redeemed", redeemed + 1
-        record.record(code, outcome, detail)
+        if not binding.valid(rt):
+            raise Stop(f"{ACCOUNT_CHANGED}，兑换码「{code}」的结果没有记录", [])
+        record.record(code, outcome)
         rt.log(OUTCOME_LOGS[outcome].format(code=code))
         if outcome == "cooldown":
             last_use += USE_COOLDOWN_SECONDS  # the next code waits twice the spacing
@@ -689,12 +697,13 @@ def guarded(rt, step) -> bool:
     return False
 
 
-def identify(rt):
-    """The account key (host.android.account.identify on the HUD just reached), None when stopped; an account that
-    cannot be told refuses the task with its frames saved: nothing submitted, nothing skipped, nothing recorded."""
+def account_step(rt, step):
+    """``step()`` (host.android.account.identify or confirm): its Binding, None when stopped; an account that cannot
+    be told (or is not the one told before) refuses the task with its frames saved: nothing submitted, nothing
+    skipped, nothing recorded."""
     from host.android import account
     try:
-        return account.identify(rt)
+        return step()
     except account.Unidentified as error:
         for index, frame in enumerate(error.frames):
             rt.diagnostic(f"android_redeem_stop_{index}", str(error), image=frame)
@@ -704,23 +713,33 @@ def identify(rt):
 
 def run(rt, collected=None) -> bool:
     from app_paths import DATA_ROOT
+    from host.android import account
     # Back on the HUD first (a stop after the last code may have left the modal open), then the account from the HUD,
     # and only then the record: which codes are pending depends on whose record it is.
     if not guarded(rt, lambda: to_hud(rt, "开始前回到大世界", any_page=True)) or rt.stopped:
         return False
-    key = identify(rt)
-    if key is None or rt.stopped:
+    binding = account_step(rt, lambda: account.identify(rt))
+    if binding is None or rt.stopped:
         return False
     try:
-        record = Record(DATA_ROOT, key)
-        pending = pending_codes(candidates(rt) if collected is None else collected, record.outcomes())
+        codes = candidates(rt) if collected is None else collected  # may block (online sync)
+    except (OSError, ValueError) as error:
+        return fail(rt, f"读不了兑换码列表（{error}）")
+    # Right before the record decides which codes are skipped and which submitted: the account confirmed once more on
+    # a fresh HUD (another account may have come in during the collection).
+    binding = account_step(rt, lambda: account.confirm(rt, binding))
+    if binding is None or rt.stopped:
+        return False
+    try:
+        record = Record(DATA_ROOT, binding.key)
+        pending = pending_codes(codes, record.outcomes())
     except (OSError, ValueError) as error:
         return fail(rt, f"读不了安卓兑换码记录（{error}）")
     if not pending:
         rt.log("兑换码领取：暂无待兑换的新兑换码，跳过。")
         return True
     rt.log(f"兑换码领取：待尝试 {len(pending)} 个兑换码。")
-    done = guarded(rt, lambda: open_settings(rt) and open_modal(rt) and redeem_all(rt, record, pending))
+    done = guarded(rt, lambda: open_settings(rt) and open_modal(rt) and redeem_all(rt, record, pending, binding))
     # The way back only after a successful result: after a stop, a guard refusal or a fatal error nothing more is sent.
     if not done or rt.stopped:
         return False

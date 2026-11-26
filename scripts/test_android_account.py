@@ -1,4 +1,5 @@
-"""Android game account (agent/host/android/account.py) and the per-account records: python scripts/test_android_account.py
+"""Android game account (agent/host/android/account.py) and the per-account records:
+python scripts/test_android_account.py
 
 The saved device frames show the UID, so none is in the repository (the fixtures are UID-free crops): the UID text
 here is constructed OCR output at the place and size the device frames read it (box ~[0,700,90,18]), with made-up
@@ -24,7 +25,8 @@ import numpy as np  # noqa: E402
 from host.android import account, crystal_route, move, pages, redeem  # noqa: E402
 from host.android.actions import Screen  # noqa: E402
 
-UID_A, UID_B = "123456789", "987654321"  # made up
+UID_A = "123456789"  # the documented fake UID (scripts/check_uid_literals.py)
+UID_B = UID_A[::-1]  # a second made-up one, derived from it
 UID_BOX = [0, 700, 90, 18]  # where the device frames read the UID (move's tests and the saved sequences)
 HUD = Screen("hud", {"duck": [30, 18, 54, 54]})
 PAGE = Screen("page", {"back": [37, 22, 40, 40]}, title="设置")
@@ -111,30 +113,45 @@ class ReadTests(unittest.TestCase):
         self.assertEqual(read(corner, labels=False)[0], None)  # the OCR pass itself must read the label row
         self.assertEqual(account.read_uid(HUD, recognizer(None)), (None, "全画面文字识别没能完成"))
 
-    def test_the_slot_is_the_walkers_and_lies_under_the_diagnostic_mask(self):
-        # Geometry from the saved device frames: the UID's box (~[0,700,90,18]; text rows y 703-714), move's UID
-        # region and slot, and the area diagnostics black out (resource/data/diagnostic_images.json).
+    def test_the_uid_box_is_the_footers_and_lies_under_the_diagnostic_mask(self):
+        # Geometry from the saved device frames (full reads x0 0-1, y0 698-701, height 15-19, right edge 86-89), the
+        # area diagnostics black out (resource/data/diagnostic_images.json) and move's UID region.
         region = dict(move.HUD_REGIONS)["uid"]
-        slot = next(s for s in move.HUD_SLOTS if s[0] == "uid")
         mask = json.loads((ROOT / "resource/data/diagnostic_images.json").read_text(encoding="utf-8"))["uid_roi"]
-        x, y, w, h = UID_BOX
-        self.assertTrue(move._inside(UID_BOX, region))
-        self.assertTrue(x < slot[2] and slot[1] < x + w and abs(y + h / 2 - slot[3]) <= move.BLOCK_PX)
+        for box in (UID_BOX, [1, 701, 85, 15], [0, 698, 88, 19]):
+            self.assertTrue(account.in_footer(box) and move._inside(box, region), box)
         mx, my, mw, mh = mask
-        for box in (UID_BOX, [slot[1], int(slot[3] - h / 2), slot[2] - slot[1], h]):
-            self.assertTrue(mx <= box[0] and box[0] + box[2] <= mx + mw and my <= box[1]
-                            and box[1] + box[3] <= my + mh, box)
-        # a masked frame (as every saved diagnostic frame): nothing is read there, so no account
+        self.assertTrue(mx <= account.UID_BOX_X0[0] and account.UID_BOX_X1[1] <= mx + mw
+                        and my <= account.UID_BOX_Y0[0] and my + mh == 720)  # down to the frame's bottom
+        # account review round 1, finding 3: a D-prefixed number starting at x 91 (one pixel into the old slot),
+        # a box shifted, too tall or too short is no UID read
+        for box in ([91, 700, 90, 18], [10, 700, 85, 18], [0, 680, 88, 18], [0, 700, 88, 30], [0, 700, 60, 18]):
+            with self.subTest(box=box):
+                self.assertFalse(account.in_footer(box))
+                self.assertIsNone(read((f"D{UID_A}", box))[0])
+        x, y, w, h = UID_BOX
         frame = np.full((720, 1280, 3), 200, np.uint8)
         from diagnostics import diagnostic_image
         masked, _box = diagnostic_image(frame)
         self.assertEqual(int(masked[y:y + h, x:x + w].max()), 0)
 
+    def test_only_labels_read_as_themselves_count(self):
+        # Account review round 1, finding 3: a misread block covering the label row counts no label here (the
+        # walker's labels count includes covered places; the account reader needs MIN_LABELS read positively).
+        misread = (("商城共鸣奇迹之旅活动人厅奇想日历无限之心任务设计图换装", [630, 62, 620, 22]),)
+        rows = [Row(*row) for row in misread + OTHER_HUD + ((f"UID {UID_A}", UID_BOX),)]
+        self.assertGreaterEqual(move.read_rows(Ocr(rows)).labels, move.MIN_LABELS)
+        self.assertEqual(move.read_rows(Ocr(rows)).read_labels, frozenset())
+        self.assertEqual(account.read_uid(HUD, recognizer(Ocr(rows))),
+                         (None, "全画面文字里没有在原位读到大世界的快捷栏"))
+        self.assertEqual(len(move.read_rows(ocr()).read_labels), len(move.LABEL_CENTRES))
+
 
 def rt_with(frames, *, valid=True, pause=True):
-    """A runtime whose captures (pages.screen_now) are ``frames``: [(screen, corner rows) or None (stopped)]."""
-    rt = SimpleNamespace(stopped=False, logs=[], pause=Mock(return_value=pause),
-                         _frame_still_valid=Mock(return_value=valid))
+    """A runtime whose captures (pages.screen_now) are ``frames``: [(screen, corner rows) or None (stopped)];
+    ``valid``: every focus check's answer, or the answers in turn (a list)."""
+    checks = Mock(side_effect=list(valid)) if isinstance(valid, list) else Mock(return_value=valid)
+    rt = SimpleNamespace(stopped=False, logs=[], pause=Mock(return_value=pause), _frame_still_valid=checks)
     rt.log = rt.logs.append
     shots = []
     for item in frames:
@@ -163,9 +180,9 @@ class IdentifyTests(unittest.TestCase):
     """Two separate frames that agree; anything else refuses; the UID itself is never given out."""
 
     def test_two_agreeing_frames_give_the_key(self):
-        key, error, captures, rt = identify([A, A])
+        binding, error, captures, rt = identify([A, A])
         self.assertIsNone(error)
-        self.assertEqual((key, captures), (account.account_key(UID_A), 2))
+        self.assertEqual((binding.key, captures), (account.account_key(UID_A), 2))
         rt.pause.assert_called_once_with(account.READ_GAP_S)  # the two captures are apart, nothing sent between
 
     def test_disagreeing_frames_refuse(self):
@@ -187,6 +204,9 @@ class IdentifyTests(unittest.TestCase):
     def test_a_stale_or_repeated_frame_refuses(self):
         key, error, _captures, _rt = identify([A, A], valid=False)
         self.assertEqual((key, str(error)), (None, "读游戏账号时焦点变了"))
+        # account review round 1, finding 2: a focus change during the second OCR voids both frames
+        key, error, _captures, _rt = identify([A, A], valid=[True, True, True, False])
+        self.assertEqual((key, str(error), len(error.frames)), (None, "读游戏账号时焦点变了", 2))
         rt, shots = rt_with([A])
         with patch.object(pages, "screen_now", side_effect=[shots[0], shots[0]]):
             with self.assertRaises(account.Unidentified) as caught:
@@ -208,6 +228,45 @@ class IdentifyTests(unittest.TestCase):
                 self.assertNotIn(UID_B[:6], text)
 
 
+class ConfirmTests(unittest.TestCase):
+    """One fresh HUD read must equal the key told before; the binding is void after any focus change."""
+
+    def confirm(self, corner, *, valid=True, frame=True):
+        rt = SimpleNamespace(_frame_still_valid=Mock(side_effect=valid if callable(valid) else lambda f: valid))
+        shot = np.zeros((720, 1280, 3), np.uint8)
+        rt._fresh_device_frame = Mock(return_value=shot if frame else None)
+        rt._recognizer_on = lambda f: recognizer(ocr(*corner))
+        binding = account.Binding(account.account_key(UID_A), "earlier frame")
+        with patch("host.android.actions.read_screen", return_value=HUD):
+            try:
+                return account.confirm(rt, binding), None, shot
+            except account.Unidentified as error:
+                return None, error, shot
+
+    def test_the_same_account_renews_the_binding_on_the_fresh_frame(self):
+        renewed, error, shot = self.confirm(((f"UID {UID_A}", UID_BOX),))
+        self.assertIsNone(error)
+        self.assertEqual((renewed.key, renewed.frame is shot), (account.account_key(UID_A), True))
+
+    def test_another_account_an_unreadable_uid_or_a_focus_change_refuses(self):
+        cases = {"another account": (((f"UID {UID_B}", UID_BOX),), True, "现在登录的不是开始时认出的那个游戏账号"),
+                 "unreadable": (((f"UID {UID_A[:8]}", UID_BOX),), True, "左下角 UID 的位置读到了不完整或别的文字"),
+                 "focus change": (((f"UID {UID_A}", UID_BOX),), False, "确认游戏账号时焦点变了")}
+        for name, (corner, valid, reason) in cases.items():
+            with self.subTest(name):
+                renewed, error, _shot = self.confirm(corner, valid=valid)
+                self.assertIsNone(renewed)
+                self.assertEqual(str(error), reason)
+                self.assertNotIn(UID_B[:5], account.refusal(error))
+        self.assertEqual(self.confirm(((f"UID {UID_A}", UID_BOX),), frame=False)[:2], (None, None))  # stopped
+
+    def test_a_binding_is_void_after_a_focus_change(self):
+        frame = object()
+        binding = account.Binding("0" * 16, frame)
+        self.assertTrue(binding.valid(SimpleNamespace(_frame_still_valid=lambda f: f is frame)))
+        self.assertFalse(binding.valid(SimpleNamespace(_frame_still_valid=lambda f: False)))
+
+
 class PatternTests(unittest.TestCase):
     def test_the_walkers_uid_slot_shares_the_account_pattern(self):
         # One prefix for both (no drift); the walker also lets a cut-short UID through (it judges the layout only),
@@ -217,7 +276,7 @@ class PatternTests(unittest.TestCase):
             self.assertTrue(move.UID_FORM.fullmatch(text) and account._uid_text(text) == UID_A, text)
         self.assertTrue(move.UID_FORM.fullmatch(f"UID {UID_A[:8]}"))
         self.assertIsNone(account._uid_text(f"UID {UID_A[:8]}"))
-        for text in ("UID1234567A9", f"UID:{UID_A}", f"XUID{UID_A}"):
+        for text in ("UID1234567A9", f"UID:{UID_A}", f"XUID{UID_A}", "46ms"):  # a ping is judged by its place
             self.assertFalse(move.UID_FORM.fullmatch(text) or account._uid_text(text), text)
 
 
@@ -299,51 +358,88 @@ class RecordTests(unittest.TestCase):
 
 
 class ScrubTests(unittest.TestCase):
-    """Failure scenes on Android keep no UID in their text (the image is masked by diagnostics)."""
+    """What Android writes or shows keeps no UID in its text (the image is masked by diagnostics); the desktop is
+    unchanged."""
 
-    def test_uid_like_text_is_masked_and_other_numbers_kept(self):
-        for text in (f"UID {UID_B}", f"LID{UID_B}", f"UID-{UID_B[:5]}", f"读到「{UID_B}」", f"x{UID_B}0"):
-            with self.subTest(text=text):
+    def test_uid_like_text_numbers_and_keys_are_masked_and_other_numbers_kept(self):
+        for text in (f"UID {UID_B}", f"LID{UID_B}", f"UID-{UID_B[:5]}", f"读到「{UID_B}」", f"UID：{UID_B}",
+                     f"page {UID_B} title", "UID " + "".join(chr(0xFF10 + int(d)) for d in UID_B)):
+            with self.subTest(text=len(text)):
                 self.assertNotIn(UID_B[:5], account.scrub(text))
                 self.assertIn(account.UID_MASK, account.scrub(text))
-        for text in ("46ms", "1049米", "X10000", "本周限购0/1", "-25%", "2026-11-26T00:00:00", "¥648"):
+        for text in ("46ms", "1049米", "X10000", "本周限购0/1", "-25%", "2026-11-26T00:00:00", "¥648",
+                     "on_error/20261126-031003-668252-action_exception-f22705bb.jpg", "ab12345678cd"):
             with self.subTest(text=text):
                 self.assertEqual(account.scrub(text), text)
-        nested = {"rows": [(f"UID {UID_B}", [0, 700, 90, 18])], "score": 0.9, "n": 123456789012}
+        nested = {"rows": [(f"UID {UID_B}", [0, 700, 90, 18])], "score": 0.9, "n": 123456789012, "uid": int(UID_B),
+                  UID_B: True, "ok": True}
         self.assertEqual(account.scrub(nested), {"rows": [(account.UID_MASK, [0, 700, 90, 18])], "score": 0.9,
-                                                 "n": 123456789012})
+                                                 "n": 123456789012, "uid": account.UID_MASK, account.UID_MASK: True,
+                                                 "ok": True})
 
-    def test_an_android_failure_scene_keeps_no_uid(self):
+    def boundaries(self, backend):
+        """A failure scene saved the way registration saves it (FailureEvidence.save), one through
+        Runtime.diagnostic, a message line, and a Runtime.log whose message file cannot be written (the display
+        fallback): every text written or shown, on ``backend``."""
         import diagnostics
+        import message_log
         from daily import runtime
         root = Path(tempfile.mkdtemp())
-        messages = []
+        shown = []
+        evidence = diagnostics.FailureEvidence()
+        evidence.observe("recognition", node=move.SCREEN_TEXT, results=[{"text": f"UID {UID_B}", "score": 0.99}])
         rt = runtime.Runtime.__new__(runtime.Runtime)
-        rt._evidence, rt._focus_generation = diagnostics.FailureEvidence(), 0
-        rt._evidence.observe("recognition", node=move.SCREEN_TEXT, results=[{"text": f"UID {UID_B}", "score": 0.99,
-                                                                              "box": [0, 700, 90, 18]}])
+        rt._evidence, rt._focus_generation = evidence, 0
+        rt.context = SimpleNamespace(run_task=lambda node, override: shown.append(json.dumps(override,
+                                                                                            ensure_ascii=False)))
         frame = np.full((720, 1280, 3), 120, np.uint8)
-        with patch.object(runtime, "active_session", return_value=None), \
+        with patch("host.game_backend", return_value=backend), \
+                patch.object(runtime, "active_session", return_value=None), \
                 patch("host.android_user_stop", return_value=False), \
-                patch.object(runtime, "game_backend", return_value="android"), \
                 patch.object(diagnostics, "DATA_ROOT", root), \
-                patch.object(diagnostics, "write_message", side_effect=lambda text, *a: messages.append(text)):
-            reference = rt.diagnostic("android_test_stop_0", f"守卫拦下了一行「UID {UID_B}」",
-                                      image=frame, details={"row": f"UID {UID_B}", "digits": UID_B})
-        self.assertEqual(reference["image_status"], "saved")
-        written = [path.read_text(encoding="utf-8") for path in (root / "debug/on_error").glob("*.json")]
-        self.assertEqual(len(written), 1)
-        for text in (*written, *messages):
+                patch.object(message_log, "_DIRECTORY", root / "debug/messages"):
+            evidence.save("action_exception", f"异常：页面标题「UID {UID_B}」", details={"row": f"UID {UID_B}"})
+            rt.diagnostic("android_test_stop_0", f"守卫拦下了一行「UID {UID_B}」", image=frame,
+                          details={"digits": UID_B})
+            message_log.write_message(f"详细：UID {UID_B}", f"UID {UID_B}", report=f"UID {UID_B}")
+            with patch.object(runtime, "write_message", return_value=False), \
+                    patch.object(runtime.Runtime, "stopped", False, create=True):
+                rt.log(f"读到 UID {UID_B}")
+        written = [path.read_text(encoding="utf-8") for path in root.rglob("*") if path.suffix in (".json", ".log")]
+        return written, shown
+
+    def test_android_writes_and_shows_no_uid(self):
+        written, shown = self.boundaries("android")
+        self.assertEqual(len([text for text in written if text.lstrip().startswith("{\n")]), 2)  # two scenes
+        self.assertTrue(written and shown)
+        for text in (*written, *shown):
             self.assertNotIn(UID_B[:5], text)
-            self.assertIn(account.UID_MASK, text)
-        # the desktop path is untouched: what it is given is what it saves
-        rt._evidence = Mock()
-        with patch.object(runtime, "active_session", return_value=None), \
-                patch("host.android_user_stop", return_value=False), \
-                patch.object(runtime, "game_backend", return_value="win32"):
-            rt.diagnostic("stage", f"UID {UID_B}", details={"x": UID_B})
-        self.assertEqual(rt._evidence.save.call_args.args[1], f"UID {UID_B}")
-        self.assertEqual(rt._evidence.save.call_args.kwargs["details"], {"x": UID_B})
+        self.assertTrue(all(account.UID_MASK in text for text in written))
+
+    def test_the_desktop_writes_what_it_is_given(self):
+        written, shown = self.boundaries("win32")
+        self.assertTrue(all(UID_B in text for text in written) and all(UID_B in text for text in shown))
+
+
+class ExceptionOutputTests(unittest.TestCase):
+    def test_registration_tracebacks_are_masked_on_android_only(self):
+        import contextlib
+        import io
+        import registration
+        for backend, kept in (("android", False), ("win32", True)):
+            with self.subTest(backend=backend):
+                out = io.StringIO()
+                with patch("host.game_backend", return_value=backend), \
+                        patch.object(registration, "game_backend", return_value=backend), \
+                        patch.object(registration.traceback, "print_exc",
+                                     side_effect=lambda: out.write(registration.traceback.format_exc())), \
+                        contextlib.redirect_stderr(out):
+                    try:
+                        raise RuntimeError(f"页面标题「UID {UID_B}」")
+                    except RuntimeError:
+                        registration._print_exc()
+                self.assertEqual(UID_B in out.getvalue(), kept)
+                self.assertIn("RuntimeError", out.getvalue())
 
 
 class FramesToolTests(unittest.TestCase):

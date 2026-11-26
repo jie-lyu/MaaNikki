@@ -1,17 +1,18 @@
 """Dev-only Android entry MaaNikki_AndroidCrystalRoute: the first 星海 crystal route on the phone client, end to end.
 
-HUD (the game account told from the UID in its corner, host.android.account.identify, nothing sent) -> big map on 星海 ->
-the card read: today's bell rung or not, positively (teleport.card_state: exactly the observed not-rung message, or
-exactly the PC card's three counters; anything else: stop, nothing pressed) -> not rung: stop when the account could not
-be told (nothing pressed: whose bell record applies is unknown), and unless this account already recorded a bell attempt
-for today's game day (then stop: the bell needs a manual check), teleport to 无界枢纽, the minimap fix confirms the hub, the
-attempt recorded, the bell pressed once (~4 s, gesture.bell_step, the one gesture allowed past 1.5 s) decided and
-confirmed on clean HUD frames with the bell button recognised, the map opened again and the card must now read rung
-(still not rung: stop, never a second press) -> teleport to 星梦群屿·主岛 -> xinghai_crystal_3 walked with host.android.move
-(the teleport point as the first position hint, the route's start radius, its jumps and its wait) -> after the walk,
-unless it ended on a screen that stops all input, the map card read again for the 星光结晶 count and the map left by its
-back arrow onto a confirmed HUD (the character stays where the walk ended: on the route, on the ground). Success: the
-walk arrived, both counts read, the final HUD confirmed and no stop requested.
+HUD (the game account told from the UID in its corner, host.android.account.identify, nothing sent; an account that
+cannot be told stops the run here, whatever the card says) -> big map on 星海 -> the card read: today's bell rung or not,
+positively (teleport.card_state: exactly the observed not-rung message, or exactly the PC card's three counters;
+anything else: stop, nothing pressed) -> not rung: unless this account (confirmed again on a fresh HUD right before its
+record decides, Run.confirm_account) already recorded a bell attempt for today's game day (then stop: the bell needs a
+manual check), teleport to 无界枢纽, the minimap fix confirms the hub, the attempt recorded, the bell pressed once (~4 s,
+gesture.bell_step, the one gesture allowed past 1.5 s) decided and confirmed on clean HUD frames with the bell button
+recognised, the map opened again and the card must now read rung (still not rung: stop, never a second press) ->
+teleport to 星梦群屿·主岛 -> xinghai_crystal_3 walked with host.android.move (the teleport point as the first position hint,
+the route's start radius, its jumps and its wait) -> after the walk, unless it ended on a screen that stops all input,
+the map card read again for the 星光结晶 count and the map left by its back arrow onto a confirmed HUD (the character stays
+where the walk ended: on the route, on the ground). Success: the walk arrived, both counts read, the final HUD confirmed
+and no stop requested.
 
 The run starts from the open world: before the map opens the map is not known; the tap that opens it may be decided
 on a name-only tracker (a restart on 星海), and the map must then show the 星海 card positively (Teleport.open_map);
@@ -61,7 +62,8 @@ NOTICE = ("星海星光结晶路线（安卓，开发用）：这个版本固定
 BELL_NOTE = ("如果按铃之后、读到结果之前任务停了：当天的记录会阻止再按一次；可以手动打开星海地图看卡片，"
              "仍显示尚未召唤摇铃就手动摇一次铃；如果铃其实已经响过，不会有任何损失。"
              "按铃记录按游戏账号分开：开始时要在大世界左下角分开截的两张图上读出同样的 UID；"
-             "两次读不出或读到的不一样时，今天的铃如果还没召唤就停下，不传送、不按铃。")
+             "两次读不出或读到的不一样时，任务在打开地图之前就停下，不传送、不按铃；"
+             "按铃之前还会在大世界上再读一次 UID，不是同一个账号就不按。")
 BELL_POINT = (616, 612)  # the bell button's centre on every saved HUD frame (template hit at (616,613))
 BELL_S = 4.0
 AT_POINT_U = 15.0  # the first minimap fix after a teleport lies this close to the point (the walker's own trust aside)
@@ -163,12 +165,14 @@ class BellRecord:
 
 
 class Run:
-    def __init__(self, rt, *, reader=None, world=None, io=None, record=None, identify=None):
+    def __init__(self, rt, *, reader=None, world=None, io=None, record=None, accounts=None):
         self.rt = rt
         self.map = Teleport(rt, world, io=io, reader=reader, now=lambda: now_utc())
         self._record = record
-        self._identify = identify  # host.android.account.identify unless given (tests)
-        self.account_key, self.unidentified = None, None  # set by identify_account at the start
+        if accounts is None:
+            from host.android import account as accounts
+        self.accounts = accounts  # identify, confirm, Unidentified, refusal (host.android.account; tests: a stand-in)
+        self.binding = None  # the account told at the start, renewed by each confirmation
 
     @property
     def reader(self):
@@ -181,37 +185,40 @@ class Run:
     @property
     def record(self) -> BellRecord:
         """The bell record of the account told at the start; RecordError without one (nothing is pressed)."""
-        if self.account_key is None:
+        if self.binding is None:
             raise RecordError(UNIDENTIFIED)
         if self._record is None:
             from app_paths import DATA_ROOT
-            self._record = BellRecord(DATA_ROOT, self.account_key)
-        if self._record.key != self.account_key:
+            self._record = BellRecord(DATA_ROOT, self.binding.key)
+        if self._record.key != self.binding.key:
             raise RecordError(RECORD_BROKEN)
         return self._record
 
     def identify_account(self) -> bool:
-        """The account from the HUD at the start (host.android.account.identify; nothing sent). False when the run
-        stopped; an account that cannot be told is kept (unidentified) and refuses the press when one is needed."""
-        from host.android import account
+        """The account from the HUD at the start (host.android.account.identify; nothing sent), before anything else
+        is done: an account that cannot be told stops the run there, whatever the card would say (Stop). False when
+        the run stopped."""
         try:
-            key = (self._identify or account.identify)(self.rt)
-        except account.Unidentified as error:
-            self.unidentified = error
-            say(self.rt, f"{account.refusal(error)}：今天的铃如果还没召唤，这次不会按。")
-            return not stopping(self.rt)
-        if key is None:
+            binding = self.accounts.identify(self.rt)
+        except self.accounts.Unidentified as error:
+            raise Stop(f"{self.accounts.refusal(error)}，不知道是哪个账号的按铃记录，没有开始", error.frames) from None
+        if binding is None:
             return False
-        self.account_key = key
+        self.binding = binding
         return True
 
-    def refuse_unidentified(self):
-        """Stop (nothing pressed) when the account was not told: whose bell record applies is unknown."""
-        if self.account_key is None:
-            from host.android import account
-            error = self.unidentified
-            reason = account.refusal(error) if error is not None else UNIDENTIFIED
-            raise Stop(f"{reason}，不知道是哪个账号的按铃记录，没有按铃", list(getattr(error, "frames", ())))
+    def confirm_account(self) -> bool:
+        """The account told at the start confirmed on a fresh HUD (one read equal to its key) right before its record
+        decides whether to reserve and press (host.android.account.confirm); Stop when it is not that account or
+        cannot be read, False when the run stopped."""
+        try:
+            binding = self.accounts.confirm(self.rt, self.binding)
+        except self.accounts.Unidentified as error:
+            raise Stop(f"{self.accounts.refusal(error)}，没有按铃", error.frames) from None
+        if binding is None:
+            return False
+        self.binding = binding
+        return True
 
     # -- the bell --
 
@@ -255,18 +262,21 @@ class Run:
         from host.android import gesture, touch_point
         from host.android.move import MAX_DECISION_AGE_S
         from task_control import ForegroundChanged
-        self.refuse_unidentified()
         same_day(day)
-        if self.record.attempt(day) is not None:
-            raise Stop(MANUAL, [])
         for _attempt in range(self.rt.TOUCH_KEY_ATTEMPTS):
+            # The account confirmed on a fresh HUD before its record decides (again after any focus change below).
+            if not self.confirm_account():
+                return False
+            if self.record.attempt(day) is not None:
+                raise Stop(MANUAL, [])
             pair = self.map.hud_pair("按铃", self.bell_target(hub), STARSEA_MAP, (BELL_POINT, BELL_RADIUS_PX),
                                      contact="bell")
             if pair is None:
                 return False
             first, second, box = pair
-            if not (self.rt._frame_still_valid(first.frame) and self.rt._frame_still_valid(second.frame)):
-                continue  # a focus change voided either frame of the pair (route review round 3, finding 7)
+            if not (self.rt._frame_still_valid(first.frame) and self.rt._frame_still_valid(second.frame)
+                    and self.binding.valid(self.rt)):
+                continue  # a focus change voided the pair or the account's confirmation (route r3 finding 7)
             clock = time.monotonic()
             window = same_day(day, [second.frame])  # seconds until the next exclusion window starts
             not_after = min(second.at + MAX_DECISION_AGE_S, clock + window)
@@ -323,7 +333,6 @@ class Run:
             return False
         day = self.map.card_day  # the card's own day (its captures): the record's key, the only day to press on
         if card.kind == "not_rung":
-            self.refuse_unidentified()
             same_day(day, [self.map.card_frame])
             if self.record.attempt(day) is not None:
                 raise Stop(MANUAL, [self.map.card_frame])

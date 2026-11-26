@@ -264,13 +264,16 @@ class Game:
 
 
 ACCOUNT = "0123456789abcdef"  # the account key identify() gives in these runs (host.android.account)
+STARTED, CONFIRMED = object(), object()  # the frames the account was told and confirmed on
 
 
-def play(game, codes=("ABC123",), record=None, identify=None, legacy=None):
-    """``identify``: replaces host.android.account.identify (default: ACCOUNT); ``legacy``: a record written where the
-    data directory kept it before the per-account split."""
+def play(game, codes=("ABC123",), record=None, identify=None, legacy=None, confirm=None, valid=None):
+    """``identify`` / ``confirm``: replace host.android.account.identify and confirm (default: ACCOUNT, told on
+    STARTED and confirmed on CONFIRMED); ``valid``: rt._frame_still_valid (default: every frame current);
+    ``legacy``: a record written where the data directory kept it before the per-account split."""
     rt = SimpleNamespace(stopped=False, logs=[], key=Mock(side_effect=AssertionError("shared named action")),
-                         _frame_still_valid=Mock(return_value=True), pause=Mock(return_value=True),
+                         _frame_still_valid=Mock(side_effect=valid or (lambda frame: True)),
+                         pause=Mock(return_value=True),
                          diagnostic=Mock(), TOUCH_KEY_ATTEMPTS=3, action=game.action)
     rt.log = rt.logs.append
     game.rt = rt
@@ -284,7 +287,10 @@ def play(game, codes=("ABC123",), record=None, identify=None, legacy=None):
                 for code, outcome in items.items()}}), encoding="utf-8")
     with patch.object(pages, "screen_now", side_effect=game.screen_now), \
             patch.object(pages, "send_text", side_effect=game.send_text), \
-            patch.object(account, "identify", side_effect=identify or (lambda rt_: ACCOUNT)), \
+            patch.object(account, "identify",
+                         side_effect=identify or (lambda rt_: account.Binding(ACCOUNT, STARTED))), \
+            patch.object(account, "confirm",
+                         side_effect=confirm or (lambda rt_, binding: account.Binding(binding.key, CONFIRMED))), \
             patch("app_paths.DATA_ROOT", root), \
             patch("time.monotonic", side_effect=itertools.count(0, .25).__next__):
         outcome = redeem.run(rt, [(code, False) for code in codes])
@@ -378,6 +384,36 @@ class FlowTests(unittest.TestCase):
         outcome, rt = play(game, ("A",), identify=lambda rt_: None)  # stopped while reading: no failure line
         self.assertFalse(outcome)
         self.assertEqual((game.touches, rt.logs), ([], []))
+
+    def test_another_account_after_the_collection_is_never_given_the_first_ones_record(self):
+        # Account review round 1, finding 2: the account is confirmed on a fresh HUD after the (blocking) collection
+        # and before the record decides anything; another account there skips nothing and submits nothing.
+        def other(rt_, binding):
+            raise account.Unidentified("现在登录的不是开始时认出的那个游戏账号", ["fresh hud"])
+        game = Game(["already_used"])
+        outcome, rt = play(game, ("A", "B"), record={"A": "already_used"}, confirm=other)
+        self.assertFalse(outcome)
+        self.assertEqual((game.touches, game.texts, rt.record), ([], [], {"A": "already_used"}))
+        self.assertIn("现在登录的不是开始时认出的那个游戏账号", rt.logs[-1])
+        self.assertNotIn("兑换码领取：暂无待兑换的新兑换码，跳过。", rt.logs)
+
+    def test_a_focus_change_after_the_confirmation_stops_before_the_next_record_or_submit(self):
+        # The modal shows no UID: a focus change (pause, resume, another account possibly) voids the confirmation;
+        # the result in hand is not recorded and no further code is submitted.
+        game = Game(["already_used", "already_used"])
+        outcome, rt = play(game, ("A", "B"),
+                           valid=lambda frame: frame is not CONFIRMED or game.touches.count("use") == 0)
+        self.assertFalse(outcome)
+        self.assertEqual((game.touches.count("use"), rt.record), (1, {}))
+        self.assertIn("确认游戏账号之后焦点变过（可能换了账号），兑换码「A」的结果没有记录", rt.logs[-1])
+
+    def test_only_the_classified_outcome_is_kept(self):
+        game = Game(["already_used", "cooldown"])
+        outcome, rt = play(game, ("A", "B"))
+        self.assertTrue(outcome, rt.logs)
+        data = json.loads(redeem.Record(rt.root, ACCOUNT).path.read_text(encoding="utf-8"))
+        self.assertEqual({code: sorted(entry) for code, entry in data["items"].items()},
+                         {"A": ["confirmed_at", "outcome"], "B": ["confirmed_at", "outcome"]})
 
     def test_the_record_kept_before_the_split_is_not_this_accounts(self):
         # The data directory's old un-keyed record belongs to an unknown account: its codes are tried again here,

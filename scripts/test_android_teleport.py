@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import numpy as np  # noqa: E402
 
-from host.android import actions, crystal_route, move, pages, teleport  # noqa: E402
+from host.android import account, actions, crystal_route, move, pages, teleport  # noqa: E402
 from host.android.actions import Screen  # noqa: E402
 from host.android.teleport import Card, Pose, Stop  # noqa: E402
 
@@ -851,6 +851,26 @@ class FakeMap:
 
 
 ACCOUNT = "0123456789abcdef"  # the account key host.android.account.identify gives in these runs
+CONFIRM_FRAME = SimpleNamespace(index=-1)  # the fresh HUD capture an account confirmation is made on
+
+
+class Accounts:
+    """Stand-in for host.android.account in the route's tests: ``identify(rt)`` (default: a Binding of ACCOUNT) and
+    ``confirm(rt, binding)`` (default: the same account on CONFIRM_FRAME), the confirmations counted."""
+    Unidentified = account.Unidentified
+    refusal = staticmethod(account.refusal)
+
+    def __init__(self, identify=None, confirm=None):
+        self._identify = identify or (lambda rt: account.Binding(ACCOUNT, SimpleNamespace(index=-2)))
+        self._confirm = confirm or (lambda rt, binding: account.Binding(binding.key, CONFIRM_FRAME))
+        self.confirms = 0
+
+    def identify(self, rt):
+        return self._identify(rt)
+
+    def confirm(self, rt, binding):
+        self.confirms += 1
+        return self._confirm(rt, binding)
 SAFE_NOON = __import__("datetime").datetime(2026, 11, 26, 4, 0, tzinfo=__import__("datetime").timezone.utc)  # 12:00 UTC+8
 
 
@@ -861,7 +881,7 @@ def route_run(cards, *, outcome="arrived", ring=True, record=None, leave=True, u
     rt.log = lambda text, detail=False: rt.logs.append(text)
     record = record or crystal_route.BellRecord(tempfile.mkdtemp(), ACCOUNT)
     run = crystal_route.Run(rt, reader=READER, world=FakeWorld(), io=HudIo(), record=record,
-                            identify=identify or (lambda rt_: ACCOUNT))
+                            accounts=Accounts(identify=identify))
     run.map = FakeMap(cards, leave=leave)
     rings, walked = [], []
     times = iter(clock) if clock is not None else None
@@ -929,24 +949,22 @@ class RouteTests(unittest.TestCase):
         self.assertIn(crystal_route.MANUAL, rt.logs[-1])
         self.assertEqual(rt.diagnostic.call_args.kwargs["image"], "card frame")
 
-    def test_an_account_that_cannot_be_told_never_presses(self):
-        # Per-account bell records: the account from the HUD at the start; when it cannot be told a not-rung card
-        # stops before any teleport or press (whose record applies is unknown); a rung card needs no record.
-        from host.android import account
-
-        def unidentified(rt_):
-            raise account.Unidentified("左下角没有读到 UID", ["hud frame"])
-        record = crystal_route.BellRecord(tempfile.mkdtemp(), ACCOUNT)
-        result, rt, calls, rings = route_run([Card("not_rung")], identify=unidentified, record=record)
-        self.assertFalse(result)
-        self.assertEqual((rings, calls), ([], ["open", "region", "card"]))
-        self.assertIn("认不出现在登录的是哪个游戏账号（左下角没有读到 UID），不知道是哪个账号的按铃记录，没有按铃", rt.logs[-1])
-        self.assertEqual(rt.diagnostic.call_args.kwargs["image"], "hud frame")
-        self.assertFalse(record.path.exists())
-        result, rt, _calls, rings = route_run([RUNG4, RUNG9], identify=unidentified)
-        self.assertTrue(result, rt.logs)
-        self.assertEqual(rings, [])
-        self.assertTrue(any("认不出现在登录的是哪个游戏账号" in line for line in rt.logs))
+    def test_an_account_that_cannot_be_told_stops_before_anything(self):
+        # Account review round 1, finding 1: an unreadable or disagreeing UID stops the run before the map opens,
+        # whatever the card would say: no transport, no press, no record.
+        for reason in ("左下角没有读到 UID", "两张截图上读到的 UID 不一样"):
+            def unidentified(rt_, reason=reason):
+                raise account.Unidentified(reason, ["hud frame"])
+            for cards in ([Card("not_rung")], [RUNG4, RUNG9]):
+                with self.subTest(reason=reason, card=cards[0].kind):
+                    record = crystal_route.BellRecord(tempfile.mkdtemp(), ACCOUNT)
+                    result, rt, calls, rings = route_run(cards, identify=unidentified, record=record)
+                    self.assertFalse(result)
+                    self.assertEqual((calls, rings), ([], []))  # 0 map opens, 0 transports, 0 presses
+                    self.assertIn(f"认不出现在登录的是哪个游戏账号（{reason}），不知道是哪个账号的按铃记录，没有开始",
+                                  rt.logs[-1])
+                    self.assertEqual(rt.diagnostic.call_args.kwargs["image"], "hud frame")
+                    self.assertFalse(record.path.exists())
         result, rt, calls, rings = route_run([Card("not_rung")], identify=lambda rt_: None)  # stopped: nothing more
         self.assertEqual((result, calls, rings), (False, [], []))
 
@@ -1083,7 +1101,8 @@ class BellTests(unittest.TestCase):
     and kept unless the device input count shows nothing went down (review round 2, findings 1 and 2)."""
 
     def ring(self, kinds=(), regions=None, *, at_hub=True, bell_box=(593, 590, 47, 47), outcomes=(True,),
-             record=None, clock=None, day=DAY, prompts=None, name_only=None, valid=None, fragments=None):
+             record=None, clock=None, day=DAY, prompts=None, name_only=None, valid=None, fragments=None,
+             confirm=None):
         from host import UnsupportedInput
         from host.android import gesture
         rt = SimpleNamespace(stopped=False, logs=[], pause=Mock(return_value=True), TOUCH_KEY_ATTEMPTS=3,
@@ -1096,8 +1115,10 @@ class BellTests(unittest.TestCase):
         reader.fix.return_value = SimpleNamespace(x=HUB["x"] + (0 if at_hub else 30), y=HUB["y"], reliable=True)
         record = record or crystal_route.BellRecord(tempfile.mkdtemp(), ACCOUNT)
         io = HudIo(kinds=kinds, regions=regions, prompts=prompts, name_only=name_only, fragments=fragments)
-        run = crystal_route.Run(rt, reader=reader, world=FakeWorld(), io=io, record=record)
-        run.account_key = ACCOUNT  # told at the start of run(), which these tests skip
+        accounts = Accounts(confirm=confirm)
+        run = crystal_route.Run(rt, reader=reader, world=FakeWorld(), io=io, record=record, accounts=accounts)
+        run.binding = account.Binding(ACCOUNT, SimpleNamespace(index=-2))  # told at the start of run(), skipped here
+        self.accounts = accounts
         calls, states, outcomes = [], [], list(outcomes)
         device = SimpleNamespace(inputs=0)
         times = iter(clock) if clock is not None else None
@@ -1293,17 +1314,40 @@ class BellTests(unittest.TestCase):
             self.assertIsNone(record.attempt(DAY))
 
     def test_without_a_told_account_ring_never_presses(self):
-        run = crystal_route.Run(SimpleNamespace(stopped=False), reader=READER, world=FakeWorld(), io=HudIo(),
-                                record=crystal_route.BellRecord(tempfile.mkdtemp(), ACCOUNT))
+        rt = SimpleNamespace(stopped=False, TOUCH_KEY_ATTEMPTS=3, _frame_still_valid=Mock(return_value=True))
+        run = crystal_route.Run(rt, reader=READER, world=FakeWorld(), io=HudIo(),
+                                record=crystal_route.BellRecord(tempfile.mkdtemp(), ACCOUNT), accounts=Accounts())
         from host.android import gesture
         with patch.object(gesture, "bell_step") as press, \
                 patch.object(crystal_route, "now_utc", return_value=SAFE_NOON):
-            with self.assertRaises(Stop):
-                run.ring(HUB, DAY)
-            run.account_key = "fedcba9876543210"  # not the record's account
+            with self.assertRaises(crystal_route.RecordError):  # no binding at all
+                run.record.attempt(DAY)
+            run.binding = account.Binding("fedcba9876543210", CONFIRM_FRAME)  # not the record's account
             with self.assertRaises(crystal_route.RecordError):
                 run.ring(HUB, DAY)
         press.assert_not_called()
+
+    def test_the_account_is_confirmed_on_a_fresh_hud_before_each_reservation(self):
+        # Account review round 1, finding 2: the key from the start is confirmed again right before its record
+        # decides; another account, an unreadable UID or a focus change since the confirmation never presses.
+        result, calls, error, states, final = self.ring()
+        self.assertEqual((result, len(calls), self.accounts.confirms), (True, 1, 1))
+
+        def other(rt_, binding):
+            raise account.Unidentified("现在登录的不是开始时认出的那个游戏账号", ["fresh hud"])
+        result, calls, error, states, final = self.ring(confirm=other)
+        self.assertIsInstance(error, Stop)
+        self.assertIn("现在登录的不是开始时认出的那个游戏账号", str(error))
+        self.assertEqual((calls, final), ([], None))
+        result, calls, error, states, final = self.ring(confirm=lambda rt_, binding: None)  # stopped
+        self.assertEqual((result, calls, final), (False, [], None))
+        # a focus change after the confirmation (its frame no longer current): confirmed again, then pressed
+        stale = SimpleNamespace(index=-3)
+        frames = iter([stale, CONFIRM_FRAME])
+        result, calls, error, states, final = self.ring(
+            confirm=lambda rt_, binding: account.Binding(binding.key, next(frames)),
+            valid=lambda frame: frame is not stale)
+        self.assertEqual((result, len(calls), self.accounts.confirms), (True, 1, 2))
 
     def test_a_broken_record_blocks_the_press(self):
         record = crystal_route.BellRecord(tempfile.mkdtemp(), ACCOUNT)

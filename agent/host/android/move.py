@@ -772,9 +772,9 @@ LABEL_EDGE_PX = 40  # box edges vs. that span (saved rows: within -33..+30 px)
 MIN_LABELS = 7  # labels the full-frame pass must read in place (saved frames: 7-9 of 9, 466 of 492 all 9)
 
 
-def label_run(text: str, box) -> int:
-    """How many labels ``text`` is when it is exactly a contiguous run of the fixed labels (spaces aside) whose box
-    lies where those labels are; 0 otherwise (a misread label or a new word is no part of the label row)."""
+def label_span(text: str, box):
+    """``(i, j)``: the indices into LABEL_CENTRES of the first and last label when ``text`` is exactly a contiguous
+    run of the fixed labels (spaces aside) whose box lies where those labels are; None otherwise."""
     row = re.sub(r"\s", "", text)
     for i in range(len(LABEL_CENTRES)):
         for j in range(i, len(LABEL_CENTRES)):
@@ -782,17 +782,24 @@ def label_run(text: str, box) -> int:
                 first, last = LABEL_CENTRES[i], LABEL_CENTRES[j]
                 lo, hi = first[1] - len(first[0]) * LABEL_HALF_CHAR_PX, last[1] + len(last[0]) * LABEL_HALF_CHAR_PX
                 if abs(box[0] - lo) <= LABEL_EDGE_PX and abs(box[0] + box[2] - hi) <= LABEL_EDGE_PX:
-                    return j - i + 1
-    return 0
+                    return i, j
+    return None
+
+
+def label_run(text: str, box) -> int:
+    """How many labels ``text`` is (label_span); 0 otherwise (a misread label or a new word is no part of the label
+    row)."""
+    span = label_span(text, box)
+    return 0 if span is None else span[1] - span[0] + 1
 
 
 # The other HUD text regions' exact observed forms (every form read there on the saved frames, threshold 0.5):
 # 心誓5 / 心誓5×1 and its hearts (❤ ♡ や ゃ ～, or 3s with an occasional 0 or 8: 33333×1, 心誓530333, 38333);
 # the UID by its shape, for any account (host.android.account.UID_PREFIX: 「UID 」, 「UID-」, misread 「LID」 or 「D」,
 # then its digits, also cut short to as few as 3: the walker only judges the layout here, while the account reader
-# needs all UID_DIGITS) and the ping (46ms, 46m, 45mm).
+# needs all UID_DIGITS) and the ping (46ms, 46m, 45mm: PING_FORM, accepted only at PING_PLACE).
 HEARTS_FORM = re.compile(r"(?:心?誓5?)?[308❤♡やゃ～]*(?:[×x]1?)?")
-UID_FORM = re.compile(rf"{UID_PREFIX}\d{{3,{UID_DIGITS[1]}}}|\d{{1,4}}m{{1,2}}s?")
+UID_FORM = re.compile(rf"{UID_PREFIX}\d{{3,{UID_DIGITS[1]}}}")
 TRACKER_DISTANCE_FORM = re.compile(r"◆?\d{1,5}米?")  # 1049米, ◆1048米, 1046 (without 米)
 
 
@@ -1126,6 +1133,7 @@ class Rows:
     raw: tuple = ()  # every OCR row with a box, at any score, before any filtering: (text, box)
     column: tuple = ()  # [(text, box)] counted rows centred in PROMPT_COLUMN (judged by prompt_verdict)
     fragments: tuple = ()  # ((x0, y0, x1, y1), text) of the rows the noise filters dropped, adjacent ones merged
+    read_labels: frozenset = frozenset()  # indices into LABEL_CENTRES of the labels positively read in place
 
 
 def read_rows(result) -> Rows:
@@ -1134,6 +1142,7 @@ def read_rows(result) -> Rows:
     not in its exact form; Walker gives such a frame one recapture when nothing else differs from the first frame)."""
     from host.android import actions, pages
     outside, tracker, blocks, labels, covered, misread, raw, column, dropped = [], [], [], 0, 0, 0, [], [], []
+    read_labels = set()
     if result is not None and actions._hit(result):
         for row in pages._rows(result):
             if row is None:
@@ -1173,17 +1182,20 @@ def read_rows(result) -> Rows:
             ping = region == "uid" and bool(PING_FORM.fullmatch(text.strip())) and box[0] >= PING_PLACE[0] \
                 and box[0] + box[2] <= PING_PLACE[1] and PING_PLACE[2] <= cy <= PING_PLACE[3]
             blocks.append((region, box[0], box[0] + box[2], cy, ping))
-            if region == "labels" and label_run(text, box):
-                labels += label_run(text, box)
+            span = label_span(text, box) if region == "labels" else None
+            if span is not None:
+                labels += span[1] - span[0] + 1
+                read_labels.update(range(span[0], span[1] + 1))
             elif (region == "hearts" and HEARTS_FORM.fullmatch(squashed)) or (
-                    region == "uid" and UID_FORM.fullmatch(text.strip())):
+                    region == "uid" and (UID_FORM.fullmatch(text.strip()) or ping)):  # a ping only at its place
                 pass
             else:
                 misread += 1
                 if region == "labels":  # the labels whose places the misread block covers
                     covered += sum(1 for _label, x in LABEL_CENTRES if box[0] <= x <= box[0] + box[2])
     return Rows(outside, tuple(entry for _y, _x, entry in sorted(tracker)), labels + covered,
-                tuple(sorted(blocks)), misread, tuple(raw), tuple(column), merge_fragments(dropped))
+                tuple(sorted(blocks)), misread, tuple(raw), tuple(column), merge_fragments(dropped),
+                frozenset(read_labels))
 
 
 # A quest tracker without a distance row. On 星海 the tracked story quest lies in another map and the tracker shows

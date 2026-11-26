@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from collections import deque
 from threading import Event, Lock
+import sys
 import traceback
 from performance import action_profile
 from game_view import ALLOWED_FRAME_SIZES, is_clipped_game_frame
@@ -59,6 +60,16 @@ def local_registration(resource):
         _LOCAL_REGISTRATION.reset(token)
 
 
+def _print_exc():
+    """traceback.print_exc(), with UID-like text masked on the Android target (message_log.redact); the desktop calls
+    traceback.print_exc() itself, as before."""
+    if game_backend() != "android":
+        traceback.print_exc()
+        return
+    from message_log import redact
+    sys.stderr.write(redact(traceback.format_exc()))
+
+
 def _write_start_notice(context, task_id, entry):
     """Before the task's first action: macOS experimental tasks say so in their own instance's log, so a
     scheduled run or a background instance shows it as well. Never raises into the action."""
@@ -74,7 +85,7 @@ def _write_start_notice(context, task_id, entry):
         if notice:
             context.run_task("MaaNikki_Daily_Message", message_override({"Node.Action.Starting": notice}))
     except Exception:
-        traceback.print_exc()
+        _print_exc()
 
 
 def _android_stopped(error=None):
@@ -104,7 +115,7 @@ def agent_action(name, *, stop_on_failure=False):
                     context.run_task("MaaNikki_Daily_Message", message_override({
                         "Node.Action.Starting": f"{entry} 不在当前系统开放：{task_refusal_reason(entry)}"}))
                 except Exception:
-                    traceback.print_exc()
+                    _print_exc()
                 return False
             if detail is not None:
                 _write_start_notice(context, task_id, entry)
@@ -146,7 +157,7 @@ def agent_action(name, *, stop_on_failure=False):
                     # its undefined return value can otherwise look successful.
                     if profile is not None:
                         profile.succeeded = False
-                    traceback.print_exc()
+                    _print_exc()
                     if _android_stopped(error):
                         return False  # Android: published during the action's own handling (never an unconfirmed touch)
                     try:
@@ -162,7 +173,7 @@ def agent_action(name, *, stop_on_failure=False):
                         try:
                             context.tasker.post_stop()
                         except Exception:
-                            traceback.print_exc()
+                            _print_exc()
 
         cls.run = guarded
         _ACTION_TYPES[name] = cls
@@ -235,7 +246,7 @@ def agent_recognition(name):
             except Exception:
                 # Recognition callbacks must also return a defined result if
                 # the window/Agent channel closes during a foreground wait.
-                traceback.print_exc()
+                _print_exc()
                 return None
 
         cls.analyze = guarded

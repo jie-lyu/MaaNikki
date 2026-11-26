@@ -15,7 +15,6 @@
     "ReadTests.test_anything_else_in_the_corner_refuses",
     "ReadTests.test_no_uid_read",
     "ReadTests.test_only_on_a_positively_recognised_hud",
-    "ReadTests.test_the_slot_is_the_walkers_and_lies_under_the_diagnostic_mask",
     "IdentifyTests.test_two_agreeing_frames_give_the_key",
     "IdentifyTests.test_disagreeing_frames_refuse",
     "IdentifyTests.test_an_unreadable_frame_refuses_without_a_second_look",
@@ -29,9 +28,16 @@
     "RecordTests.test_bell_records_are_separate_per_account",
     "RecordTests.test_the_old_unkeyed_records_are_left_unread",
     "RecordTests.test_a_record_from_another_accounts_folder_is_refused",
-    "ScrubTests.test_uid_like_text_is_masked_and_other_numbers_kept",
-    "ScrubTests.test_an_android_failure_scene_keeps_no_uid",
-    "FramesToolTests.test_the_summary_names_accounts_without_their_uid_or_key"
+    "FramesToolTests.test_the_summary_names_accounts_without_their_uid_or_key",
+    "ReadTests.test_the_uid_box_is_the_footers_and_lies_under_the_diagnostic_mask",
+    "ReadTests.test_only_labels_read_as_themselves_count",
+    "ConfirmTests.test_the_same_account_renews_the_binding_on_the_fresh_frame",
+    "ConfirmTests.test_another_account_an_unreadable_uid_or_a_focus_change_refuses",
+    "ConfirmTests.test_a_binding_is_void_after_a_focus_change",
+    "ScrubTests.test_uid_like_text_numbers_and_keys_are_masked_and_other_numbers_kept",
+    "ScrubTests.test_android_writes_and_shows_no_uid",
+    "ScrubTests.test_the_desktop_writes_what_it_is_given",
+    "ExceptionOutputTests.test_registration_tracebacks_are_masked_on_android_only"
    ],
    "known_failures": [],
    "skips": []
@@ -606,7 +612,10 @@
     "TextInputTests.test_nothing_is_sent_or_logged_when_input_is_halted_or_the_run_stopped",
     "TextInputTests.test_runtime_input_text_still_refuses_on_android",
     "TextInputTests.test_the_input_is_decided_and_confirmed_on_two_frames_that_accept_takes",
-    "TextInputTests.test_the_intent_is_logged_before_and_the_outcome_after"
+    "TextInputTests.test_the_intent_is_logged_before_and_the_outcome_after",
+    "FlowTests.test_another_account_after_the_collection_is_never_given_the_first_ones_record",
+    "FlowTests.test_a_focus_change_after_the_confirmation_stops_before_the_next_record_or_submit",
+    "FlowTests.test_only_the_classified_outcome_is_kept"
    ],
    "known_failures": [],
    "skips": []
@@ -729,7 +738,6 @@
     "RouteTests.test_a_stop_published_during_the_walk_reports_nothing",
     "RouteTests.test_after_a_walk_that_stopped_on_another_screen_nothing_more_is_sent",
     "RouteTests.test_already_rung_skips_the_hub_and_the_bell",
-    "RouteTests.test_an_account_that_cannot_be_told_never_presses",
     "RouteTests.test_an_attempt_recorded_today_is_never_pressed_again",
     "RouteTests.test_an_unreadable_card_stops_before_any_teleport_or_bell",
     "RouteTests.test_another_accounts_attempt_does_not_block_this_one",
@@ -770,7 +778,9 @@
     "TeleportFlowTests.test_the_minimap_tap_follows_the_walkers_startup_and_confirmation_rules",
     "TeleportFlowTests.test_the_teleport_tap_is_never_repeated",
     "TeleportFlowTests.test_the_two_passes_must_agree_on_where_teleport_is",
-    "TeleportFlowTests.test_the_whole_restart_reaches_the_card"
+    "TeleportFlowTests.test_the_whole_restart_reaches_the_card",
+    "RouteTests.test_an_account_that_cannot_be_told_stops_before_anything",
+    "BellTests.test_the_account_is_confirmed_on_a_fresh_hud_before_each_reservation"
    ],
    "known_failures": [],
    "skips": []
@@ -1638,12 +1648,18 @@
   },
   "test_uid_literals.py": {
    "tests": [
-    "RuleTests.test_the_hud_form_with_any_number_but_the_fake_one",
-    "RuleTests.test_a_known_uid_anywhere_by_its_salted_hash",
-    "RuleTests.test_the_known_list_holds_salted_hashes_only",
-    "RuleTests.test_findings_never_print_the_digits",
     "TreeTests.test_no_tracked_file_holds_a_uid",
-    "TreeTests.test_the_latest_commit_message_holds_no_uid"
+    "RuleTests.test_the_fake_uid_and_shapes_pass",
+    "RuleTests.test_the_hud_form_with_any_other_number_in_any_spacing",
+    "RuleTests.test_the_label_is_a_word_of_its_own",
+    "RuleTests.test_line_numbers_point_at_the_label",
+    "RuleTests.test_denylisted_numbers_anywhere",
+    "RuleTests.test_the_repository_holds_no_real_uid_list",
+    "RuleTests.test_the_denylist_file",
+    "FileTests.test_encodings",
+    "FileTests.test_paths_and_output_never_show_digits",
+    "FileTests.test_commit_messages",
+    "TreeTests.test_no_commit_message_in_the_push_range_holds_a_uid"
    ],
    "known_failures": [],
    "skips": []

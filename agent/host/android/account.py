@@ -6,17 +6,22 @@ raw UID never leaves this module: it is not returned, stored, logged or put in a
 fixed text. Frames handed to diagnostics are masked there (diagnostics.diagnostic_image, uid_roi covers the corner).
 
 Reading (identify): two separate fresh frames, each a positively recognised HUD (host.android.actions.read_screen "hud",
-and the full-frame OCR pass itself reading at least move.MIN_LABELS shortcut labels in place), on each the full-frame
-OCR (move.SCREEN_TEXT, the walker's own pass) read in move's UID region; the rows there, with move's score and noise
-filters, must be exactly the UID text in its slot (move.HUD_SLOTS, BLOCK_PX) and optionally the ping at its place; the
-UID text must be exactly a prefix form seen on the device (UID_PREFIX: 「UID」, misread 「LID」 or 「D」; then a space, a
-hyphen or nothing) and UID_DIGITS digits; both frames must give the same digits. Anything else (not the HUD, OCR not run, a
-cut-short UID or one with a letter misread among the digits, two UIDs, any other text in the corner, a focus change, the
-two reads disagreeing) raises Unidentified, and the task refuses before any record-dependent decision (it neither skips
-nor acts on another account's record). On the saved device frames the corner reads 「UID 」 and nine digits (box
-~[0,700,90,18], text rows y 703-714); the length range is that one observation. Over the 499 saved HUD frames
-(scripts/android/account_frames.py) 483 read a UID, all the same account; 16 refused, 13 of them cut short (8, 6 or
-3 digits at OCR score 0.95-1.0) or misread, which a looser length would have turned into another account's key.
+and the full-frame OCR pass itself positively reading at least move.MIN_LABELS distinct shortcut labels in place: a
+label merely covered by a misread block does not count), on each the full-frame OCR (move.SCREEN_TEXT, the walker's own
+pass) read in move's UID region; the rows there, with move's score and noise filters, must be exactly the UID text with
+its box where the UID row lies on the device frames (UID_BOX_*: x, y, height and right edge) and optionally the ping at
+its place; the UID text must be exactly a prefix form seen on the device (UID_PREFIX: 「UID」, misread 「LID」 or 「D」; then
+a space, a hyphen or nothing) and UID_DIGITS digits; both frames must give the same digits, and both frames' focus marks
+must still be current after the last OCR. Anything else (not the HUD, OCR not run, a cut-short UID or one with a letter
+misread among the digits, two UIDs, any other text in the corner, a focus change, the two reads disagreeing) raises
+Unidentified, and the task refuses before any record-dependent decision (it neither skips nor acts on another account's
+record). The result is a Binding (the key and the frame it was told on), void after any focus change; right before the
+record decides something the task confirms the account on one fresh HUD capture (confirm: one read equal to the key). On
+the saved device frames the corner reads 「UID 」 and nine digits (box ~[0,700,90,18], text rows y 703-714); the length
+range is that one observation. Over the 499 saved HUD frames (scripts/android/account_frames.py) 483 read a UID, all the
+same account; 16 refused, 13 of them cut short (8, 6 or 3 digits at OCR score 0.95-1.0) or misread, which a looser
+length would have turned into another account's key. A longer UID cut short to exactly UID_DIGITS on every read would
+still pass: the second account's UID length is not yet seen on device frames.
 
 Records kept before the per-account split (config/android/redeem_codes.json, config/android/bell_attempts.json, one
 per data directory) belong to an unknown account: they are left in place and never read (docs/android-support-plan.md).
@@ -32,7 +37,14 @@ import re
 # digits. No UID itself is written anywhere in the code or the tests (they use made-up digits).
 UID_PREFIX = r"(?:UID|LID|D)[\s\-]?"
 UID_DIGITS = (9, 9)  # digits of the UIDs seen on the device (one account so far: nine)
-UID_TEXT = re.compile(UID_PREFIX + r"(\d+)")
+UID_TEXT = re.compile(UID_PREFIX + r"([0-9]+)")
+# Where the UID row's box lies on the saved device frames (full reads: x0 0-1, y0 698-701, height 15-19, right edge
+# 86-89; with the cut-short and misread reads: x0 0-2, y0 700-702, height 14-18, right edge 79-90), with margin. A row
+# outside these bounds is no UID read, whatever it says (e.g. a D-prefixed number starting further right).
+UID_BOX_X0 = (0, 4)
+UID_BOX_Y0 = (694, 706)
+UID_BOX_H = (12, 22)
+UID_BOX_X1 = (78, 96)
 READS = 2  # separate frames that must agree
 READ_GAP_S = 0.3  # between the two captures (no input in between)
 KEY_SALT = b"MaaNikki/android-account/v1\x00"
@@ -73,14 +85,20 @@ def _uid_text(text):
     return match.group(1)
 
 
+def in_footer(box) -> bool:
+    """Whether an OCR box (x, y, w, h) lies where the UID row lies on the device frames (UID_BOX_*)."""
+    x, y, w, h = box
+    return (UID_BOX_X0[0] <= x <= UID_BOX_X0[1] and UID_BOX_Y0[0] <= y <= UID_BOX_Y0[1]
+            and UID_BOX_H[0] <= h <= UID_BOX_H[1] and UID_BOX_X1[0] <= x + w <= UID_BOX_X1[1])
+
+
 def uid_on(result):
     """``(digits, reason)`` from one full-frame OCR result (move.SCREEN_TEXT): digits when the UID region holds exactly
     the UID text in its slot (and at most the ping at its place), reason "" then; else (None, a fixed reason)."""
     from host.android import actions, pages
-    from host.android.move import (ASCII_SCORE, BLOCK_PX, HUD_REGIONS, HUD_SLOTS, PING_FORM, PING_PLACE, TEXT_SCORE,
-                                   _cjk, _inside, counts_as_text)
+    from host.android.move import (ASCII_SCORE, HUD_REGIONS, PING_FORM, PING_PLACE, TEXT_SCORE, _cjk, _inside,
+                                   counts_as_text)
     region = dict(HUD_REGIONS)["uid"]
-    _name, sx0, sx1, scy, _ping = next(slot for slot in HUD_SLOTS if slot[0] == "uid")
     found, other = set(), False
     if result is not None and actions._hit(result):
         for row in pages._rows(result):
@@ -98,7 +116,7 @@ def uid_on(result):
                     and PING_PLACE[2] <= cy <= PING_PLACE[3]:
                 continue
             digits = _uid_text(text)
-            if digits is None or not (x0 < sx1 and sx0 < x1 and abs(cy - scy) <= BLOCK_PX):
+            if digits is None or not in_footer(box):
                 other = True
                 continue
             found.add(digits)
@@ -112,23 +130,37 @@ def uid_on(result):
 
 
 def read_uid(screen, recognize):
-    """``(digits, reason)`` on one frame: ``screen`` (actions.read_screen) the HUD, the full-frame OCR pass reading
-    the shortcut labels in place (move.read_rows, MIN_LABELS) and uid_on its UID; else (None, a fixed reason)."""
+    """``(digits, reason)`` on one frame: ``screen`` (actions.read_screen) the HUD, the full-frame OCR pass itself
+    positively reading at least MIN_LABELS distinct shortcut labels in place (move.read_rows' read_labels: a label
+    merely covered by a misread block does not count) and uid_on its UID; else (None, a fixed reason)."""
     from host.android.move import MIN_LABELS, SCREEN_TEXT, read_rows
     if screen is None or screen.kind != "hud":
         return None, "画面不是大世界"
     result = recognize(SCREEN_TEXT)
     if result is None:
         return None, "全画面文字识别没能完成"
-    if read_rows(result).labels < MIN_LABELS:
+    if len(read_rows(result).read_labels) < MIN_LABELS:
         return None, "全画面文字里没有在原位读到大世界的快捷栏"
     return uid_on(result)
 
 
-def identify(rt) -> str | None:
-    """The account key from READS separate fresh frames (pages.screen_now; nothing is sent) that each read the same
-    UID (read_uid). None when the run stopped meanwhile; Unidentified (with the frames) when the account cannot be
-    told."""
+class Binding:
+    """The account told on ``frame`` (its key; never the UID). Valid only while no focus change happened since that
+    frame (rt._frame_still_valid: the focus generation and the device epoch it was captured under): a pause, a resume
+    or a lost device may have let another account in, so the binding is then void and the account must be confirmed
+    again on a fresh HUD (confirm) before its record decides anything."""
+
+    def __init__(self, key, frame):
+        self.key, self.frame = key, frame
+
+    def valid(self, rt) -> bool:
+        return bool(rt._frame_still_valid(self.frame))
+
+
+def identify(rt):
+    """A Binding from READS separate fresh frames (pages.screen_now; nothing is sent) that each read the same UID
+    (read_uid), every frame's focus mark still current after the last OCR. None when the run stopped meanwhile;
+    Unidentified (with the frames) when the account cannot be told."""
     from host.android import pages
     seen, frames = None, []
     for index in range(READS):
@@ -137,33 +169,68 @@ def identify(rt) -> str | None:
         screen, frame, recognize = pages.screen_now(rt)
         if frame is None:
             return None
-        if not rt._frame_still_valid(frame):
-            raise Unidentified("读游戏账号时焦点变了", [frame])
         if any(frame is earlier for earlier in frames):
             raise Unidentified("读游戏账号的两张截图不是分开截的", [frame])
         frames.append(frame)
+        if not rt._frame_still_valid(frame):
+            raise Unidentified("读游戏账号时焦点变了", frames)
         digits, reason = read_uid(screen, recognize)
         if digits is None:
             raise Unidentified(reason, [frame])
         if seen is not None and digits != seen:
             raise Unidentified("两张截图上读到的 UID 不一样", frames)
         seen = digits
-    return account_key(seen)
+    if not all(rt._frame_still_valid(frame) for frame in frames):  # a focus change during the OCR
+        raise Unidentified("读游戏账号时焦点变了", frames)
+    return Binding(account_key(seen), frames[-1])
 
 
-# Text that may be a UID, masked in what an Android failure scene records (scrub): a UID label with three or more
-# digits (a cut-short read included), or a bare run of 8-10 digits (the UID read apart from its label).
-UID_LIKE = re.compile(UID_PREFIX + r"\d{3,}|(?<!\d)\d{8,10}(?!\d)")
+def confirm_frame(rt, binding, frame) -> Binding:
+    """A Binding renewed on ``frame`` (a capture of the HUD, focus mark checked after the OCR) when it reads the UID
+    of ``binding`` once; Unidentified otherwise ("another account" included)."""
+    from host.android import actions
+    recognize = rt._recognizer_on(frame)
+    digits, reason = read_uid(actions.read_screen(recognize), recognize)
+    if not rt._frame_still_valid(frame):
+        raise Unidentified("确认游戏账号时焦点变了", [frame])
+    if digits is None:
+        raise Unidentified(reason, [frame])
+    if account_key(digits) != binding.key:
+        raise Unidentified("现在登录的不是开始时认出的那个游戏账号", [frame])
+    return Binding(binding.key, frame)
+
+
+def confirm(rt, binding):
+    """The account of ``binding`` confirmed on one fresh HUD capture right before its record decides something
+    (confirm_frame). None when the run stopped."""
+    frame = rt._fresh_device_frame()
+    if frame is None:
+        return None
+    return confirm_frame(rt, binding, frame)
+
+
+# Text that may be a UID, masked in what Android writes or shows (scrub): a UID label (UID_PREFIX, or UID / LID with
+# colons and spaces) with three or more digits (a cut-short read included), or a bare run of 8-10 digits (the UID read
+# apart from its label) that is not part of a file stem, a time stamp, a hex string or a word (no letter, digit, - / _
+# . : right next to it).
+UID_LIKE = re.compile(r"(?:UID|LID)[\s:\-]*[0-9]{3,}|" + UID_PREFIX + r"[0-9]{3,}"
+                      r"|(?<![0-9A-Za-z\-/_.:])[0-9]{8,10}(?![0-9A-Za-z\-/_.:])")
 UID_MASK = "UID ***"
 
 
 def scrub(value):
-    """``value`` (text, or lists, tuples and dicts of them, as a failure scene's reason, details and observations)
-    with every UID-like text replaced by UID_MASK; other values unchanged."""
+    """``value`` (text, numbers, or lists, tuples and dicts of them, keys included) with every UID-like text
+    replaced by UID_MASK, and every integer of 8-10 digits by UID_MASK too; other values unchanged."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return UID_MASK if 8 <= len(str(abs(value))) <= 10 else value
     if isinstance(value, str):
-        return UID_LIKE.sub(UID_MASK, value)
+        import unicodedata
+        normal = unicodedata.normalize("NFKC", value)  # full-width digits read as digits
+        return UID_LIKE.sub(UID_MASK, normal) if UID_LIKE.search(normal) else value
     if isinstance(value, dict):
-        return {key: scrub(item) for key, item in value.items()}
+        return {scrub(key): scrub(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return type(value)(scrub(item) for item in value)
     return value

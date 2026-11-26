@@ -717,14 +717,16 @@ class ReviewRound2Tests(unittest.TestCase):
                 self.assertIn(hud_with(*rows, *HUD_TEXT)[0], NO_MOVE)
 
     def test_1_only_the_observed_forms_of_the_huds_own_text_move(self):
-        observed = (("LID123456789", [0, 700, 90, 18]), ("D123456789", [0, 700, 90, 18]), ("46m", [80, 700, 30, 18]),
-                    ("45mm", [80, 700, 30, 18]), ("心誓5や♡", [520, 668, 120, 22]), ("33333×1", [600, 668, 80, 22]),
+        observed = (("LID123456789", [0, 700, 90, 18]), ("D123456789", [0, 700, 90, 18]), ("46m", [140, 702, 26, 12]),
+                    ("45mm", [137, 704, 31, 9]), ("心誓5や♡", [520, 668, 120, 22]), ("33333×1", [600, 668, 80, 22]),
                     ("2A1", [966, 535, 30, 20], 0.79), ("ittit", [1017, 95, 30, 14], 0.69))
         for row in observed:
             with self.subTest(row[0]):
                 self.assertEqual(hud_with(*HUD_TEXT, row), ("hud", ""))
         unobserved = (("活动人厅", [833, 62, 72, 22]), ("共吗", [708, 62, 38, 22]), ("23Gms", [80, 700, 40, 18]),
-                      ("UID1234567A9", [0, 700, 90, 18]), ("商城", [900, 62, 38, 22]),  # 商城 out of its place
+                      ("UID1234567A9", [0, 700, 90, 18]),
+                      ("46ms", [0, 700, 30, 18]),  # a ping off its place (account review round 1, finding 7)
+                      ("商城", [900, 62, 38, 22]),  # 商城 out of its place
                       ("126", [320, 40, 30, 16]), ("1234", [600, 668, 60, 22]))
         for row in unobserved:
             with self.subTest(row[0]):
